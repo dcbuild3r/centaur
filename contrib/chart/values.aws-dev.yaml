@@ -7,6 +7,9 @@ firewall:
   existingCaKeySecretName: centaur-firewall-ca-key
 
 postgres:
+  enabled: true
+
+migrations:
   enabled: false
 
 api:
