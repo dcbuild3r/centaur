@@ -104,6 +104,12 @@ onepasswordConnect:
 secrets:
   bootstrapSecretName: ""
 
+migrations:
+  enabled: true
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 300
+  resources: {}
+
 api:
   replicaCount: 1
   image:
@@ -249,6 +255,9 @@ ingress:
   className: ""
   annotations: {}
   host: centaur.local
+  service:
+    component: slackbot
+    port: 3001
   tls: []
 
 httpRoutes: []
