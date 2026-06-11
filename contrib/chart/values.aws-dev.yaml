@@ -1,0 +1,40 @@
+secretManager:
+  envPrefix: ""
+  existingSecretName: centaur-infra-env
+
+firewall:
+  existingCaSecretName: centaur-firewall-ca
+  existingCaKeySecretName: centaur-firewall-ca-key
+
+postgres:
+  enabled: false
+
+api:
+  executionWorkerEnabled: false
+  workflowWorkerEnabled: false
+  warmPoolEnabled: false
+  pluginWatcherEnabled: false
+  egressDiscovery:
+    enabled: false
+
+ironProxy:
+  secretSource: env
+
+tokenBroker:
+  enabled: false
+
+slackbot:
+  enabled: false
+
+ingress:
+  enabled: true
+  className: centaur
+  annotations:
+    alb.ingress.kubernetes.io/target-type: ip
+  host: centaur-dev.theworldnetwork.org
+  service:
+    component: api
+    port: 8000
+
+networkPolicy:
+  enabled: false

@@ -83,6 +83,15 @@
         "bootstrapSecretName": { "type": "string" }
       }
     },
+    "migrations": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "backoffLimit": { "type": "integer" },
+        "ttlSecondsAfterFinished": { "type": "integer" },
+        "resources": { "type": "object" }
+      }
+    },
     "api": {
       "type": "object",
       "properties": {
@@ -208,6 +217,23 @@
             "subPath": { "type": "string" }
           }
         }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "className": { "type": "string" },
+        "annotations": { "type": "object" },
+        "host": { "type": "string" },
+        "service": {
+          "type": "object",
+          "properties": {
+            "component": { "type": "string" },
+            "port": { "type": "integer" }
+          }
+        },
+        "tls": { "type": "array" }
       }
     },
     "runnerAccess": {
