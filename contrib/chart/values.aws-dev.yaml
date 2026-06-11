@@ -9,7 +9,7 @@ firewall:
 postgres:
   enabled: true
   persistence:
-    storageClassName: gp2
+    storageClassName: ebs-auto
 
 migrations:
   enabled: false
