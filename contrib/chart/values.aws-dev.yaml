@@ -8,6 +8,8 @@ firewall:
 
 postgres:
   enabled: true
+  persistence:
+    storageClassName: gp2
 
 migrations:
   enabled: false
