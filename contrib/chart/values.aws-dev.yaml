@@ -10,6 +10,7 @@ postgres:
   enabled: true
   persistence:
     storageClassName: ebs-auto
+    subPath: pgdata
 
 migrations:
   enabled: false
