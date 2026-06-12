@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: helm-chart-check
+        name: Helm chart lint and template
+        entry: contrib/scripts/helm-chart-check.sh
+        language: system
+        pass_filenames: false
+        files: ^(contrib/chart/|contrib/scripts/helm-chart-check\.sh$)
