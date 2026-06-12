@@ -36,6 +36,7 @@ ingress:
   enabled: true
   className: centaur
   annotations:
+    alb.ingress.kubernetes.io/healthcheck-path: /health/ready
     alb.ingress.kubernetes.io/target-type: ip
   host: centaur-dev.theworldnetwork.org
   service:
