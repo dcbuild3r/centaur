@@ -30,18 +30,18 @@ tokenBroker:
   enabled: false
 
 slackbot:
-  enabled: false
+  enabled: true
 
 ingress:
   enabled: true
   className: centaur
   annotations:
-    alb.ingress.kubernetes.io/healthcheck-path: /health/ready
+    alb.ingress.kubernetes.io/healthcheck-path: /health
     alb.ingress.kubernetes.io/target-type: ip
   host: centaur-dev.theworldnetwork.org
   service:
-    component: api
-    port: 8000
+    component: slackbot
+    port: 3001
 
 networkPolicy:
   enabled: false
