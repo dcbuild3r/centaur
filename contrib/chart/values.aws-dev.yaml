@@ -16,9 +16,9 @@ migrations:
   enabled: false
 
 api:
-  executionWorkerEnabled: false
-  workflowWorkerEnabled: false
-  warmPoolEnabled: false
+  executionWorkerEnabled: true
+  workflowWorkerEnabled: true
+  warmPoolEnabled: true
   pluginWatcherEnabled: false
   egressDiscovery:
     enabled: false
