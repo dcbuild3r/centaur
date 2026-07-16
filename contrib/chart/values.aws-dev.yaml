@@ -12,20 +12,9 @@ postgres:
     storageClassName: ebs-auto
     subPath: pgdata
 
-migrations:
-  enabled: false
-
-api:
-  executionWorkerEnabled: true
-  workflowWorkerEnabled: true
-  warmPoolEnabled: true
-  pluginWatcherEnabled: false
-  egressDiscovery:
-    enabled: false
-  extraEnv:
-    KUBERNETES_SANDBOX_READY_TIMEOUT_S: "240"
-    WARM_POOL_BACKEND_TIMEOUT: "240"
-    WARM_POOL_SIZE: "1"
+apiRs:
+  sandboxReadyTimeoutSecs: 240
+  sandboxWarmPoolSize: 1
 
 sandbox:
   image:
@@ -37,7 +26,7 @@ ironProxy:
 tokenBroker:
   enabled: false
 
-slackbot:
+slackbotv2:
   enabled: true
 
 ingress:
@@ -47,9 +36,5 @@ ingress:
     alb.ingress.kubernetes.io/healthcheck-path: /health
     alb.ingress.kubernetes.io/target-type: ip
   host: centaur-dev.theworldnetwork.org
-  service:
-    component: slackbot
-    port: 3001
-
 networkPolicy:
   enabled: false
