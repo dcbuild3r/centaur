@@ -57,7 +57,7 @@ spec:
         # primary plus the Solid Cache/Queue/Cable databases (see
         # config/database.yml). The image entrypoint's `db:prepare` loads schema
         # and migrates each one but does not create them, so they are provisioned
-        # here as the admin (ai_v2) DSN whose `tempo` superuser can create
+        # here as the admin (ai_v2) DSN whose configured superuser can create
         # databases. Idempotent: each CREATE is guarded by a pg_database check and
         # tolerates a lost race against a concurrent replica.
         - name: create-db

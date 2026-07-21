@@ -1,0 +1,87 @@
+{{- if and .Values.postgres.enabled .Values.postgres.roleMigration.enabled }}
+{{- $previousUsername := required "postgres.roleMigration.previousUsername is required when role migration is enabled" .Values.postgres.roleMigration.previousUsername }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "postgres-role-migration") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "api-rs") | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,pre-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded,hook-failed
+    "helm.sh/hook-weight": "-10"
+spec:
+  activeDeadlineSeconds: 300
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: OnFailure
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: migrate-role
+          image: {{ printf "%s:%s" .Values.postgres.image.repository .Values.postgres.image.tag | quote }}
+          imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              set +x
+              export PGHOST={{ include "centaur.componentName" (dict "root" . "component" "postgres") | quote }}
+              export PGDATABASE={{ .Values.postgres.auth.database | quote }}
+
+              until PGUSER="$PREVIOUS_USERNAME" psql -v ON_ERROR_STOP=1 -tAc 'SELECT 1' >/dev/null 2>&1 || \
+                    PGUSER="$TARGET_USERNAME" psql -v ON_ERROR_STOP=1 -tAc 'SELECT 1' >/dev/null 2>&1; do
+                echo "waiting for postgres..."
+                sleep 2
+              done
+
+              if PGUSER="$PREVIOUS_USERNAME" psql -v ON_ERROR_STOP=1 -tAc 'SELECT 1' >/dev/null 2>&1; then
+                export PGUSER="$PREVIOUS_USERNAME"
+              else
+                export PGUSER="$TARGET_USERNAME"
+              fi
+
+              psql -v ON_ERROR_STOP=1 \
+                --set=db_name="$PGDATABASE" \
+                --set=target_username="$TARGET_USERNAME" <<'SQL'
+              CREATE TEMP TABLE role_migration_secret (password text NOT NULL);
+              \copy role_migration_secret (password) FROM PROGRAM 'printenv TARGET_PASSWORD'
+              SELECT format(
+                CASE
+                  WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'target_username')
+                    THEN 'ALTER ROLE %I WITH LOGIN PASSWORD %L'
+                  ELSE 'CREATE ROLE %I LOGIN PASSWORD %L'
+                END,
+                :'target_username',
+                (SELECT password FROM role_migration_secret)
+              ) \gexec
+              GRANT ALL PRIVILEGES ON DATABASE :"db_name" TO :"target_username";
+              GRANT USAGE, CREATE ON SCHEMA public TO :"target_username";
+              GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO :"target_username";
+              GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO :"target_username";
+              ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO :"target_username";
+              ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO :"target_username";
+              SQL
+          env:
+            - name: PREVIOUS_USERNAME
+              value: {{ $previousUsername | quote }}
+            - name: TARGET_USERNAME
+              value: {{ .Values.postgres.auth.username | quote }}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "postgres.auth.existingSecretName is required when role migration is enabled" .Values.postgres.auth.existingSecretName | quote }}
+                  key: {{ required "postgres.auth.existingSecretKey is required when role migration is enabled" .Values.postgres.auth.existingSecretKey | quote }}
+            - name: TARGET_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.auth.existingSecretName | quote }}
+                  key: {{ .Values.postgres.auth.existingSecretKey | quote }}
+{{- end }}

@@ -379,6 +379,13 @@
     "postgres": {
       "type": "object",
       "properties": {
+        "roleMigration": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "previousUsername": { "type": "string" }
+          }
+        },
         "persistence": {
           "type": "object",
           "properties": {

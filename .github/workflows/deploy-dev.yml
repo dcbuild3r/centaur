@@ -110,6 +110,9 @@ jobs:
       - name: Configure kubeconfig
         run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER_NAME" --alias "$EKS_CLUSTER_NAME"
 
+      - name: Add Helm repositories
+        run: helm repo add 1password https://1password.github.io/connect-helm-charts
+
       - name: Build chart dependencies
         run: helm dependency build contrib/chart
 

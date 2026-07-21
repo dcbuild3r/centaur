@@ -8,6 +8,9 @@ firewall:
 
 postgres:
   enabled: true
+  roleMigration:
+    enabled: true
+    previousUsername: tempo
   persistence:
     storageClassName: ebs-auto
     subPath: pgdata

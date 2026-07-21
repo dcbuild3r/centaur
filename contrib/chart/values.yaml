@@ -612,10 +612,16 @@ postgres:
     - "max_connections=500"
   auth:
     database: ai_v2
-    username: tempo
-    password: tempo_dev_change_me
+    username: world
+    password: world_dev_change_me
     existingSecretName: centaur-infra-env
     existingSecretKey: POSTGRES_PASSWORD
+  roleMigration:
+    # Run an idempotent Helm hook that creates or updates auth.username using
+    # the credentials for a role from an earlier deployment. This is intended
+    # for persistent databases whose volume predates an auth.username change.
+    enabled: false
+    previousUsername: ""
   persistence:
     enabled: true
     size: 20Gi
