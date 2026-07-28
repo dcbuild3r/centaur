@@ -49,6 +49,7 @@ jobs:
           - image: centaur-agent
             dockerfile: services/sandbox/Dockerfile
             target: sandbox
+            cache-mode: min
           - image: centaur-iron-proxy
             dockerfile: services/iron-proxy/Dockerfile
             target: ""
@@ -67,6 +68,18 @@ jobs:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Free disk space for agent image
+        if: matrix.image == 'centaur-agent'
+        run: |
+          sudo rm -rf \
+            /opt/ghc \
+            /opt/hostedtoolcache \
+            /usr/local/.ghcup \
+            /usr/local/lib/android \
+            /usr/share/dotnet
+          docker system prune --all --force --volumes
+          df -h /
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
@@ -82,7 +95,7 @@ jobs:
           push: true
           tags: ${{ env.ECR_REGISTRY }}/${{ matrix.image }}:${{ github.sha }}
           cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=${{ matrix.cache-mode || 'max' }},scope=${{ matrix.image }}
 
   deploy:
     name: Helm deploy
