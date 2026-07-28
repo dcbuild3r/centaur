@@ -204,12 +204,37 @@ spec:
         - name: api-rs
           image: {{ printf "%s:%s" .Values.apiRs.image.repository .Values.apiRs.image.tag | quote }}
           imagePullPolicy: {{ .Values.apiRs.image.pullPolicy }}
+{{- if .Values.apiRs.databaseUsernameOverride }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              export DATABASE_URL="$(
+                python3 -c '
+              import os
+              from urllib.parse import quote, urlsplit, urlunsplit
+
+              parsed = urlsplit(os.environ["DATABASE_URL"])
+              _, separator, host = parsed.netloc.rpartition("@")
+              if not separator:
+                  raise SystemExit("DATABASE_URL must include credentials")
+              _, password_separator, password = parsed.netloc[:-(len(host) + 1)].partition(":")
+              username = quote(os.environ["DATABASE_USERNAME_OVERRIDE"], safe="")
+              userinfo = username + (":" + password if password_separator else "")
+              print(urlunsplit((parsed.scheme, userinfo + "@" + host, parsed.path, parsed.query, parsed.fragment)))
+              '
+              )"
+              exec /usr/local/bin/centaur-api-server
+{{- end }}
           env:
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sDATABASE_URL" .Values.secretManager.envPrefix }}
+{{- if .Values.apiRs.databaseUsernameOverride }}
+            - name: DATABASE_USERNAME_OVERRIDE
+              value: {{ .Values.apiRs.databaseUsernameOverride | quote }}
+{{- end }}
             - name: CENTAUR_JWT_SIGNING_SECRET
               valueFrom:
                 secretKeyRef:

@@ -344,6 +344,9 @@ agentSandbox:
 # iron-proxy/firewall.
 apiRs:
   enabled: true
+  # Override only the username in DATABASE_URL from the shared infra Secret.
+  # Useful for persistent databases initialized with a legacy owner role.
+  databaseUsernameOverride: ""
   replicaCount: 1
   image:
     repository: centaur-api-rs

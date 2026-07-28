@@ -8,11 +8,11 @@ metadata:
 {{ include "centaur.componentLabels" (dict "root" . "component" "api-rs") | nindent 4 }}
   annotations:
     "helm.sh/hook": post-install,pre-upgrade
-    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded,hook-failed
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
     "helm.sh/hook-weight": "-10"
 spec:
   activeDeadlineSeconds: 300
-  backoffLimit: 3
+  backoffLimit: 0
   ttlSecondsAfterFinished: 86400
   template:
     metadata:
@@ -20,7 +20,7 @@ spec:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 8 }}
     spec:
       automountServiceAccountToken: false
-      restartPolicy: OnFailure
+      restartPolicy: Never
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
 {{ toYaml . | nindent 8 }}
@@ -29,6 +29,7 @@ spec:
         - name: migrate-role
           image: {{ printf "%s:%s" .Values.postgres.image.repository .Values.postgres.image.tag | quote }}
           imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+          terminationMessagePolicy: FallbackToLogsOnError
           command: ["/bin/sh", "-ec"]
           args:
             - |

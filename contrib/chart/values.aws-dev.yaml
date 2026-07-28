@@ -8,14 +8,16 @@ firewall:
 
 postgres:
   enabled: true
-  roleMigration:
-    enabled: true
-    previousUsername: tempo
+  # This persistent database was initialized with the tempo role. Keep using
+  # that role so application migrations run as the owner of existing objects.
+  auth:
+    username: tempo
   persistence:
     storageClassName: ebs-auto
     subPath: pgdata
 
 apiRs:
+  databaseUsernameOverride: tempo
   sandboxReadyTimeoutSecs: 240
   sandboxWarmPoolSize: 1
 
