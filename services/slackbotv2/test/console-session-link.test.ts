@@ -2,9 +2,9 @@ import { describe, expect, test } from 'bun:test'
 import {
   buildConsoleSessionContextBlock,
   consoleSessionUrl,
-  defaultCodexEffort,
-  defaultCodexSpeed,
   defaultModelForHarness,
+  defaultReasoningForHarness,
+  effectiveReasoningForHarness,
   harnessDisplayName
 } from '../src/console-session-link'
 import claudeSettings from '../../../harness/claude/settings.json'
@@ -13,6 +13,7 @@ import codexConfig from '../../../harness/codex/config.toml'
 describe('harnessDisplayName', () => {
   test('maps known harness wire values to display names', () => {
     expect(harnessDisplayName('codex')).toBe('Codex')
+    expect(harnessDisplayName('nanocodex')).toBe('Nanocodex')
     expect(harnessDisplayName('claudecode')).toBe('Claude Code')
     expect(harnessDisplayName('amp')).toBe('Amp')
   })
@@ -44,6 +45,7 @@ describe('defaultModelForHarness', () => {
     expect(bakedCodexModel).toBeTruthy()
     expect(defaultModelForHarness('claudecode')).toBe(bakedClaudeModel)
     expect(defaultModelForHarness('codex')).toBe(bakedCodexModel)
+    expect(defaultModelForHarness('nanocodex')).toBe(bakedCodexModel)
   })
 
   test('prefers the deployment-configured model over the baked default', () => {
@@ -63,6 +65,30 @@ describe('defaultModelForHarness', () => {
     expect(defaultModelForHarness(undefined)).toBeUndefined()
     expect(defaultModelForHarness(null)).toBeUndefined()
     expect(defaultModelForHarness('')).toBeUndefined()
+  })
+})
+
+describe('defaultReasoningForHarness', () => {
+  const bakedCodexReasoning = (codexConfig as { model_reasoning_effort: string })
+    .model_reasoning_effort
+
+  test('shares the baked Codex reasoning default with Nanocodex', () => {
+    expect(bakedCodexReasoning).toBe('low')
+    expect(defaultReasoningForHarness('codex')).toBe(bakedCodexReasoning)
+    expect(defaultReasoningForHarness('nanocodex')).toBe(bakedCodexReasoning)
+    expect(defaultReasoningForHarness('claudecode')).toBeUndefined()
+  })
+
+  test('prefers a deployment-configured Codex-compatible default', () => {
+    const configured = { codex: 'HIGH', nanocodex: 'HIGH' }
+    expect(defaultReasoningForHarness('codex', configured)).toBe('high')
+    expect(defaultReasoningForHarness('nanocodex', configured)).toBe('high')
+  })
+
+  test('reports the effort the selected harness actually runs', () => {
+    expect(effectiveReasoningForHarness('codex', 'xhigh')).toBe('xhigh')
+    expect(effectiveReasoningForHarness('nanocodex', 'minimal')).toBe('low')
+    expect(effectiveReasoningForHarness('claudecode', 'high')).toBeUndefined()
   })
 })
 
@@ -87,14 +113,13 @@ describe('consoleSessionUrl', () => {
 })
 
 describe('buildConsoleSessionContextBlock', () => {
-  test('builds a context block with model, harness, effort, and speed', () => {
+  test('builds a context block with uppercased model then harness, middot separated', () => {
     const block = buildConsoleSessionContextBlock({
       consoleBaseUrl: 'https://console.centaur.dev',
       threadKey: 'slack:C123:1700000000.000100',
       harnessType: 'codex',
       model: 'gpt-5.2',
-      effort: 'xhigh',
-      speed: 'fast'
+      reasoning: 'xhigh'
     })
     expect(block).toEqual({
       type: 'context',
@@ -102,7 +127,7 @@ describe('buildConsoleSessionContextBlock', () => {
         {
           type: 'mrkdwn',
           text:
-            '<https://console.centaur.dev/console/threads?thread=slack%3AC123%3A1700000000.000100|Open chat in Console> · GPT-5.2 · Codex · Effort: Xhigh · Speed: Fast'
+            '<https://console.centaur.dev/console/threads?thread=slack%3AC123%3A1700000000.000100|Open chat in Console> · GPT-5.2 · Codex · XHigh'
         }
       ]
     })
@@ -119,6 +144,20 @@ describe('buildConsoleSessionContextBlock', () => {
     )
   })
 
+  test('shows the resolved Nanocodex harness', () => {
+    const block = buildConsoleSessionContextBlock({
+      consoleBaseUrl: 'https://console.centaur.dev',
+      threadKey: 'slack:C1:1',
+      harnessType: 'nanocodex',
+      model: 'gpt-5.6-sol',
+      reasoning: 'low'
+    })
+
+    expect(block?.elements[0]?.text).toBe(
+      '<https://console.centaur.dev/console/threads?thread=slack%3AC1%3A1|Open chat in Console> · GPT-5.6-SOL · Nanocodex · Low'
+    )
+  })
+
   test('skips the block entirely when no console base URL is set', () => {
     expect(
       buildConsoleSessionContextBlock({
@@ -128,17 +167,5 @@ describe('buildConsoleSessionContextBlock', () => {
         model: 'gpt-5.2'
       })
     ).toBeUndefined()
-  })
-})
-
-describe('Codex display defaults', () => {
-  test('reads effort and speed from the baked Codex config', () => {
-    expect(defaultCodexEffort()).toBe('low')
-    expect(defaultCodexSpeed()).toBe('fast')
-  })
-
-  test('allows deployment-configured defaults to override baked values', () => {
-    expect(defaultCodexEffort('high')).toBe('high')
-    expect(defaultCodexSpeed('flex')).toBe('flex')
   })
 })

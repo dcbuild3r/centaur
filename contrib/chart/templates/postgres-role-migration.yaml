@@ -50,6 +50,7 @@ spec:
 
               psql -v ON_ERROR_STOP=1 \
                 --set=db_name="$PGDATABASE" \
+                --set=previous_username="$PREVIOUS_USERNAME" \
                 --set=target_username="$TARGET_USERNAME" <<'SQL'
               CREATE TEMP TABLE role_migration_secret (password text NOT NULL);
               \copy role_migration_secret (password) FROM PROGRAM 'printenv TARGET_PASSWORD'
@@ -62,6 +63,17 @@ spec:
                 :'target_username',
                 (SELECT password FROM role_migration_secret)
               ) \gexec
+              SELECT format(
+                'REASSIGN OWNED BY %I TO %I',
+                :'previous_username',
+                :'target_username'
+              )
+              WHERE current_user = :'previous_username'
+                AND :'previous_username' <> :'target_username'
+                AND EXISTS (
+                  SELECT 1 FROM pg_roles WHERE rolname = :'previous_username'
+                )
+              \gexec
               GRANT ALL PRIVILEGES ON DATABASE :"db_name" TO :"target_username";
               GRANT USAGE, CREATE ON SCHEMA public TO :"target_username";
               GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO :"target_username";
