@@ -36,6 +36,7 @@ const USER_ID = 'USLACKBOTV2USER'
 const USER_B_ID = 'USLACKBOTV2USERB'
 const TEAM_ID = 'T000000001'
 const CHANNEL_ID = 'C000000001'
+const DM_CHANNEL_ID = 'D000000001'
 /** How real Slack renders a streamed message whose stream broke or was never stopped. */
 const BROKEN_STREAM_TEXT = ':warning: Something went wrong'
 
@@ -3802,6 +3803,45 @@ describe('slackbotv2', () => {
     expect(text).not.toContain('pnpm test')
   })
 
+  it('renders root direct-message replies without Slack thread streaming', async () => {
+    const logs: CapturedLog[] = []
+    bot = createTestBot({ logger: captureLogger(logs) })
+    const message = await postUserMessage('Reply to this direct message.')
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-root-direct-message',
+        event: {
+          type: 'message',
+          user: USER_ID,
+          channel: DM_CHANNEL_ID,
+          channel_type: 'im',
+          team: TEAM_ID,
+          ts: message.ts,
+          text: 'Reply to this direct message.'
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+
+    expect(codexApi.creates).toHaveLength(1)
+    expect(codexApi.creates[0]?.threadKey).toBe(`slack:${DM_CHANNEL_ID}:`)
+    expect(hasLog(logs, 'slackbotv2_render_failed')).toBe(false)
+    expect(slackApi.calls.some(call => call.method === 'chat.startStream')).toBe(false)
+    expect(slackApi.calls).toContainEqual(expect.objectContaining({
+      method: 'chat.postMessage',
+      body: expect.objectContaining({
+        channel: DM_CHANNEL_ID,
+        text: expect.stringContaining('Executed request 1.')
+      })
+    }))
+  })
+
   it('shows assistant status while waiting for slow session execute', async () => {
     const logs: CapturedLog[] = []
     bot = createTestBot({ logger: captureLogger(logs) })
@@ -5802,6 +5842,7 @@ type StreamCall = {
   method:
     | 'assistant.threads.setStatus'
     | 'assistant.threads.setTitle'
+    | 'chat.postMessage'
     | 'chat.startStream'
     | 'chat.appendStream'
     | 'chat.stopStream'
@@ -6064,6 +6105,20 @@ async function handlePatchedSlackRequest(
     await sendWebResponse(
       res,
       await startStream(input.upstreamUrl, request, input.streams, input.calls)
+    )
+    return
+  }
+  if (path === '/api/chat.postMessage') {
+    const body = await requestBody(request)
+    input.calls.push({ method: 'chat.postMessage', body })
+    await sendWebResponse(
+      res,
+      Response.json(
+        await postSlack(input.upstreamUrl, request, path, {
+          ...body,
+          channel: stringField(body.channel) === DM_CHANNEL_ID ? CHANNEL_ID : body.channel
+        })
+      )
     )
     return
   }

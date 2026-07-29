@@ -2317,7 +2317,7 @@ async function renderExecutionStream(
   consoleSessionBlock?: SlackContextBlock
 ): Promise<{ diverged: boolean; messageId?: string }> {
   const promptText = slackMessagePromptText(message)
-  if (isPlainTextOnlyRequest(promptText)) {
+  if (isPlainTextOnlyRequest(promptText) || isSlackRootDirectMessage(thread)) {
     await renderPlainTextExecutionStream(
       thread,
       stream,
@@ -2382,7 +2382,7 @@ async function renderRecoveredExecutionStream(
   trace?: SlackbotV2Trace
 ): Promise<{ diverged: boolean; messageId?: string }> {
   const promptText = slackMessagePromptText(message)
-  if (isPlainTextOnlyRequest(promptText)) {
+  if (isPlainTextOnlyRequest(promptText) || isSlackRootDirectMessage(thread)) {
     await renderPlainTextExecutionStream(thread, stream, message, options, trace)
     return { diverged: false }
   }
@@ -3470,6 +3470,11 @@ function slackAssistantTarget(thread: Thread): { channel: string; threadTs: stri
   const parts = thread.id.split(':')
   if (parts[0] !== 'slack' || !parts[1] || !parts[2]) return null
   return { channel: parts[1], threadTs: parts[2] }
+}
+
+function isSlackRootDirectMessage(thread: Thread): boolean {
+  const parts = thread.id.split(':')
+  return parts[0] === 'slack' && parts[1]?.startsWith('D') === true && parts[2] === ''
 }
 
 function titleFromMessage(text: string, userName = 'centaur'): string {
