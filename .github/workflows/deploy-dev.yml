@@ -208,16 +208,6 @@ jobs:
       - name: Build chart dependencies
         run: helm dependency build contrib/chart
 
-      - name: Install Agent Sandbox CRDs
-        run: |
-          kubectl apply --server-side \
-            --field-manager=centaur-deploy \
-            --filename contrib/chart/charts/agent-sandbox/crds
-          kubectl wait \
-            --for=condition=Established \
-            --timeout=60s \
-            --filename contrib/chart/charts/agent-sandbox/crds
-
       - name: Recover interrupted Helm operation
         run: |
           release_status="$(
@@ -247,6 +237,7 @@ jobs:
         run: |
           helm upgrade --install "$HELM_RELEASE" contrib/chart \
             --namespace "$HELM_NAMESPACE" \
+            --take-ownership \
             --values contrib/chart/values.aws-dev.yaml \
             --set "apiRs.image.repository=$ECR_REGISTRY/centaur-api-rs" \
             --set "apiRs.image.tag=$GITHUB_SHA" \
