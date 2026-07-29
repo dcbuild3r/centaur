@@ -44,17 +44,35 @@ jobs:
       matrix:
         include:
           - image: centaur-api-rs
+            repository: centaur-api-rs
+            tagPrefix: ""
+            context: .
             dockerfile: services/api-rs/Dockerfile
             target: ""
           - image: centaur-agent
+            repository: centaur-agent
+            tagPrefix: ""
+            context: .
             dockerfile: services/sandbox/Dockerfile
             target: sandbox
             cache-mode: min
           - image: centaur-iron-proxy
+            repository: centaur-iron-proxy
+            tagPrefix: ""
+            context: .
             dockerfile: services/iron-proxy/Dockerfile
             target: ""
           - image: centaur-slackbotv2
+            repository: centaur-slackbotv2
+            tagPrefix: ""
+            context: .
             dockerfile: services/slackbotv2/Dockerfile
+            target: ""
+          - image: centaur-console
+            repository: common-app
+            tagPrefix: centaur-console-
+            context: services/console
+            dockerfile: services/console/Dockerfile
             target: ""
     steps:
       - name: Checkout
@@ -89,11 +107,11 @@ jobs:
       - name: Build and push ${{ matrix.image }}
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
-          context: .
+          context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           target: ${{ matrix.target }}
           push: true
-          tags: ${{ env.ECR_REGISTRY }}/${{ matrix.image }}:${{ github.sha }}
+          tags: ${{ env.ECR_REGISTRY }}/${{ matrix.repository }}:${{ matrix.tagPrefix }}${{ github.sha }}
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=${{ matrix.cache-mode || 'max' }},scope=${{ matrix.image }}
 
@@ -123,6 +141,60 @@ jobs:
       - name: Configure kubeconfig
         run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER_NAME" --alias "$EKS_CLUSTER_NAME"
 
+      - name: Configure Console secrets
+        env:
+          IRON_CONTROL_INITIAL_API_KEY: ${{ secrets.IRON_CONTROL_INITIAL_API_KEY }}
+          IRON_CONTROL_INITIAL_USER_EMAIL: ${{ secrets.IRON_CONTROL_INITIAL_USER_EMAIL }}
+          IRON_CONTROL_INITIAL_USER_PASSWORD: ${{ secrets.IRON_CONTROL_INITIAL_USER_PASSWORD }}
+          IRON_CONTROL_SECRET_KEY_BASE: ${{ secrets.IRON_CONTROL_SECRET_KEY_BASE }}
+          IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY: ${{ secrets.IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY }}
+          IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY: ${{ secrets.IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY }}
+          IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT: ${{ secrets.IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT }}
+        run: |
+          database_url="$(
+            kubectl --namespace "$HELM_NAMESPACE" get secret centaur-infra-env \
+              --output jsonpath='{.data.DATABASE_URL}' \
+              | base64 --decode
+          )"
+          iron_control_database_url="$(
+            DATABASE_URL="$database_url" python3 - <<'PY'
+          import os
+          from urllib.parse import quote, urlsplit, urlunsplit
+
+          parsed = urlsplit(os.environ["DATABASE_URL"])
+          _, separator, host = parsed.netloc.rpartition("@")
+          if not separator:
+              raise SystemExit("DATABASE_URL must include credentials")
+          _, password_separator, password = parsed.netloc[:-(len(host) + 1)].partition(":")
+          userinfo = quote("tempo", safe="") + (":" + password if password_separator else "")
+          print(urlunsplit((parsed.scheme, userinfo + "@" + host, "", parsed.query, parsed.fragment)))
+          PY
+          )"
+          jq --null-input \
+            --arg database_url "$iron_control_database_url" \
+            --arg api_key "$IRON_CONTROL_INITIAL_API_KEY" \
+            --arg email "$IRON_CONTROL_INITIAL_USER_EMAIL" \
+            --arg password "$IRON_CONTROL_INITIAL_USER_PASSWORD" \
+            --arg secret_key_base "$IRON_CONTROL_SECRET_KEY_BASE" \
+            --arg primary_key "$IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY" \
+            --arg deterministic_key "$IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY" \
+            --arg derivation_salt "$IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT" \
+            '{
+              stringData: {
+                IRON_CONTROL_DATABASE_URL: $database_url,
+                IRON_CONTROL_INITIAL_API_KEY: $api_key,
+                IRON_CONTROL_INITIAL_USER_EMAIL: $email,
+                IRON_CONTROL_INITIAL_USER_PASSWORD: $password,
+                IRON_CONTROL_SECRET_KEY_BASE: $secret_key_base,
+                IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY: $primary_key,
+                IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY: $deterministic_key,
+                IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT: $derivation_salt
+              }
+            }' \
+            | kubectl --namespace "$HELM_NAMESPACE" patch secret centaur-infra-env \
+                --type merge \
+                --patch-file /dev/stdin
+
       - name: Add Helm repositories
         run: helm repo add 1password https://1password.github.io/connect-helm-charts
 
@@ -140,6 +212,9 @@ jobs:
             --set "sandbox.image.tag=$GITHUB_SHA" \
             --set "ironProxy.image.repository=$ECR_REGISTRY/centaur-iron-proxy" \
             --set "ironProxy.image.tag=$GITHUB_SHA" \
+            --set "console.enabled=true" \
+            --set "console.image.repository=$ECR_REGISTRY/common-app" \
+            --set "console.image.tag=centaur-console-$GITHUB_SHA" \
             --set "slackbotv2.enabled=true" \
             --set "slackbotv2.image.repository=$ECR_REGISTRY/centaur-slackbotv2" \
             --set "slackbotv2.image.tag=$GITHUB_SHA" \

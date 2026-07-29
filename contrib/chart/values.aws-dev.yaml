@@ -31,6 +31,9 @@ ironProxy:
 tokenBroker:
   enabled: false
 
+console:
+  enabled: true
+
 slackbotv2:
   enabled: true
 
