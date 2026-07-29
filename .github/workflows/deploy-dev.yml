@@ -208,6 +208,16 @@ jobs:
       - name: Build chart dependencies
         run: helm dependency build contrib/chart
 
+      - name: Install Agent Sandbox CRDs
+        run: |
+          kubectl apply --server-side \
+            --field-manager=centaur-deploy \
+            --filename contrib/chart/charts/agent-sandbox/crds
+          kubectl wait \
+            --for=condition=Established \
+            --timeout=60s \
+            --filename contrib/chart/charts/agent-sandbox/crds
+
       - name: Recover interrupted Helm operation
         run: |
           release_status="$(
