@@ -151,6 +151,13 @@ jobs:
           IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY: ${{ secrets.IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY }}
           IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT: ${{ secrets.IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT }}
         run: |
+          [[ "$IRON_CONTROL_INITIAL_API_KEY" =~ ^iak_[0-9a-f]{64}$ ]] \
+            || { echo "IRON_CONTROL_INITIAL_API_KEY has an invalid format" >&2; exit 1; }
+          [[ "$IRON_CONTROL_INITIAL_USER_EMAIL" == *@*.* ]] \
+            || { echo "IRON_CONTROL_INITIAL_USER_EMAIL has an invalid format" >&2; exit 1; }
+          (( ${#IRON_CONTROL_INITIAL_USER_PASSWORD} >= 12 )) \
+            || { echo "IRON_CONTROL_INITIAL_USER_PASSWORD must be at least 12 characters" >&2; exit 1; }
+
           database_url="$(
             kubectl --namespace "$HELM_NAMESPACE" get secret centaur-infra-env \
               --output jsonpath='{.data.DATABASE_URL}' \
@@ -200,6 +207,31 @@ jobs:
 
       - name: Build chart dependencies
         run: helm dependency build contrib/chart
+
+      - name: Recover interrupted Helm operation
+        run: |
+          release_status="$(
+            helm status "$HELM_RELEASE" \
+              --namespace "$HELM_NAMESPACE" \
+              --output json \
+              2>/dev/null \
+              | jq --raw-output '.info.status // "not-installed"'
+          )"
+          if [[ "$release_status" == pending-* ]]; then
+            deployed_revision="$(
+              helm history "$HELM_RELEASE" \
+                --namespace "$HELM_NAMESPACE" \
+                --output json \
+                | jq --raw-output \
+                    '[.[] | select(.status == "deployed") | .revision | tonumber] | max // empty'
+            )"
+            [[ -n "$deployed_revision" ]] \
+              || { echo "No deployed Helm revision is available for recovery" >&2; exit 1; }
+            helm rollback "$HELM_RELEASE" "$deployed_revision" \
+              --namespace "$HELM_NAMESPACE" \
+              --wait \
+              --timeout 5m
+          fi
 
       - name: Deploy chart
         run: |
