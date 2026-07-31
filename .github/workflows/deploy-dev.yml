@@ -307,11 +307,13 @@ jobs:
         run: |
           # The production operator DM principal is created/assigned here;
           # `principals grant --tool` also upserts the tool role and secrets.
+          # Slack DM principals are scoped by team; this must match the
+          # identity api-rs derives from the production WF DM metadata.
           kubectl --namespace "$HELM_NAMESPACE" exec \
             deployment/centaur-centaur-api-rs -- \
             /usr/local/bin/centaur-perms \
             --tools-dir /app/tools \
-            principals grant slack-user-u03tnh0duqp --tool notion
+            principals grant slack-user-tl1hm8uuu-u03tn0duqp --tool notion
 
       - name: Collect deployment diagnostics
         if: failure()
