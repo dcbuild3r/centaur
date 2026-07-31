@@ -104,7 +104,30 @@ jobs:
       - name: Log in to Amazon ECR
         run: aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
+      - name: Check for existing immutable image tag
+        id: check_tag
+        env:
+          ECR_REPOSITORY: ${{ matrix.repository }}
+          IMAGE_TAG: ${{ format('{0}{1}', matrix.tagPrefix, github.sha) }}
+        run: |
+          set -euo pipefail
+          output="$(aws ecr describe-images \
+            --region "$AWS_REGION" \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-ids "imageTag=$IMAGE_TAG" \
+            2>&1)" && status=0 || status=$?
+          if [[ "$status" -eq 0 ]]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Using existing immutable image tag $ECR_REPOSITORY:$IMAGE_TAG"
+          elif grep -Fq ImageNotFoundException <<<"$output"; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            printf '%s\n' "$output" >&2
+            exit "$status"
+          fi
+
       - name: Build and push ${{ matrix.image }}
+        if: steps.check_tag.outputs.exists != 'true'
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: ${{ matrix.context }}
@@ -279,6 +302,14 @@ jobs:
             --set "slackbotv2.image.tag=$GITHUB_SHA" \
             --wait \
             --timeout 10m
+
+      - name: Reconcile production Notion tool role
+        run: |
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            roles grant tool-notion --tool notion
 
       - name: Collect deployment diagnostics
         if: failure()
