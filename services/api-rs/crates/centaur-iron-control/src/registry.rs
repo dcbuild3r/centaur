@@ -396,7 +396,7 @@ pub fn source_from_placeholder(
     placeholder: &str,
     json_key: Option<&str>,
 ) -> SecretSource {
-    match policy.kind {
+    match policy.source_kind_for(placeholder) {
         SourceKind::Env => {
             let mut config = json!({ "var": placeholder });
             insert_json_key(&mut config, json_key);
@@ -1019,6 +1019,59 @@ transforms:
         );
         assert_eq!(input.rules.len(), 1);
         assert_eq!(input.rules[0].host.as_deref(), Some("api.x.ai"));
+    }
+
+    #[test]
+    fn translates_per_secret_source_override() {
+        let fragment = load_fragment_str(
+            r#"
+transforms:
+  - name: secrets
+    config:
+      secrets:
+        - replace:
+            proxy_value: OPENAI_API_KEY
+            match_headers: ["Authorization"]
+          rules: [{ host: api.openai.com }]
+"#,
+        )
+        .unwrap();
+        let policy = SourcePolicy::env().with_overrides(BTreeMap::from([(
+            "OPENAI_API_KEY".to_owned(),
+            SourceKind::OnePassword,
+        )]));
+        let inputs = secret_inputs_from_fragment("default", "infra", &fragment, &policy).unwrap();
+        let SecretInput::Static(input) = &inputs[0] else {
+            panic!("expected a static secret");
+        };
+
+        assert_eq!(input.source.source_type, "1password");
+        assert_eq!(
+            input.source.config,
+            json!({
+                "secret_ref": "op://ai-agents/OPENAI_API_KEY/credential",
+                "ttl": "10m"
+            })
+        );
+    }
+
+    #[test]
+    fn explicit_onepassword_ref_survives_env_default() {
+        let policy = SourcePolicy::env();
+        let source = source_from_placeholder(
+            &policy,
+            "op://Centaur/Centaur.run - NOTION_API_KEY/password",
+            None,
+        );
+
+        assert_eq!(source.source_type, "1password");
+        assert_eq!(
+            source.config,
+            json!({
+                "secret_ref": "op://Centaur/Centaur.run - NOTION_API_KEY/password",
+                "ttl": "10m"
+            })
+        );
     }
 
     #[test]

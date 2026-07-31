@@ -93,6 +93,13 @@
           }
         },
         "secretSource": { "type": "string" },
+        "secretSourceOverrides": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "enum": ["env", "onepassword", "onepassword-connect"]
+          }
+        },
         "secretTtl": { "type": "string" },
         "upstreamDenyCidrs": {
           "type": "array",
