@@ -305,11 +305,13 @@ jobs:
 
       - name: Reconcile production Notion tool role
         run: |
+          # The production operator DM principal is created/assigned here;
+          # `principals grant --tool` also upserts the tool role and secrets.
           kubectl --namespace "$HELM_NAMESPACE" exec \
             deployment/centaur-centaur-api-rs -- \
             /usr/local/bin/centaur-perms \
             --tools-dir /app/tools \
-            roles grant tool-notion --tool notion
+            principals grant slack-user-u03tnh0duqp --tool notion
 
       - name: Collect deployment diagnostics
         if: failure()
