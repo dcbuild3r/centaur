@@ -419,8 +419,18 @@ fn onepassword_source(
     placeholder: &str,
     json_key: Option<&str>,
 ) -> SecretSource {
+    // Tool manifests may need to select an item field whose name does not
+    // follow Centaur's conventional `<placeholder>/credential` layout. Keep
+    // fully-qualified 1Password references intact so a deployment can point
+    // at an existing, operator-managed item without copying its value into a
+    // second item. Bare placeholders retain the historical convention.
+    let secret_ref = if placeholder.starts_with("op://") {
+        placeholder.to_owned()
+    } else {
+        format!("op://{}/{placeholder}/credential", policy.op_vault)
+    };
     let mut config = json!({
-        "secret_ref": format!("op://{}/{placeholder}/credential", policy.op_vault),
+        "secret_ref": secret_ref,
         "ttl": policy.ttl,
     });
     insert_json_key(&mut config, json_key);
@@ -1101,6 +1111,25 @@ transforms:
         assert_eq!(
             input.source.config,
             json!({ "secret_ref": "op://ai-agents/GITHUB_TOKEN/credential", "ttl": "10m" })
+        );
+    }
+
+    #[test]
+    fn onepassword_policy_preserves_fully_qualified_op_ref() {
+        let policy = SourcePolicy::onepassword("Centaur", "10m");
+        let source = source_from_placeholder(
+            &policy,
+            "op://Centaur/Centaur.run - NOTION_API_KEY/password",
+            None,
+        );
+
+        assert_eq!(source.source_type, "1password");
+        assert_eq!(
+            source.config,
+            json!({
+                "secret_ref": "op://Centaur/Centaur.run - NOTION_API_KEY/password",
+                "ttl": "10m"
+            })
         );
     }
 

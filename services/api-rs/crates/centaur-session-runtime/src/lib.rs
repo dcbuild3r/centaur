@@ -1905,10 +1905,10 @@ impl SessionRuntime {
                 );
                 return Ok(execution);
             }
-            if let Some(started_at) = execution.started_at {
-                if let Ok(queue_wait) = (started_at - execution.created_at).try_into() {
-                    record_session_phase_duration("queue_wait", "success", "session", queue_wait);
-                }
+            if let Some(started_at) = execution.started_at
+                && let Ok(queue_wait) = (started_at - execution.created_at).try_into()
+            {
+                record_session_phase_duration("queue_wait", "success", "session", queue_wait);
             }
             if let Err(error) = self.claim_stdout_owner(&execution.execution_id).await {
                 self.record_execution_failure(thread_key, &execution.execution_id, &error)
