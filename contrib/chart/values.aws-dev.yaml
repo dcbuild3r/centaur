@@ -27,9 +27,10 @@ sandbox:
     pullPolicy: IfNotPresent
 
 ironProxy:
-  # Production harness and tool credentials resolve through the scoped
-  # 1Password service-account token in the Centaur vault.
-  secretSource: onepassword
+  # Keep the production harness credential on the AWS-backed Kubernetes
+  # Secret. Explicit op:// references, such as the Notion tool's page-scoped
+  # reference, continue to resolve through the Centaur vault.
+  secretSource: env
 
 secrets:
   bootstrapSecretName: centaur-onepassword-bootstrap
