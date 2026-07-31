@@ -27,11 +27,9 @@ sandbox:
     pullPolicy: IfNotPresent
 
 ironProxy:
-  # Keep the AWS-backed Kubernetes Secret as the default while migrating the
-  # Codex credential separately to the production Centaur 1Password vault.
-  secretSource: env
-  secretSourceOverrides:
-    OPENAI_API_KEY: onepassword
+  # Production harness and tool credentials resolve through the scoped
+  # 1Password service-account token in the Centaur vault.
+  secretSource: onepassword
 
 secrets:
   bootstrapSecretName: centaur-onepassword-bootstrap
