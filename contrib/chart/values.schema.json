@@ -359,6 +359,7 @@
     "slackbotv2": {
       "type": "object",
       "properties": {
+        "databaseUsernameOverride": { "type": "string" },
         "mcpPublicUrl": { "type": "string" },
         "metrics": {
           "type": "object",

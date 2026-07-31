@@ -471,6 +471,9 @@ apiRs:
 # (:8080) and streams responses back. Listens on :3001.
 slackbotv2:
   enabled: true
+  # Override only the username in the secret-backed Slackbot state database
+  # URL. Useful when a persistent database is owned by a legacy role.
+  databaseUsernameOverride: ""
   replicaCount: 1
   image:
     repository: centaur-slackbotv2

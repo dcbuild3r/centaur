@@ -37,6 +37,19 @@ spec:
         - name: slackbotv2
           image: {{ printf "%s:%s" .Values.slackbotv2.image.repository .Values.slackbotv2.image.tag | quote }}
           imagePullPolicy: {{ .Values.slackbotv2.image.pullPolicy }}
+{{- if .Values.slackbotv2.databaseUsernameOverride }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              export SLACKBOTV2_DATABASE_URL="$(
+                bun -e '
+              const url = new URL(process.env.SLACKBOTV2_DATABASE_URL)
+              url.username = process.env.DATABASE_USERNAME_OVERRIDE
+              console.log(url.toString())
+              '
+              )"
+              exec bun src/server.ts
+{{- end }}
           env:
             - name: PORT
               value: "3001"
@@ -67,6 +80,10 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sDATABASE_URL" .Values.secretManager.envPrefix }}
+{{- if .Values.slackbotv2.databaseUsernameOverride }}
+            - name: DATABASE_USERNAME_OVERRIDE
+              value: {{ .Values.slackbotv2.databaseUsernameOverride | quote }}
+{{- end }}
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:

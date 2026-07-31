@@ -18,6 +18,7 @@ postgres:
 
 apiRs:
   databaseUsernameOverride: tempo
+  opVault: Centaur
   sandboxReadyTimeoutSecs: 240
   sandboxWarmPoolSize: 1
 
@@ -26,7 +27,10 @@ sandbox:
     pullPolicy: IfNotPresent
 
 ironProxy:
-  secretSource: env
+  secretSource: onepassword
+
+secrets:
+  bootstrapSecretName: centaur-onepassword-bootstrap
 
 tokenBroker:
   enabled: false
@@ -36,6 +40,9 @@ console:
 
 slackbotv2:
   enabled: true
+  # The shared DATABASE_URL still names the newer role, while the persistent
+  # Chat SDK state tables are owned by the legacy tempo role.
+  databaseUsernameOverride: tempo
 
 ingress:
   enabled: true
