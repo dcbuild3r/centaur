@@ -4226,6 +4226,57 @@ describe('slackbotv2', () => {
     expect(Number(recoveredThreadState?.lastEventId)).toBeGreaterThan(0)
   })
 
+  it('recovers a render obligation created after the startup scan', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({
+      renderRecoveryIntervalMs: 25,
+      state: sharedState
+    })
+
+    // Let the empty startup scan finish before creating the obligation. This
+    // reproduces a live render failure that previously remained stranded until
+    // the Slackbot process restarted.
+    await sleep(50)
+
+    const parent = await postUserMessage('Context before periodic recovery.')
+    const mentionText = `<@${BOT_USER_ID}> recover without a restart`
+    const mention = await postUserMessage(mentionText, parent.ts)
+    const key = threadKey(parent.ts)
+    const message = apiMessageFromSlackEvent({
+      isMention: true,
+      text: mentionText,
+      threadId: key,
+      ts: mention.ts
+    })
+    await sharedState.set(`thread-state:${key}`, {
+      activeExecution: true,
+      executedMessageIds: [mention.ts],
+      forwardedMessageIds: [mention.ts],
+      historyForwarded: true,
+      lastEventId: 0,
+      renderObligation: {
+        afterEventId: 0,
+        executionId: 'exe-periodic-recovery',
+        message
+      }
+    })
+    await sharedState.appendToList('slackbotv2:render:index', key)
+    codexApi.emitOutputLines(key, sampleCodexOutputLines('Recovered without a restart.'))
+
+    await waitFor(async () => {
+      const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
+      return threadState?.renderObligation === null
+    }, 2000)
+
+    expect(await threadText(parent.ts)).toContain('Recovered without a restart.')
+    expect(codexApi.eventRequests).toContainEqual({
+      afterEventId: 0,
+      executionId: 'exe-periodic-recovery',
+      threadKey: key
+    })
+  })
+
   it('skips stale render obligations from Chat SDK state on startup', async () => {
     const logs: CapturedLog[] = []
     const sharedState = createMemoryState()

@@ -33,7 +33,7 @@ use centaur_session_sqlx::{
 use centaur_telemetry::{
     export_thread_trace_root_span, record_sandbox_warm_pool_claim,
     record_session_execution_finished, record_session_execution_started, record_session_failure,
-    record_session_first_token_latency, set_span_parent_trace,
+    record_session_first_token_latency, record_session_phase_duration, set_span_parent_trace,
 };
 use dashmap::{DashMap, DashSet};
 use futures_util::{FutureExt, SinkExt, Stream, StreamExt, future::BoxFuture, stream};
@@ -1905,6 +1905,11 @@ impl SessionRuntime {
                 );
                 return Ok(execution);
             }
+            if let Some(started_at) = execution.started_at {
+                if let Ok(queue_wait) = (started_at - execution.created_at).try_into() {
+                    record_session_phase_duration("queue_wait", "success", "session", queue_wait);
+                }
+            }
             if let Err(error) = self.claim_stdout_owner(&execution.execution_id).await {
                 self.record_execution_failure(thread_key, &execution.execution_id, &error)
                     .await;
@@ -1949,6 +1954,7 @@ impl SessionRuntime {
                 .resolve_sandbox_capabilities(session.iron_control_principal.as_deref())
                 .await?;
 
+            let sandbox_allocation_started = Instant::now();
             let sandbox_id = match self
                 .ensure_session_sandbox(EnsureSessionSandboxRequest {
                     thread_key,
@@ -1964,8 +1970,22 @@ impl SessionRuntime {
                 .instrument(execution_trace_span.clone())
                 .await
             {
-                Ok(sandbox_id) => sandbox_id,
+                Ok(sandbox_id) => {
+                    record_session_phase_duration(
+                        "sandbox_allocation",
+                        "success",
+                        "session",
+                        sandbox_allocation_started.elapsed(),
+                    );
+                    sandbox_id
+                }
                 Err(error) => {
+                    record_session_phase_duration(
+                        "sandbox_allocation",
+                        "failure",
+                        "session",
+                        sandbox_allocation_started.elapsed(),
+                    );
                     self.record_execution_failure(thread_key, &execution.execution_id, &error)
                         .await;
                     return Err(error);
@@ -5694,6 +5714,9 @@ async fn record_finished_execution_metric(
         }
     };
     record_session_execution_finished(&harness_label, status, execution_duration(execution));
+    if let Some(duration) = execution_duration(execution) {
+        record_session_phase_duration("model_execution", status, &harness_label, duration);
+    }
     if let Some(failure_class) = failure_class {
         record_session_failure(&harness_label, failure_class);
     }

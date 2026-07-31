@@ -72,6 +72,7 @@ const options: SlackbotV2Options = {
   renderRecoveryMaxObligationAgeMs: optionalNumberEnv(
     'SLACKBOTV2_RENDER_RECOVERY_MAX_OBLIGATION_AGE_MS'
   ),
+  renderRecoveryIntervalMs: numberEnv('SLACKBOTV2_RENDER_RECOVERY_INTERVAL_MS', 30_000),
   sessionApiTimeoutMs: optionalNumberEnv('SLACKBOTV2_SESSION_API_TIMEOUT_MS'),
   signingSecret,
   slackApiUrl: optionalEnv('SLACK_API_URL'),

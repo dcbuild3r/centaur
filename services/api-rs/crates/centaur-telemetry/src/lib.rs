@@ -58,6 +58,7 @@ pub const HTTP_REQUESTS_IN_FLIGHT: &str = "http_server_requests_in_flight";
 pub const SESSION_EXECUTIONS_TOTAL: &str = "centaur_session_executions_total";
 pub const SESSION_EXECUTION_DURATION_SECONDS: &str = "centaur_session_execution_duration_seconds";
 pub const SESSION_FIRST_TOKEN_LATENCY_SECONDS: &str = "centaur_session_first_token_latency_seconds";
+pub const SESSION_PHASE_DURATION_SECONDS: &str = "centaur_session_phase_duration_seconds";
 pub const SESSION_FAILURES_TOTAL: &str = "centaur_session_failures_total";
 pub const SANDBOX_OPERATIONS_TOTAL: &str = "centaur_sandbox_operations_total";
 pub const SANDBOX_STARTUP_DURATION_SECONDS: &str = "centaur_sandbox_startup_duration_seconds";
@@ -259,6 +260,10 @@ pub fn prometheus_handle() -> Result<PrometheusHandle, TelemetryError> {
             SESSION_FIRST_TOKEN_LATENCY_BUCKETS,
         )?
         .set_buckets_for_metric(
+            Matcher::Full(SESSION_PHASE_DURATION_SECONDS.to_owned()),
+            SESSION_EXECUTION_DURATION_BUCKETS,
+        )?
+        .set_buckets_for_metric(
             Matcher::Full(SANDBOX_STARTUP_DURATION_SECONDS.to_owned()),
             SANDBOX_STARTUP_DURATION_BUCKETS,
         )?
@@ -344,6 +349,21 @@ pub fn record_session_first_token_latency(harness: &str, duration: Duration) {
     metrics::histogram!(
         SESSION_FIRST_TOKEN_LATENCY_SECONDS,
         "harness" => normalize_label(harness),
+    )
+    .record(duration.as_secs_f64());
+}
+
+pub fn record_session_phase_duration(
+    phase: &'static str,
+    outcome: &'static str,
+    source: &str,
+    duration: Duration,
+) {
+    metrics::histogram!(
+        SESSION_PHASE_DURATION_SECONDS,
+        "phase" => phase,
+        "outcome" => outcome,
+        "source" => normalize_label(source),
     )
     .record(duration.as_secs_f64());
 }
@@ -940,6 +960,11 @@ fn describe_metrics() {
         metrics::Unit::Seconds,
         "Latency from session execution start to first answer token by harness."
     );
+    metrics::describe_histogram!(
+        SESSION_PHASE_DURATION_SECONDS,
+        metrics::Unit::Seconds,
+        "Latency for low-cardinality session execution phases."
+    );
     metrics::describe_counter!(
         SESSION_FAILURES_TOTAL,
         "Session execution failures by harness and low-cardinality failure class."
@@ -1356,6 +1381,30 @@ mod tests {
         record_sandbox_operation("local", "create", "success");
         record_sandbox_startup_duration("local", "success", Duration::from_secs(4));
         record_sandbox_warm_pool_claim("hit");
+        record_session_phase_duration(
+            "queue_wait",
+            "success",
+            "session",
+            Duration::from_millis(25),
+        );
+        record_session_phase_duration(
+            "sandbox_allocation",
+            "success",
+            "warm_pool",
+            Duration::from_millis(250),
+        );
+        record_session_phase_duration(
+            "harness_start",
+            "success",
+            "codex",
+            Duration::from_millis(500),
+        );
+        record_session_phase_duration(
+            "model_execution",
+            "completed",
+            "codex",
+            Duration::from_secs(2),
+        );
 
         let metrics = render_metrics().unwrap();
 
@@ -1385,6 +1434,18 @@ mod tests {
             r#"centaur_sandbox_startup_duration_seconds_count{backend="local",status="success"}"#
         ));
         assert!(metrics.contains(r#"centaur_sandbox_warm_pool_claims_total{result="hit"}"#));
+        assert!(metrics.contains(
+            r#"centaur_session_phase_duration_seconds_count{phase="queue_wait",outcome="success",source="session"}"#
+        ));
+        assert!(metrics.contains(
+            r#"centaur_session_phase_duration_seconds_count{phase="sandbox_allocation",outcome="success",source="warm_pool"}"#
+        ));
+        assert!(metrics.contains(
+            r#"centaur_session_phase_duration_seconds_count{phase="harness_start",outcome="success",source="codex"}"#
+        ));
+        assert!(metrics.contains(
+            r#"centaur_session_phase_duration_seconds_count{phase="model_execution",outcome="completed",source="codex"}"#
+        ));
     }
 
     #[test]

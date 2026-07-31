@@ -771,8 +771,13 @@ function recordForward(
 }
 
 function recordRenderAttempt(source: string, outcome: string, startedAtMs: number): void {
+  const durationSeconds = observeSeconds(startedAtMs)
   slackbotMetrics.renderAttempts.inc({ outcome, source })
-  slackbotMetrics.renderAttemptDuration.observe({ outcome, source }, observeSeconds(startedAtMs))
+  slackbotMetrics.renderAttemptDuration.observe({ outcome, source }, durationSeconds)
+  slackbotMetrics.sessionPhaseDuration.observe(
+    { phase: 'slack_delivery', outcome, source },
+    durationSeconds
+  )
   slackbotMetrics.sessionDelivery.inc({ delivery_status: deliveryStatusForRenderOutcome(outcome) })
   if (outcome === 'complete' || outcome === 'fallback' || outcome === 'answer_visible') {
     slackbotMetrics.lastSuccessfulRenderTimestamp.set(
@@ -1735,9 +1740,23 @@ function scheduleRenderObligationRecovery(
   state: StateAdapter,
   options: SlackbotV2Options
 ): void {
-  backgroundWaitUntil(
-    recoverRenderObligationsWithRetry(chat, state, options)
-  )
+  let running = false
+  const run = (): void => {
+    if (running) return
+    running = true
+    backgroundWaitUntil(
+      recoverRenderObligationsWithRetry(chat, state, options).finally(() => {
+        running = false
+      })
+    )
+  }
+
+  run()
+
+  const intervalMs = options.renderRecoveryIntervalMs
+  if (intervalMs === undefined || intervalMs <= 0) return
+  const timer = setInterval(run, intervalMs)
+  timer.unref()
 }
 
 async function recoverRenderObligationsWithRetry(

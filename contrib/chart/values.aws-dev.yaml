@@ -20,7 +20,7 @@ apiRs:
   databaseUsernameOverride: tempo
   opVault: Centaur
   sandboxReadyTimeoutSecs: 240
-  sandboxWarmPoolSize: 1
+  sandboxWarmPoolSize: 3
 
 sandbox:
   image:

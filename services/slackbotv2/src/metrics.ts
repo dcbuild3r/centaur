@@ -316,6 +316,11 @@ export const slackbotMetrics = {
     labelNames: ['delivery_status'],
     name: 'centaur_session_delivery_total'
   }),
+  sessionPhaseDuration: histogram({
+    help: 'Latency for low-cardinality session execution phases.',
+    labelNames: ['phase', 'outcome', 'source'],
+    name: 'centaur_session_phase_duration_seconds'
+  }),
   sessionApiOperationDuration: histogram({
     help: 'Session API operation duration from Slackbot, in seconds.',
     labelNames: ['operation', 'outcome'],
