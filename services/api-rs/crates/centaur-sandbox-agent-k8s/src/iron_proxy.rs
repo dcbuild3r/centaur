@@ -590,23 +590,14 @@ impl AgentSandboxBackend {
         if let Some(proxy_id) = proxy_id
             && self.has_usable_iron_proxy_resources(id).await?
         {
-            let sandbox = self
-                .sandboxes()
-                .get(id.as_str())
-                .await
-                .map_err(|err| map_kube_error("get sandbox for proxy principal check", err))?;
-            let assigned_principal = sandbox
-                .metadata
-                .annotations
-                .as_ref()
-                .and_then(|annotations| annotations.get(crate::IRON_CONTROL_PRINCIPAL_ANNOTATION));
-            if assigned_principal.map(String::as_str) == Some(principal_id) && labels.is_empty() {
-                return Ok(());
-            }
-
             let iron_control = self.config.iron_control.as_ref().ok_or_else(|| {
                 SandboxError::backend("iron-proxy requires iron-control to be configured")
             })?;
+            // Reassign even when the principal is unchanged. The effective
+            // secret source may have changed since this sandbox was created
+            // (for example, after a deployment moves OPENAI_API_KEY from
+            // 1Password back to the AWS-backed environment Secret). Reusing
+            // the proxy without a sync leaves it serving its stale config.
             let proxy = iron_control
                 .client
                 .assign_proxy_principal(&proxy_id, principal_id, labels)
