@@ -40,6 +40,10 @@ ironProxy:
     - "10.42.0.0/16"
     - "10.43.0.0/16"
   secretSource: onepassword
+  # Optional per-placeholder source overrides. Values are env,
+  # onepassword, or onepassword-connect. This supports staged migration of
+  # credentials between backends without changing every secret at once.
+  secretSourceOverrides: {}
   secretTtl: 10m
 
 # Base tools delivery for api-rs sandboxes. When enabled, repo-cache keeps `repo`

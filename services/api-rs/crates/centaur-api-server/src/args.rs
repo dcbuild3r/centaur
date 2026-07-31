@@ -1755,6 +1755,17 @@ struct IronProxySourceArgs {
     source: SourceKind,
     #[arg(long = "op-vault", env = "OP_VAULT", default_value = "ai-agents")]
     op_vault: String,
+    /// JSON map of placeholder names to source kinds. Overrides the default
+    /// source for only the named credentials, which supports staged backend
+    /// migrations such as keeping OPENAI_API_KEY in 1Password while the rest
+    /// of the deployment still reads from Kubernetes Secrets.
+    #[arg(
+        long = "kubernetes-firewall-manager-secret-source-overrides",
+        env = "FIREWALL_MANAGER_SECRET_SOURCE_OVERRIDES",
+        value_parser = parse_source_overrides,
+        default_value = "{}"
+    )]
+    source_overrides: BTreeMap<String, SourceKind>,
     #[arg(
         long = "kubernetes-firewall-manager-secret-ttl",
         env = "FIREWALL_MANAGER_SECRET_TTL",
@@ -1784,6 +1795,7 @@ impl IronProxySourceArgs {
             kind: self.source,
             op_vault: self.op_vault.clone(),
             ttl: self.secret_ttl.clone(),
+            overrides: self.source_overrides.clone(),
         }
     }
 
@@ -1807,6 +1819,10 @@ impl IronProxySourceArgs {
 
     fn uses_bootstrap_secret(&self) -> bool {
         matches!(self.source, SourceKind::Env | SourceKind::OnePassword)
+            || self
+                .source_overrides
+                .values()
+                .any(|kind| *kind == SourceKind::OnePassword)
     }
 }
 
@@ -2025,6 +2041,25 @@ fn parse_label_selector_arg(value: &str) -> Result<BTreeMap<String, String>, Str
     Ok(labels)
 }
 
+fn parse_source_overrides(value: &str) -> Result<BTreeMap<String, SourceKind>, String> {
+    let parsed: BTreeMap<String, String> = serde_json::from_str(value)
+        .map_err(|error| format!("secret source overrides must be a JSON object: {error}"))?;
+    parsed
+        .into_iter()
+        .map(|(placeholder, source)| {
+            if placeholder.trim().is_empty() {
+                return Err("secret source override names must not be empty".to_owned());
+            }
+            let source_kind = source.parse::<SourceKind>().map_err(|error| {
+                format!(
+                    "secret source override for {placeholder:?} has invalid source {source:?}: {error}"
+                )
+            })?;
+            Ok((placeholder, source_kind))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2089,6 +2124,23 @@ mod tests {
                 what: "unsupported transform".to_owned(),
             })
         ));
+    }
+
+    #[test]
+    fn parses_per_secret_source_overrides() {
+        let overrides =
+            parse_source_overrides(r#"{"OPENAI_API_KEY":"onepassword","GITHUB_TOKEN":"env"}"#)
+                .unwrap();
+
+        assert_eq!(overrides["OPENAI_API_KEY"], SourceKind::OnePassword);
+        assert_eq!(overrides["GITHUB_TOKEN"], SourceKind::Env);
+    }
+
+    #[test]
+    fn rejects_invalid_per_secret_source_overrides() {
+        let error = parse_source_overrides(r#"{"OPENAI_API_KEY":"vault"}"#).unwrap_err();
+        assert!(error.contains("OPENAI_API_KEY"));
+        assert!(error.contains("invalid source"));
     }
 
     #[test]
@@ -2845,6 +2897,38 @@ mod tests {
             vec![
                 "centaur-infra-env".to_owned(),
                 "centaur-secret-env".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn onepassword_override_mounts_bootstrap_secret_with_env_default() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--kubernetes-sandbox-iron-proxy-mode",
+            "enabled",
+            "--kubernetes-firewall-ca-secret-name",
+            "centaur-firewall-ca",
+            "--kubernetes-firewall-ca-key-secret-name",
+            "centaur-firewall-ca-key",
+            "--kubernetes-firewall-manager-secret-source",
+            "env",
+            "--kubernetes-firewall-manager-secret-source-overrides",
+            r#"{"OPENAI_API_KEY":"onepassword"}"#,
+            "--kubernetes-bootstrap-secret-name",
+            "centaur-onepassword-bootstrap",
+            "--kubernetes-secret-env-name",
+            "centaur-infra-env",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            args.sandbox.iron_proxy.env_from_secret_names(),
+            vec![
+                "centaur-infra-env".to_owned(),
+                "centaur-onepassword-bootstrap".to_owned()
             ]
         );
     }

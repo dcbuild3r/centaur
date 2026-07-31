@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use strum::EnumString;
 
 /// How a tool secret's placeholder resolves into an iron-control secret source.
@@ -9,6 +11,11 @@ pub struct SourcePolicy {
     pub kind: SourceKind,
     pub op_vault: String,
     pub ttl: String,
+    /// Optional per-placeholder source overrides. This lets a deployment keep
+    /// the default source in one backend while migrating individual
+    /// credentials, for example using 1Password for `OPENAI_API_KEY` while
+    /// the remaining secrets still come from the Kubernetes environment.
+    pub overrides: BTreeMap<String, SourceKind>,
 }
 
 impl SourcePolicy {
@@ -29,7 +36,27 @@ impl SourcePolicy {
             kind,
             op_vault: op_vault.into(),
             ttl: ttl.into(),
+            overrides: BTreeMap::new(),
         }
+    }
+
+    pub fn with_overrides(mut self, overrides: BTreeMap<String, SourceKind>) -> Self {
+        self.overrides = overrides;
+        self
+    }
+
+    pub fn source_kind_for(&self, placeholder: &str) -> SourceKind {
+        self.overrides
+            .get(placeholder)
+            .copied()
+            // A fully-qualified `op://` reference is an explicit request for
+            // 1Password. Preserve that intent even when the deployment's
+            // default source is the Kubernetes environment.
+            .or_else(|| {
+                (self.kind == SourceKind::Env && placeholder.starts_with("op://"))
+                    .then_some(SourceKind::OnePassword)
+            })
+            .unwrap_or(self.kind)
     }
 }
 

@@ -390,6 +390,8 @@ spec:
               value: {{ printf "app.kubernetes.io/name=%s,app.kubernetes.io/instance=%s,app.kubernetes.io/component=api-rs" (include "centaur.name" .) .Release.Name | quote }}
             - name: FIREWALL_MANAGER_SECRET_SOURCE
               value: {{ .Values.ironProxy.secretSource | quote }}
+            - name: FIREWALL_MANAGER_SECRET_SOURCE_OVERRIDES
+              value: {{ .Values.ironProxy.secretSourceOverrides | toJson | quote }}
             - name: FIREWALL_MANAGER_SECRET_TTL
               value: {{ .Values.ironProxy.secretTtl | quote }}
 {{- if .Values.apiRs.opVault }}
@@ -505,7 +507,9 @@ spec:
           envFrom:
             - secretRef:
                 name: {{ include "centaur.secretEnvName" . }}
-{{- if and (eq .Values.ironProxy.secretSource "onepassword") .Values.secrets.bootstrapSecretName }}
+{{- $sourceOverrides := .Values.ironProxy.secretSourceOverrides | default dict -}}
+{{- $hasOnePasswordOverride := has "onepassword" (values $sourceOverrides) -}}
+{{- if and .Values.secrets.bootstrapSecretName (or (eq .Values.ironProxy.secretSource "onepassword") $hasOnePasswordOverride) }}
             - secretRef:
                 name: {{ .Values.secrets.bootstrapSecretName | quote }}
 {{- end }}
