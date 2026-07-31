@@ -44,6 +44,9 @@ ironProxy:
   # onepassword, or onepassword-connect. This supports staged migration of
   # credentials between backends without changing every secret at once.
   secretSourceOverrides: {}
+  # Optional fully-qualified op:// references keyed by placeholder. A ref
+  # automatically selects the 1Password service-account source for that key.
+  secretSourceRefs: {}
   secretTtl: 10m
 
 # Base tools delivery for api-rs sandboxes. When enabled, repo-cache keeps `repo`

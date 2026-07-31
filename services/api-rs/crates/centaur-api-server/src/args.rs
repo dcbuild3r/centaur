@@ -1766,6 +1766,16 @@ struct IronProxySourceArgs {
         default_value = "{}"
     )]
     source_overrides: BTreeMap<String, SourceKind>,
+    /// JSON map of placeholder names to fully-qualified 1Password refs.
+    /// This is useful when the tool manifest comes from an upstream repo but
+    /// production must use an operator-managed item or non-credential field.
+    #[arg(
+        long = "kubernetes-firewall-manager-secret-source-refs",
+        env = "FIREWALL_MANAGER_SECRET_SOURCE_REFS",
+        value_parser = parse_source_refs,
+        default_value = "{}"
+    )]
+    source_refs: BTreeMap<String, String>,
     #[arg(
         long = "kubernetes-firewall-manager-secret-ttl",
         env = "FIREWALL_MANAGER_SECRET_TTL",
@@ -1796,6 +1806,7 @@ impl IronProxySourceArgs {
             op_vault: self.op_vault.clone(),
             ttl: self.secret_ttl.clone(),
             overrides: self.source_overrides.clone(),
+            refs: self.source_refs.clone(),
         }
     }
 
@@ -1823,6 +1834,13 @@ impl IronProxySourceArgs {
                 .source_overrides
                 .values()
                 .any(|kind| *kind == SourceKind::OnePassword)
+            || self.source_refs.keys().any(|placeholder| {
+                self.source_overrides
+                    .get(placeholder)
+                    .copied()
+                    .unwrap_or(SourceKind::OnePassword)
+                    == SourceKind::OnePassword
+            })
     }
 }
 
@@ -2060,6 +2078,25 @@ fn parse_source_overrides(value: &str) -> Result<BTreeMap<String, SourceKind>, S
         .collect()
 }
 
+fn parse_source_refs(value: &str) -> Result<BTreeMap<String, String>, String> {
+    let parsed: BTreeMap<String, String> = serde_json::from_str(value)
+        .map_err(|error| format!("secret source refs must be a JSON object: {error}"))?;
+    parsed
+        .into_iter()
+        .map(|(placeholder, reference)| {
+            if placeholder.trim().is_empty() {
+                return Err("secret source ref names must not be empty".to_owned());
+            }
+            if !reference.starts_with("op://") {
+                return Err(format!(
+                    "secret source ref for {placeholder:?} must start with op://"
+                ));
+            }
+            Ok((placeholder, reference))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2141,6 +2178,26 @@ mod tests {
         let error = parse_source_overrides(r#"{"OPENAI_API_KEY":"vault"}"#).unwrap_err();
         assert!(error.contains("OPENAI_API_KEY"));
         assert!(error.contains("invalid source"));
+    }
+
+    #[test]
+    fn parses_per_secret_source_refs() {
+        let refs = parse_source_refs(
+            r#"{"NOTION_API_KEY":"op://Centaur/Centaur.run - NOTION_API_KEY/password"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            refs["NOTION_API_KEY"],
+            "op://Centaur/Centaur.run - NOTION_API_KEY/password"
+        );
+    }
+
+    #[test]
+    fn rejects_non_onepassword_source_refs() {
+        let error = parse_source_refs(r#"{"NOTION_API_KEY":"NOTION_API_KEY"}"#).unwrap_err();
+        assert!(error.contains("NOTION_API_KEY"));
+        assert!(error.contains("op://"));
     }
 
     #[test]
@@ -2917,6 +2974,38 @@ mod tests {
             "env",
             "--kubernetes-firewall-manager-secret-source-overrides",
             r#"{"OPENAI_API_KEY":"onepassword"}"#,
+            "--kubernetes-bootstrap-secret-name",
+            "centaur-onepassword-bootstrap",
+            "--kubernetes-secret-env-name",
+            "centaur-infra-env",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            args.sandbox.iron_proxy.env_from_secret_names(),
+            vec![
+                "centaur-infra-env".to_owned(),
+                "centaur-onepassword-bootstrap".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn onepassword_ref_mounts_bootstrap_secret_with_env_default() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--kubernetes-sandbox-iron-proxy-mode",
+            "enabled",
+            "--kubernetes-firewall-ca-secret-name",
+            "centaur-firewall-ca",
+            "--kubernetes-firewall-ca-key-secret-name",
+            "centaur-firewall-ca-key",
+            "--kubernetes-firewall-manager-secret-source",
+            "env",
+            "--kubernetes-firewall-manager-secret-source-refs",
+            r#"{"NOTION_API_KEY":"op://Centaur/Centaur.run - NOTION_API_KEY/password"}"#,
             "--kubernetes-bootstrap-secret-name",
             "centaur-onepassword-bootstrap",
             "--kubernetes-secret-env-name",

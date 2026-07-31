@@ -392,6 +392,8 @@ spec:
               value: {{ .Values.ironProxy.secretSource | quote }}
             - name: FIREWALL_MANAGER_SECRET_SOURCE_OVERRIDES
               value: {{ .Values.ironProxy.secretSourceOverrides | toJson | quote }}
+            - name: FIREWALL_MANAGER_SECRET_SOURCE_REFS
+              value: {{ .Values.ironProxy.secretSourceRefs | toJson | quote }}
             - name: FIREWALL_MANAGER_SECRET_TTL
               value: {{ .Values.ironProxy.secretTtl | quote }}
 {{- if .Values.apiRs.opVault }}
@@ -509,7 +511,8 @@ spec:
                 name: {{ include "centaur.secretEnvName" . }}
 {{- $sourceOverrides := .Values.ironProxy.secretSourceOverrides | default dict -}}
 {{- $hasOnePasswordOverride := has "onepassword" (values $sourceOverrides) -}}
-{{- if and .Values.secrets.bootstrapSecretName (or (eq .Values.ironProxy.secretSource "onepassword") $hasOnePasswordOverride) }}
+{{- $hasOnePasswordRef := gt (len (.Values.ironProxy.secretSourceRefs | default dict)) 0 -}}
+{{- if and .Values.secrets.bootstrapSecretName (or (eq .Values.ironProxy.secretSource "onepassword") $hasOnePasswordOverride $hasOnePasswordRef) }}
             - secretRef:
                 name: {{ .Values.secrets.bootstrapSecretName | quote }}
 {{- end }}

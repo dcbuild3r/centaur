@@ -62,6 +62,15 @@ struct Cli {
     #[arg(long, default_value = "10m")]
     op_ttl: String,
 
+    /// JSON map of placeholder names to fully-qualified 1Password refs.
+    #[arg(
+        long,
+        env = "FIREWALL_MANAGER_SECRET_SOURCE_REFS",
+        value_parser = parse_source_refs,
+        default_value = "{}"
+    )]
+    source_refs: BTreeMap<String, String>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -942,7 +951,7 @@ fn print_identities<'a>(
 }
 
 fn build_source_policy(cli: &Cli) -> Result<SourcePolicy> {
-    Ok(match cli.source_policy {
+    let policy = match cli.source_policy {
         SourcePolicyArg::Env => SourcePolicy::env(),
         SourcePolicyArg::Onepassword | SourcePolicyArg::OnepasswordConnect => {
             let vault = cli.op_vault.clone().ok_or_else(|| {
@@ -954,7 +963,27 @@ fn build_source_policy(cli: &Cli) -> Result<SourcePolicy> {
                 SourcePolicy::onepassword_connect(vault, cli.op_ttl.clone())
             }
         }
-    })
+    };
+    Ok(policy.with_refs(cli.source_refs.clone()))
+}
+
+fn parse_source_refs(value: &str) -> Result<BTreeMap<String, String>, String> {
+    let parsed: BTreeMap<String, String> = serde_json::from_str(value)
+        .map_err(|error| format!("secret source refs must be a JSON object: {error}"))?;
+    parsed
+        .into_iter()
+        .map(|(placeholder, reference)| {
+            if placeholder.trim().is_empty() {
+                return Err("secret source ref names must not be empty".to_owned());
+            }
+            if !reference.starts_with("op://") {
+                return Err(format!(
+                    "secret source ref for {placeholder:?} must start with op://"
+                ));
+            }
+            Ok((placeholder, reference))
+        })
+        .collect()
 }
 
 fn role_identity(role: &RoleSpec, namespace: &str) -> IdentityInput {

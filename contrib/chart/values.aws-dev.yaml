@@ -31,6 +31,8 @@ ironProxy:
   # Secret. Explicit op:// references, such as the Notion tool's page-scoped
   # reference, continue to resolve through the Centaur vault.
   secretSource: env
+  secretSourceRefs:
+    NOTION_API_KEY: op://Centaur/Centaur.run - NOTION_API_KEY/password
 
 secrets:
   bootstrapSecretName: centaur-onepassword-bootstrap

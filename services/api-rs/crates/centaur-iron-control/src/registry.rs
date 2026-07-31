@@ -424,7 +424,9 @@ fn onepassword_source(
     // fully-qualified 1Password references intact so a deployment can point
     // at an existing, operator-managed item without copying its value into a
     // second item. Bare placeholders retain the historical convention.
-    let secret_ref = if placeholder.starts_with("op://") {
+    let secret_ref = if let Some(reference) = policy.secret_ref_for(placeholder) {
+        reference.to_owned()
+    } else if placeholder.starts_with("op://") {
         placeholder.to_owned()
     } else {
         format!("op://{}/{placeholder}/credential", policy.op_vault)
@@ -1063,6 +1065,24 @@ transforms:
             "op://Centaur/Centaur.run - NOTION_API_KEY/password",
             None,
         );
+
+        assert_eq!(source.source_type, "1password");
+        assert_eq!(
+            source.config,
+            json!({
+                "secret_ref": "op://Centaur/Centaur.run - NOTION_API_KEY/password",
+                "ttl": "10m"
+            })
+        );
+    }
+
+    #[test]
+    fn configured_onepassword_ref_selects_item_with_env_default() {
+        let policy = SourcePolicy::env().with_refs(BTreeMap::from([(
+            "NOTION_API_KEY".to_owned(),
+            "op://Centaur/Centaur.run - NOTION_API_KEY/password".to_owned(),
+        )]));
+        let source = source_from_placeholder(&policy, "NOTION_API_KEY", None);
 
         assert_eq!(source.source_type, "1password");
         assert_eq!(
