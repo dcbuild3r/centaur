@@ -16,8 +16,8 @@
     "@chat-adapter/state-pg": "^4.31.0",
     "@linear/sdk": "^76.0.0",
     "chat": "^4.31.0",
-    "hono": "^4.12.18",
-    "pg": "^8.21.0"
+    "hono": "^4.12.32",
+    "pg": "^8.22.0"
   },
   "devDependencies": {
     "@chat-adapter/state-memory": "^4.31.0",
