@@ -330,6 +330,28 @@ jobs:
             --source-refs '{"NOTION_API_KEY":"op://Centaur/Centaur.run - NOTION_API_KEY/password"}' \
             principals grant slack-user-u03tn0duqp --tool notion
 
+          # Sessions created before Slack reliably supplied the acting user were
+          # keyed to the DM conversation instead of the user. Cover both the
+          # legacy unscoped and team-scoped conversation principals so those
+          # persisted sessions receive the same page-scoped credential.
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            --source-policy onepassword \
+            --op-vault Centaur \
+            --source-refs '{"NOTION_API_KEY":"op://Centaur/Centaur.run - NOTION_API_KEY/password"}' \
+            principals grant slack-channel-d0b9rvcgube --tool notion
+
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            --source-policy onepassword \
+            --op-vault Centaur \
+            --source-refs '{"NOTION_API_KEY":"op://Centaur/Centaur.run - NOTION_API_KEY/password"}' \
+            principals grant slack-channel-tl1hm8uuu-d0b9rvcgube --tool notion
+
       - name: Collect deployment diagnostics
         if: failure()
         run: |
