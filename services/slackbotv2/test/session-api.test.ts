@@ -295,6 +295,28 @@ describe('Slack display text fallback', () => {
     expect(message.rawSlackBlockCount).toBe(2)
   })
 
+  test('preserves the normalized Slack team when raw event data omits it', async () => {
+    const message = await serializeMessage({
+      attachments: [],
+      author: {
+        fullName: 'Test User',
+        isBot: false,
+        isMe: false,
+        userId: 'U1',
+        userName: 'test'
+      },
+      id: '1700000000.000100',
+      isMention: true,
+      metadata: { dateSent: new Date('2026-06-10T00:00:00.000Z') },
+      raw: {},
+      teamId: 'T1',
+      text: 'show me the Notion pages',
+      threadId: 'slack:T1:D1:1700000000.000100'
+    } as unknown as Parameters<typeof serializeMessage>[0])
+
+    expect(message.teamId).toBe('T1')
+  })
+
   test('forwards raw Slack block text to session parts and Codex input', async () => {
     const { fetchFn, requests } = fakeApi()
     const message = apiMessage('', {

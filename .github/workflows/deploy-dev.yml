@@ -313,6 +313,9 @@ jobs:
             deployment/centaur-centaur-api-rs -- \
             /usr/local/bin/centaur-perms \
             --tools-dir /app/tools \
+            --source-policy onepassword \
+            --op-vault Centaur \
+            --source-refs '{"NOTION_API_KEY":"op://Centaur/Centaur.run - NOTION_API_KEY/password"}' \
             principals grant slack-user-tl1hm8uuu-u03tn0duqp --tool notion
 
       - name: Collect deployment diagnostics
