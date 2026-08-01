@@ -318,6 +318,18 @@ jobs:
             --source-refs '{"NOTION_API_KEY":"op://Centaur/Centaur.run - NOTION_API_KEY/password"}' \
             principals grant slack-user-tl1hm8uuu-u03tn0duqp --tool notion
 
+          # Migrate the legacy unscoped DM principal used by sessions created
+          # before team-scoped Slack metadata was preserved. This is idempotent
+          # and keeps existing production DM sessions able to use Notion.
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            --source-policy onepassword \
+            --op-vault Centaur \
+            --source-refs '{"NOTION_API_KEY":"op://Centaur/Centaur.run - NOTION_API_KEY/password"}' \
+            principals grant slack-user-u03tn0duqp --tool notion
+
       - name: Collect deployment diagnostics
         if: failure()
         run: |
