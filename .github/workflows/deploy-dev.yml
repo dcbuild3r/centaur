@@ -305,6 +305,18 @@ jobs:
 
       - name: Reconcile production Notion channel policy
         run: |
+          # Refresh the shared Notion role from the current 1Password value
+          # without assigning it to any principal. This repairs a rotated or
+          # stale role secret while keeping principal access fail-closed.
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            --source-policy onepassword \
+            --op-vault Centaur \
+            --source-refs '{"NOTION_API_KEY":"op://Centaur/Centaur.run - NOTION_API_KEY/password"}' \
+            roles grant tool-notion --tool notion
+
           # Remove historical DM/channel grants. New grants are made by api-rs
           # only for the explicit World Foundation channel policy; the session
           # registrar also revokes stale grants on disallowed Slack principals
