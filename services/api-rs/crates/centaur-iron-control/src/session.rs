@@ -57,6 +57,7 @@ pub struct SessionRegistrar {
     client: IronControlClient,
     namespace: String,
     assign_role_ids: Vec<String>,
+    channel_tool_role_foreign_ids: Vec<String>,
 }
 
 impl SessionRegistrar {
@@ -67,10 +68,24 @@ impl SessionRegistrar {
         namespace: impl Into<String>,
         assign_role_ids: Vec<String>,
     ) -> Self {
+        Self::new_with_channel_tool_roles(client, namespace, assign_role_ids, Vec::new())
+    }
+
+    /// Create a registrar with tool roles that are granted by a channel-name
+    /// policy. These role foreign ids are resolved at session time so a deploy
+    /// can reconcile the tool role after api-rs starts without requiring a
+    /// restart before the first eligible message.
+    pub fn new_with_channel_tool_roles(
+        client: IronControlClient,
+        namespace: impl Into<String>,
+        assign_role_ids: Vec<String>,
+        channel_tool_role_foreign_ids: Vec<String>,
+    ) -> Self {
         Self {
             client,
             namespace: namespace.into(),
             assign_role_ids,
+            channel_tool_role_foreign_ids,
         }
     }
 
@@ -81,8 +96,8 @@ impl SessionRegistrar {
     ///
     /// Default roles are assigned only when the principal does not already
     /// exist. Re-registering an existing channel/user still refreshes identity
-    /// metadata, but it must not restore roles that an operator manually
-    /// removed.
+    /// metadata; channel tool roles are separately reconciled by the explicit
+    /// channel-name policy below.
     pub async fn register_session(
         &self,
         thread_key: &str,
@@ -129,6 +144,47 @@ impl SessionRegistrar {
                     Ok(()) => {}
                     Err(error) if is_status(&error, 409) || is_status(&error, 422) => {}
                     Err(error) => return Err(error),
+                }
+            }
+        }
+        let notion_allowed = notion_channel_access_allowed(
+            thread_key,
+            metadata.slack_team_id,
+            metadata.conversation_name,
+        );
+        let revoke_channel_tool_roles = !self.channel_tool_role_foreign_ids.is_empty()
+            && thread_key.starts_with("slack:")
+            && !notion_allowed;
+        let assigned_roles = if revoke_channel_tool_roles {
+            Some(self.client.list_principal_roles(&record.id).await?)
+        } else {
+            None
+        };
+        if notion_allowed || revoke_channel_tool_roles {
+            for role_foreign_id in &self.channel_tool_role_foreign_ids {
+                let role = match self.client.get_role(&self.namespace, role_foreign_id).await {
+                    Ok(role) => role,
+                    // The deploy reconciler may create the tool role after
+                    // api-rs starts. Leave the session usable and retry on the
+                    // next message instead of failing the whole Slack turn.
+                    Err(error) if is_status(&error, 404) => continue,
+                    Err(error) => return Err(error),
+                };
+                if notion_allowed {
+                    match self.client.assign_role(&record.id, &role.id).await {
+                        Ok(()) => {}
+                        Err(error) if is_status(&error, 409) || is_status(&error, 422) => {}
+                        Err(error) => return Err(error),
+                    }
+                } else if assigned_roles
+                    .as_ref()
+                    .is_some_and(|roles| roles.iter().any(|assigned| assigned.id == role.id))
+                {
+                    match self.client.unassign_role(&record.id, &role.id).await {
+                        Ok(()) => {}
+                        Err(error) if is_status(&error, 404) => {}
+                        Err(error) => return Err(error),
+                    }
                 }
             }
         }
@@ -183,6 +239,36 @@ fn slack_permission(channel_id: String) -> SlackChannelPermissionInput {
         download_enabled: true,
         history_enabled: true,
     }
+}
+
+const WORLD_FOUNDATION_SLACK_TEAM_ID: &str = "TL1HM8UUU";
+
+/// Grant the Notion tool to internal World Foundation channels only. The
+/// explicit `ai-agents` exception is the isolated Orbie test channel; the
+/// `tfh` exclusions prevent shared or TFH-operated channels from inheriting
+/// the World Foundation Notion credential.
+fn notion_channel_access_allowed(
+    thread_key: &str,
+    slack_team_id: Option<&str>,
+    conversation_name: Option<&str>,
+) -> bool {
+    let Some(conversation_id) = slack_conversation_id(thread_key) else {
+        return false;
+    };
+    if is_direct_message(Some(conversation_id))
+        || slack_team_id.map(str::trim) != Some(WORLD_FOUNDATION_SLACK_TEAM_ID)
+    {
+        return false;
+    }
+    let Some(name) = conversation_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    else {
+        return false;
+    };
+    let name = name.strip_prefix('#').unwrap_or(name).to_ascii_lowercase();
+    name == "ai-agents"
+        || (name.starts_with("wf-") && !name.contains("wf-tfh") && !name.contains("tfh"))
 }
 
 fn is_status(err: &IronControlError, code: u16) -> bool {
@@ -427,6 +513,43 @@ mod tests {
         labels.insert("slack_channel_id".to_owned(), "D123".to_owned());
 
         assert_eq!(slack_permission_for_thread("slack:D123:ts", &labels), None);
+    }
+
+    #[test]
+    fn notion_channel_access_matches_only_internal_wf_channels_and_ai_agents() {
+        let allowed = ["wf-legal-ask", "#wf-infrastructure", "ai-agents"];
+        for name in allowed {
+            assert!(notion_channel_access_allowed(
+                "slack:TL1HM8UUU:C123:1773364194.179929",
+                Some("TL1HM8UUU"),
+                Some(name),
+            ));
+        }
+
+        let denied = [
+            "wf-tfh-ai-agents",
+            "wf-tfhard",
+            "wf-project-tfh",
+            "ext-wf-legal-ask",
+            "general",
+        ];
+        for name in denied {
+            assert!(!notion_channel_access_allowed(
+                "slack:TL1HM8UUU:C123:1773364194.179929",
+                Some("TL1HM8UUU"),
+                Some(name),
+            ));
+        }
+        assert!(!notion_channel_access_allowed(
+            "slack:TOTHER:C123:1773364194.179929",
+            Some("TOTHER"),
+            Some("ai-agents"),
+        ));
+        assert!(!notion_channel_access_allowed(
+            "slack:TL1HM8UUU:D123:1773364194.179929",
+            Some("TL1HM8UUU"),
+            Some("ai-agents"),
+        ));
     }
 
     async fn spawn_iron_control_stub(

@@ -738,7 +738,12 @@ impl SandboxArgs {
             client.assign_role(&workflow_host.id, role_id).await?;
         }
         Ok(Some(IronControlRuntime {
-            registrar: SessionRegistrar::new(client.clone(), namespace.clone(), role_ids),
+            registrar: SessionRegistrar::new_with_channel_tool_roles(
+                client.clone(),
+                namespace.clone(),
+                role_ids,
+                vec![RoleSpec::tool("notion").foreign_id],
+            ),
             warm_pool_bootstrap_principal: bootstrap.id,
             workflow_host_principal: workflow_host.id,
             workflow_principal_registrar: WorkflowPrincipalRegistrar::new(client, namespace),
