@@ -59,6 +59,11 @@ import {
   type SlackContextBlock
 } from './console-session-link'
 import { resolveChannelDefault } from './channel-defaults'
+import {
+  DEFAULT_DELETE_REACTION,
+  deleteOrbieMessageEnabled,
+  handleDeleteOrbieReaction
+} from './delete-message'
 import { extractMessageOverrides, type HarnessOverrides } from './overrides'
 import { createFlagMessageOverridesStrategy } from './message-overrides-strategy'
 import {
@@ -365,6 +370,12 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
       trigger: 'subscribed_message'
     })
   })
+
+  if (deleteOrbieMessageEnabled(options)) {
+    chat.onReaction([options.deleteReaction ?? DEFAULT_DELETE_REACTION], async event => {
+      await handleDeleteOrbieReaction(event, options, logger)
+    })
+  }
 
   const app = new Hono()
   app.get('/health', c => c.json({ ok: true, service: 'slackbotv2' }))

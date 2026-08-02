@@ -151,6 +151,14 @@ export type SlackbotV2Options = {
    * conversation id (SLACKBOTV2_CHANNEL_DEFAULTS). See channel-defaults.ts.
    */
   channelDefaults?: ChannelDefaults
+  /** Reaction name that requests deletion of a bot-authored Orbie message. */
+  deleteReaction?: string
+  /** Explicit Slack user IDs permitted to delete Orbie messages. */
+  deleteAllowedUsers?: readonly string[]
+  /** Slack team IDs permitted to delete Orbie messages, resolved via users.info. */
+  deleteAllowedTeamIds?: readonly string[]
+  /** Optional Slack conversation IDs where deletion is permitted. */
+  deleteAllowedChannels?: readonly string[]
   /**
    * Harness for new threads when no --claude/--amp/--codex/--nanocodex flag is
    * given (HarnessType wire value: codex | amp | claudecode | nanocodex).

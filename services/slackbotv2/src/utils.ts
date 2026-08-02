@@ -103,6 +103,14 @@ export function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
 }
 
+/** Parse a comma- or whitespace-delimited environment allowlist. */
+export function splitEnvList(value: string | undefined): string[] {
+  return (value ?? '')
+    .split(/[\s,]+/)
+    .map(part => part.trim())
+    .filter(Boolean)
+}
+
 export function isJsonObject(value: unknown): value is JsonObject {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }

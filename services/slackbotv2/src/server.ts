@@ -1,9 +1,11 @@
 import { createSlackbotV2, type SlackbotV2Options } from './index'
 import { parseChannelDefaults } from './channel-defaults'
+import { DEFAULT_DELETE_REACTION } from './delete-message'
 import {
   createFlagMessageOverridesStrategy,
   createOpenAiMessageOverridesStrategy
 } from './message-overrides-strategy'
+import { splitEnvList } from './utils'
 
 const port = numberEnv('PORT', 3002)
 const apiUrl = stringEnv('CENTAUR_API_URL', 'http://127.0.0.1:8080')
@@ -45,6 +47,10 @@ const options: SlackbotV2Options = {
   channelDefaults: parseChannelDefaults(optionalEnv('SLACKBOTV2_CHANNEL_DEFAULTS'), reason =>
     consoleLogger.warn('slackbotv2 SLACKBOTV2_CHANNEL_DEFAULTS', { reason })
   ),
+  deleteReaction: optionalEnv('SLACKBOTV2_DELETE_REACTION') ?? DEFAULT_DELETE_REACTION,
+  deleteAllowedUsers: splitEnvList(optionalEnv('SLACKBOTV2_DELETE_ALLOWED_USERS')),
+  deleteAllowedTeamIds: splitEnvList(optionalEnv('SLACKBOTV2_DELETE_ALLOWED_TEAM_IDS')),
+  deleteAllowedChannels: splitEnvList(optionalEnv('SLACKBOTV2_DELETE_ALLOWED_CHANNELS')),
   consolePublicUrl: optionalEnv('CENTAUR_CONSOLE_PUBLIC_URL'),
   defaultHarnessType: optionalEnv('SLACKBOTV2_DEFAULT_HARNESS'),
   // Same env vars deployers use to override the sandbox harness model
