@@ -404,6 +404,35 @@ def test_get_user_profile_reads_labeled_custom_fields() -> None:
     }
 
 
+def test_get_user_profile_falls_back_to_standard_fields_without_profile_scope() -> None:
+    client, fake_web_client = _make_client()
+    fake_web_client.user_info_response = {
+        "user": {
+            "id": "U123",
+            "name": "test-user",
+            "real_name": "Test User",
+            "profile": {
+                "display_name": "test-user",
+                "email": "test.user@example.com",
+                "title": "Protocol Engineer",
+            },
+        }
+    }
+
+    def profile_scope_denied(**kwargs):
+        raise _make_slack_error(error="missing_scope", status_code=200)
+
+    fake_web_client.users_profile_get = profile_scope_denied  # type: ignore[method-assign]
+
+    profile = client.get_user_profile("U123")
+
+    assert profile["display_name"] == "test-user"
+    assert profile["email"] == "test.user@example.com"
+    assert profile["title"] == "Protocol Engineer"
+    assert profile["custom_fields"] == {}
+    assert fake_web_client.users_calls == [{"user": "U123"}]
+
+
 def test_get_channel_history_page_preserves_non_auth_error_shape() -> None:
     client, fake_web_client = _make_client()
     client._get_user_cache = lambda: {}  # type: ignore[method-assign]

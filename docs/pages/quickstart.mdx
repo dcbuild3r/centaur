@@ -167,9 +167,11 @@ value and sanitized Slack user, team, channel, thread, and message metadata.
 
 Subscribe to the `app_mention` bot event. For a minimal channel-mention test,
 the app also needs Bot Token Scopes that let it read mentions and write replies,
-for example `app_mentions:read` and `chat:write`. If you enable DM events such
-as `message.im`, Slack will also require direct-message scopes such as
-`im:history`.
+for example `app_mentions:read` and `chat:write`. If Orbie should inspect
+people's standard Slack profiles, also grant `users:read`; add
+`users.profile:read` for custom profile fields and `users:read.email` when
+email addresses are needed. If you enable DM events such as `message.im`, Slack
+will also require direct-message scopes such as `im:history`.
 
 Save changes and reinstall the app.
 

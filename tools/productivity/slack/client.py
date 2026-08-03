@@ -1736,6 +1736,11 @@ class SlackClient:
         Returns profile fields including name, email, title, phone, status,
         timezone, and custom profile fields (e.g. Telegram, Skype, pronouns).
 
+        Slack exposes the standard profile fields through ``users.info`` and
+        custom fields through ``users.profile.get``. Keep the standard fields
+        useful when the bot has ``users:read`` but has not been granted the
+        separate ``users.profile:read`` scope yet.
+
         Args:
             user_id: Slack user ID (e.g., 'U123ABC')
 
@@ -1750,6 +1755,14 @@ class SlackClient:
                 user=user_id,
                 method_key="users.info",
             )
+        except SlackApiError as e:
+            self._raise_slack_api_error(
+                e,
+                slack_method="users.info",
+                access_path="bot_token",
+            )
+
+        try:
             profile_response = self._retry_on_ratelimit(
                 self._client.users_profile_get,
                 user=user_id,
@@ -1757,11 +1770,24 @@ class SlackClient:
                 method_key="users.profile.get",
             )
         except SlackApiError as e:
-            self._raise_slack_api_error(
-                e,
-                slack_method="users.profile.get",
-                access_path="bot_token",
-            )
+            # ``users.info`` is sufficient for name, email, title, status, and
+            # the other standard fields that Orbie needs for a basic answer.
+            # Custom profile fields still require users.profile:read, but a
+            # missing optional scope must not make the entire profile lookup
+            # fail. Preserve hard auth failures such as an invalid/revoked
+            # token so they remain visible to the operator.
+            if self._slack_error_code(e) in {
+                "missing_scope",
+                "no_permission",
+                "not_allowed_token_type",
+            }:
+                profile_response = {}
+            else:
+                self._raise_slack_api_error(
+                    e,
+                    slack_method="users.profile.get",
+                    access_path="bot_token",
+                )
 
         user = user_response.get("user", {})
         profile = profile_response.get("profile", {}) or user.get("profile", {})

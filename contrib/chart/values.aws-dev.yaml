@@ -45,6 +45,9 @@ console:
 
 slackbotv2:
   enabled: true
+  # Allow World Foundation members to request deletion of Orbie-authored
+  # messages with the configured wastebasket reaction.
+  deleteAllowedTeamIds: "TL1HM8UUU"
   # The shared DATABASE_URL still names the newer role, while the persistent
   # Chat SDK state tables are owned by the legacy tempo role.
   databaseUsernameOverride: tempo
