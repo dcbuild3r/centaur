@@ -317,6 +317,12 @@ jobs:
             --source-refs '{"NOTION_API_KEY":"op://Centaur/Centaur.run - NOTION_API_KEY/password"}' \
             roles grant tool-notion --tool notion
 
+          # `roles grant` deliberately requires an existing role.  Dune is a
+          # newly introduced tool, so bootstrap its role through the existing
+          # `principals grant --tool` path (which upserts the role and refreshes
+          # its secrets), then remove the temporary warm-pool assignment.  The
+          # role and its secret grants remain available for the channel policy,
+          # while the warm-pool principal stays roleless.
           kubectl --namespace "$HELM_NAMESPACE" exec \
             deployment/centaur-centaur-api-rs -- \
             /usr/local/bin/centaur-perms \
@@ -324,7 +330,13 @@ jobs:
             --source-policy onepassword \
             --op-vault Centaur \
             --source-refs '{"DUNE_API_KEY":"op://Centaur/Centaur.run - DUNE_API_KEY/password"}' \
-            roles grant tool-dune --tool dune
+            principals grant warm-pool-bootstrap --tool dune
+
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            principals revoke warm-pool-bootstrap --tool dune
 
           # Remove historical DM/channel grants. New grants are made by api-rs
           # only for the explicit World Foundation channel policy; the session
