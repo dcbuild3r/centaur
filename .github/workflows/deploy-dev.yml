@@ -303,7 +303,7 @@ jobs:
             --wait \
             --timeout 10m
 
-      - name: Reconcile production Notion channel policy
+      - name: Reconcile production Notion access policy
         run: |
           # Refresh the shared Notion role from the current 1Password value
           # without assigning it to any principal. This repairs a rotated or
@@ -317,21 +317,28 @@ jobs:
             --source-refs '{"NOTION_API_KEY":"op://Centaur/Centaur.run - NOTION_API_KEY/password"}' \
             roles grant tool-notion --tool notion
 
-          # Remove historical DM/channel grants. New grants are made by api-rs
-          # only for the explicit World Foundation channel policy; the session
-          # registrar also revokes stale grants on disallowed Slack principals
-          # when they next send a message.
+          # Keep the production operator's 1:1 DM principals explicitly
+          # authorized. SessionRegistrar intentionally preserves manual role
+          # changes for existing principals, so revoking these IDs leaves an
+          # existing DM with the NOTION_API_KEY placeholder and produces a
+          # misleading Notion HTTP 401.
           kubectl --namespace "$HELM_NAMESPACE" exec \
             deployment/centaur-centaur-api-rs -- \
             /usr/local/bin/centaur-perms \
             --tools-dir /app/tools \
-            principals revoke slack-user-tl1hm8uuu-u03tn0duqp --tool notion
+            --source-policy onepassword \
+            --op-vault Centaur \
+            --source-refs '{"NOTION_API_KEY":"op://Centaur/Centaur.run - NOTION_API_KEY/password"}' \
+            principals grant slack-user-tl1hm8uuu-u03tn0duqp --tool notion
 
           kubectl --namespace "$HELM_NAMESPACE" exec \
             deployment/centaur-centaur-api-rs -- \
             /usr/local/bin/centaur-perms \
             --tools-dir /app/tools \
-            principals revoke slack-user-u03tn0duqp --tool notion
+            --source-policy onepassword \
+            --op-vault Centaur \
+            --source-refs '{"NOTION_API_KEY":"op://Centaur/Centaur.run - NOTION_API_KEY/password"}' \
+            principals grant slack-user-u03tn0duqp --tool notion
 
           kubectl --namespace "$HELM_NAMESPACE" exec \
             deployment/centaur-centaur-api-rs -- \
@@ -345,11 +352,16 @@ jobs:
             --tools-dir /app/tools \
             principals revoke slack-channel-tl1hm8uuu-d0b9rvcgube --tool notion
 
+          # Also repair the persisted duplicate principal used by older WF DM
+          # sessions. This is idempotent and does not broaden channel access.
           kubectl --namespace "$HELM_NAMESPACE" exec \
             deployment/centaur-centaur-api-rs -- \
             /usr/local/bin/centaur-perms \
             --tools-dir /app/tools \
-            principals revoke prn_3hpCsrtk --tool notion
+            --source-policy onepassword \
+            --op-vault Centaur \
+            --source-refs '{"NOTION_API_KEY":"op://Centaur/Centaur.run - NOTION_API_KEY/password"}' \
+            principals grant prn_3hpCsrtk --tool notion
 
       - name: Collect deployment diagnostics
         if: failure()
