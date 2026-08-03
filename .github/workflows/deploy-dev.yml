@@ -303,11 +303,11 @@ jobs:
             --wait \
             --timeout 10m
 
-      - name: Reconcile production Notion access policy
+      - name: Reconcile production tool policy
         run: |
-          # Refresh the shared Notion role from the current 1Password value
-          # without assigning it to any principal. This repairs a rotated or
-          # stale role secret while keeping principal access fail-closed.
+          # Refresh shared tool roles from the current 1Password values without
+          # assigning them to any principal. This repairs rotated or stale role
+          # secrets while keeping principal access fail-closed.
           kubectl --namespace "$HELM_NAMESPACE" exec \
             deployment/centaur-centaur-api-rs -- \
             /usr/local/bin/centaur-perms \
@@ -317,6 +317,19 @@ jobs:
             --source-refs '{"NOTION_API_KEY":"op://Centaur/Centaur.run - NOTION_API_KEY/password"}' \
             roles grant tool-notion --tool notion
 
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            --source-policy onepassword \
+            --op-vault Centaur \
+            --source-refs '{"DUNE_API_KEY":"op://Centaur/Centaur.run - DUNE_API_KEY/password"}' \
+            roles grant tool-dune --tool dune
+
+          # Remove historical DM/channel grants. New grants are made by api-rs
+          # only for the explicit World Foundation channel policy; the session
+          # registrar also revokes stale grants on disallowed Slack principals
+          # when they next send a message.
           # Keep the production operator's 1:1 DM principals explicitly
           # authorized. SessionRegistrar intentionally preserves manual role
           # changes for existing principals, so revoking these IDs leaves an

@@ -742,7 +742,10 @@ impl SandboxArgs {
                 client.clone(),
                 namespace.clone(),
                 role_ids,
-                vec![RoleSpec::tool("notion").foreign_id],
+                vec![
+                    RoleSpec::tool("notion").foreign_id,
+                    RoleSpec::tool("dune").foreign_id,
+                ],
             ),
             warm_pool_bootstrap_principal: bootstrap.id,
             workflow_host_principal: workflow_host.id,

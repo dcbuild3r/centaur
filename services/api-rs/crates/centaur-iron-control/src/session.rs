@@ -97,7 +97,7 @@ impl SessionRegistrar {
     /// Default roles are assigned only when the principal does not already
     /// exist. Re-registering an existing channel/user still refreshes identity
     /// metadata; channel tool roles are separately reconciled by the explicit
-    /// channel-name policy below.
+    /// World Foundation Slack policy below.
     pub async fn register_session(
         &self,
         thread_key: &str,
@@ -147,20 +147,20 @@ impl SessionRegistrar {
                 }
             }
         }
-        let notion_allowed = notion_channel_access_allowed(
+        let wf_tools_allowed = wf_tool_access_allowed(
             thread_key,
             metadata.slack_team_id,
             metadata.conversation_name,
         );
         let revoke_channel_tool_roles = !self.channel_tool_role_foreign_ids.is_empty()
             && thread_key.starts_with("slack:")
-            && !notion_allowed;
+            && !wf_tools_allowed;
         let assigned_roles = if revoke_channel_tool_roles {
             Some(self.client.list_principal_roles(&record.id).await?)
         } else {
             None
         };
-        if notion_allowed || revoke_channel_tool_roles {
+        if wf_tools_allowed || revoke_channel_tool_roles {
             for role_foreign_id in &self.channel_tool_role_foreign_ids {
                 let role = match self.client.get_role(&self.namespace, role_foreign_id).await {
                     Ok(role) => role,
@@ -170,7 +170,7 @@ impl SessionRegistrar {
                     Err(error) if is_status(&error, 404) => continue,
                     Err(error) => return Err(error),
                 };
-                if notion_allowed {
+                if wf_tools_allowed {
                     match self.client.assign_role(&record.id, &role.id).await {
                         Ok(()) => {}
                         Err(error) if is_status(&error, 409) || is_status(&error, 422) => {}
@@ -243,11 +243,14 @@ fn slack_permission(channel_id: String) -> SlackChannelPermissionInput {
 
 const WORLD_FOUNDATION_SLACK_TEAM_ID: &str = "TL1HM8UUU";
 
-/// Grant the Notion tool to internal World Foundation channels only. The
-/// explicit `ai-agents` exception is the isolated Orbie test channel; the
-/// `tfh` exclusions prevent shared or TFH-operated channels from inheriting
-/// the World Foundation Notion credential.
-fn notion_channel_access_allowed(
+/// Grant the channel-scoped tools to World Foundation Slack identities.
+///
+/// One-to-one DMs are allowed for any user whose Slack event belongs to the
+/// World Foundation team. Multi-party access remains limited to internal
+/// `wf-*` channels plus the explicit `ai-agents` test channel; the `tfh`
+/// exclusions prevent shared or TFH-operated channels from inheriting the
+/// World Foundation credentials.
+fn wf_tool_access_allowed(
     thread_key: &str,
     slack_team_id: Option<&str>,
     conversation_name: Option<&str>,
@@ -255,10 +258,11 @@ fn notion_channel_access_allowed(
     let Some(conversation_id) = slack_conversation_id(thread_key) else {
         return false;
     };
-    if is_direct_message(Some(conversation_id))
-        || slack_team_id.map(str::trim) != Some(WORLD_FOUNDATION_SLACK_TEAM_ID)
-    {
+    if slack_team_id.map(str::trim) != Some(WORLD_FOUNDATION_SLACK_TEAM_ID) {
         return false;
+    }
+    if is_direct_message(Some(conversation_id)) {
+        return true;
     }
     let Some(name) = conversation_name
         .map(str::trim)
@@ -516,10 +520,10 @@ mod tests {
     }
 
     #[test]
-    fn notion_channel_access_matches_only_internal_wf_channels_and_ai_agents() {
+    fn wf_tool_access_matches_wf_dms_and_internal_channels() {
         let allowed = ["wf-legal-ask", "#wf-infrastructure", "ai-agents"];
         for name in allowed {
-            assert!(notion_channel_access_allowed(
+            assert!(wf_tool_access_allowed(
                 "slack:TL1HM8UUU:C123:1773364194.179929",
                 Some("TL1HM8UUU"),
                 Some(name),
@@ -534,21 +538,21 @@ mod tests {
             "general",
         ];
         for name in denied {
-            assert!(!notion_channel_access_allowed(
+            assert!(!wf_tool_access_allowed(
                 "slack:TL1HM8UUU:C123:1773364194.179929",
                 Some("TL1HM8UUU"),
                 Some(name),
             ));
         }
-        assert!(!notion_channel_access_allowed(
+        assert!(!wf_tool_access_allowed(
             "slack:TOTHER:C123:1773364194.179929",
             Some("TOTHER"),
             Some("ai-agents"),
         ));
-        assert!(!notion_channel_access_allowed(
+        assert!(wf_tool_access_allowed(
             "slack:TL1HM8UUU:D123:1773364194.179929",
             Some("TL1HM8UUU"),
-            Some("ai-agents"),
+            Some("Casey Harper"),
         ));
     }
 
