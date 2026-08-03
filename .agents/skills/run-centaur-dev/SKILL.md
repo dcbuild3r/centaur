@@ -197,6 +197,8 @@ oauth_config:
       - mpim:history
       - mpim:read
       - users:read
+      - users.profile:read
+      - users:read.email
 settings:
   event_subscriptions:
     request_url: https://<machine>.<tailnet>.ts.net/api/webhooks/slack
