@@ -76,6 +76,7 @@ RUN useradd -m -s /bin/bash -u 1001 agent \
 ARG CLAUDE_CODE_VERSION=2.1.154
 ARG CODEX_VERSION=0.144.0
 ARG PI_CODING_AGENT_VERSION=0.67.2
+ARG PLAYWRIGHT_VERSION=1.52.0
 ARG NUSHELL_VERSION=0.112.2
 ARG KUBECTL_VERSION=v1.34.2
 ARG KACHE_VERSION=v0.7.0
@@ -129,7 +130,8 @@ RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     && pnpm --version | grep -F "${PNPM_VERSION}"
 
 # ── agent-browser system deps (must run as root before USER agent) ───────────
-# Chrome for Testing doesn't provide Linux ARM64 builds; fall back to system chromium
+# Install the shared libraries needed by Chromium. ARM64 receives the same
+# package set in the follow-up step because the legacy block above is x64-only.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
@@ -146,10 +148,26 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       echo "Skipping browser install: Chrome for Testing does not publish Linux ARM64 builds"; \
     fi
 
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    if [ "$(dpkg --print-architecture)" = "arm64" ]; then \
+      apt-get update && apt-get install -y --no-install-recommends \
+        libxcb-shm0 libx11-xcb1 libx11-6 libxcb1 libxext6 libxrandr2 \
+        libxcomposite1 libxcursor1 libxdamage1 libxfixes3 libxi6 \
+        libgtk-3-0t64 libpangocairo-1.0-0 libpango-1.0-0 libatk1.0-0t64 \
+        libcairo-gobject2 libcairo2 libgdk-pixbuf-2.0-0 libxrender1 \
+        libasound2t64 libfreetype6 libfontconfig1 libdbus-1-3 libnss3 \
+        libnspr4 libdrm2 libxkbcommon0 \
+        libatspi2.0-0t64 libcups2t64 libxshmfence1 libgbm1 \
+        fonts-noto-color-emoji fonts-noto-cjk fonts-freefont-ttf; \
+    fi
+
 USER agent
 WORKDIR /home/agent
 
-ENV PATH="/home/agent/.cargo/bin:/home/agent/.local/bin:/home/agent/.foundry/bin:/home/agent/.bun/bin:${PATH}"
+ENV HOME="/home/agent" \
+    PATH="/home/agent/.cargo/bin:/home/agent/.local/bin:/home/agent/.foundry/bin:/home/agent/.bun/bin:${PATH}" \
+    PLAYWRIGHT_BROWSERS_PATH="/home/agent/.cache/ms-playwright"
 
 ARG FOUNDRY_VERSION=v1.7.0
 ARG AMP_CLI_VERSION=0.0.1774529752-g94f44d
@@ -198,10 +216,34 @@ RUN set -eux; \
     rm -f /tmp/amp.sha256; \
     amp --version >/dev/null
 
-# ── agent-browser: download Chrome binary (runs as agent, deps already installed) ─
-RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
-      agent-browser install; \
-    fi
+# ── agent-browser: install a cross-architecture Chromium runtime ────────────
+# The agent-browser npm package provides the control CLI, not Chrome itself.
+# Playwright publishes both Linux x64 and Linux arm64 Chromium artifacts. Keep
+# one stable executable path so agent-browser never selects Ubuntu's Snap shim.
+RUN set -eux; \
+    npx --yes "playwright@${PLAYWRIGHT_VERSION}" install chromium --no-shell; \
+    browser_path="$(find "${PLAYWRIGHT_BROWSERS_PATH}" -type f -name chrome -perm -111 -print -quit)"; \
+    test -n "${browser_path}"; \
+    printf '%s\n' "${browser_path}" > /tmp/centaur-chromium-path
+
+USER root
+RUN set -eux; \
+    browser_path="$(cat /tmp/centaur-chromium-path)"; \
+    ln -s "${browser_path}" /usr/local/bin/centaur-chromium; \
+    ln -s /usr/local/bin/centaur-chromium /usr/local/bin/chromium; \
+    rm -f /tmp/centaur-chromium-path
+
+ENV AGENT_BROWSER_EXECUTABLE_PATH="/usr/local/bin/centaur-chromium" \
+    AGENT_BROWSER_ARGS="--no-sandbox,--disable-dev-shm-usage"
+
+USER agent
+
+# Fail the image build if the browser binary cannot launch in the same
+# non-root/container conditions used by Orbie. This catches missing libraries,
+# stale paths, and Kubernetes-incompatible sandbox defaults before deployment.
+RUN set -eux; \
+    agent-browser open about:blank; \
+    agent-browser close
 
 # ── Agent skills + workspace setup (rarely changes) ─────────────────────────
 RUN --mount=type=cache,target=/home/agent/.npm,uid=1001,gid=1001,sharing=locked \
