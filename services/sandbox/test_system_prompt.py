@@ -8,6 +8,13 @@ SYSTEM_PROMPT = Path(__file__).with_name("SYSTEM_PROMPT.md")
 
 
 class SystemPromptTest(unittest.TestCase):
+    def test_assistant_identity_is_orbie(self) -> None:
+        prompt = SYSTEM_PROMPT.read_text()
+
+        self.assertIn("Your name is Orbie.", prompt)
+        self.assertIn("identify as Orbie, not Centaur.", prompt)
+        self.assertNotIn("You are Centaur's AI assistant", prompt)
+
     def test_mpp_fallback_discovery_guidance_is_present(self) -> None:
         prompt = SYSTEM_PROMPT.read_text()
 
