@@ -392,6 +392,22 @@ jobs:
         if: failure()
         run: |
           kubectl --namespace "$HELM_NAMESPACE" get jobs,pods -o wide
+          kubectl --namespace "$HELM_NAMESPACE" describe pods \
+            --selector app.kubernetes.io/component=repo-cache \
+            || true
+          kubectl --namespace "$HELM_NAMESPACE" logs \
+            --selector app.kubernetes.io/component=repo-cache \
+            --all-containers=true \
+            --prefix=true \
+            --tail=200 \
+            || true
+          kubectl --namespace "$HELM_NAMESPACE" logs \
+            --selector app.kubernetes.io/component=repo-cache \
+            --all-containers=true \
+            --prefix=true \
+            --previous \
+            --tail=200 \
+            || true
           kubectl --namespace "$HELM_NAMESPACE" logs \
             job/"$HELM_RELEASE-centaur-postgres-role-migration" \
             --all-containers=true \

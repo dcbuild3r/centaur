@@ -158,12 +158,11 @@ RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     && pnpm --version | grep -F "${PNPM_VERSION}"
 
 # ── agent-browser system deps (must run as root before USER agent) ───────────
-# Install the shared libraries needed by Chromium. ARM64 receives the same
-# package set in the follow-up step because the legacy block above is x64-only.
+# Install the shared libraries needed by Playwright Chromium on every supported
+# image architecture. The browser artifact itself is installed below.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
-      apt-get update && apt-get install -y --no-install-recommends \
+    apt-get update && apt-get install -y --no-install-recommends \
         libxcb-shm0 libx11-xcb1 libx11-6 libxcb1 libxext6 libxrandr2 \
         libxcomposite1 libxcursor1 libxdamage1 libxfixes3 libxi6 \
         libgtk-3-0t64 libpangocairo-1.0-0 libpango-1.0-0 libatk1.0-0t64 \
@@ -171,10 +170,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libasound2t64 libfreetype6 libfontconfig1 libdbus-1-3 libnss3 \
         libnspr4 libatk-bridge2.0-0t64 libdrm2 libxkbcommon0 \
         libatspi2.0-0t64 libcups2t64 libxshmfence1 libgbm1 \
-        fonts-noto-color-emoji fonts-noto-cjk fonts-freefont-ttf; \
-    else \
-      echo "Skipping browser install: Chrome for Testing does not publish Linux ARM64 builds"; \
-    fi
+        fonts-noto-color-emoji fonts-noto-cjk fonts-freefont-ttf
 
 USER agent
 WORKDIR /home/agent
