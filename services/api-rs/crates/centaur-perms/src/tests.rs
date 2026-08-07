@@ -1,6 +1,5 @@
 //! Unit tests for pyproject parsing, translation, and overlay resolution.
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -471,34 +470,6 @@ fn translates_http_replace_to_static_input() {
     );
     assert_eq!(input.rules.len(), 1);
     assert_eq!(input.rules[0].host.as_deref(), Some("slack.com"));
-}
-
-#[test]
-fn translates_notion_ref_to_onepassword_source() {
-    let secrets = vec![
-        tools::parse_secret(
-            &entry(r#"{type = "http", name = "NOTION_API_KEY", match_headers = ["Authorization"], hosts = ["api.notion.com"]}"#),
-            &[],
-        )
-        .unwrap(),
-    ];
-    let policy = SourcePolicy::env().with_refs(BTreeMap::from([(
-        "NOTION_API_KEY".to_owned(),
-        "op://Centaur/Centaur.run - NOTION_API_KEY/password".to_owned(),
-    )]));
-    let out = translate::translate("default", "tool-notion", &secrets, &policy);
-    let SecretInput::Static(input) = &out.inputs[0] else {
-        panic!("expected static")
-    };
-
-    assert_eq!(input.source.source_type, "1password");
-    assert_eq!(
-        input.source.config,
-        serde_json::json!({
-            "secret_ref": "op://Centaur/Centaur.run - NOTION_API_KEY/password",
-            "ttl": "10m"
-        })
-    );
 }
 
 #[test]

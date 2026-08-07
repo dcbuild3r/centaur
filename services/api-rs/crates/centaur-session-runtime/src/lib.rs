@@ -33,7 +33,7 @@ use centaur_session_sqlx::{
 use centaur_telemetry::{
     export_thread_trace_root_span, record_sandbox_warm_pool_claim,
     record_session_execution_finished, record_session_execution_started, record_session_failure,
-    record_session_first_token_latency, record_session_phase_duration, set_span_parent_trace,
+    record_session_first_token_latency, set_span_parent_trace,
 };
 use dashmap::{DashMap, DashSet};
 use futures_util::{FutureExt, SinkExt, Stream, StreamExt, future::BoxFuture, stream};
@@ -1214,7 +1214,7 @@ impl SessionRuntime {
     }
 
     /// Attach an iron-control registrar so each new session upserts its
-    /// principal and assigns it the configured roles.
+    /// principal. Iron-control applies configured default roles on creation.
     pub fn with_iron_control(mut self, registrar: SessionRegistrar) -> Self {
         self.iron_control = Some(registrar);
         self
@@ -1905,11 +1905,6 @@ impl SessionRuntime {
                 );
                 return Ok(execution);
             }
-            if let Some(started_at) = execution.started_at
-                && let Ok(queue_wait) = (started_at - execution.created_at).try_into()
-            {
-                record_session_phase_duration("queue_wait", "success", "session", queue_wait);
-            }
             if let Err(error) = self.claim_stdout_owner(&execution.execution_id).await {
                 self.record_execution_failure(thread_key, &execution.execution_id, &error)
                     .await;
@@ -1954,7 +1949,6 @@ impl SessionRuntime {
                 .resolve_sandbox_capabilities(session.iron_control_principal.as_deref())
                 .await?;
 
-            let sandbox_allocation_started = Instant::now();
             let sandbox_id = match self
                 .ensure_session_sandbox(EnsureSessionSandboxRequest {
                     thread_key,
@@ -1970,22 +1964,8 @@ impl SessionRuntime {
                 .instrument(execution_trace_span.clone())
                 .await
             {
-                Ok(sandbox_id) => {
-                    record_session_phase_duration(
-                        "sandbox_allocation",
-                        "success",
-                        "session",
-                        sandbox_allocation_started.elapsed(),
-                    );
-                    sandbox_id
-                }
+                Ok(sandbox_id) => sandbox_id,
                 Err(error) => {
-                    record_session_phase_duration(
-                        "sandbox_allocation",
-                        "failure",
-                        "session",
-                        sandbox_allocation_started.elapsed(),
-                    );
                     self.record_execution_failure(thread_key, &execution.execution_id, &error)
                         .await;
                     return Err(error);
@@ -4287,7 +4267,7 @@ async fn run_stdout_pump(
             "session stdout pump started"
         );
         let mut output_state = StdoutPumpState::default();
-        let mut lost_stdout_ownership = HashSet::new();
+        let mut reported_lost_stdout_ownership = HashSet::new();
         let mut line_count = 0_u64;
         while let Some(line) = stdout.next().await {
             let line = match line {
@@ -4316,9 +4296,6 @@ async fn run_stdout_pump(
             else {
                 continue;
             };
-            if lost_stdout_ownership.contains(&output_execution_id) {
-                continue;
-            }
             let first_token_execution = active_execution
                 .as_ref()
                 .filter(|execution| {
@@ -4341,24 +4318,40 @@ async fn run_stdout_pump(
                 sandbox_id,
                 &output_execution_id,
             );
-            let Some(output_event) =
-                append_output_line(&ctx, &thread_key, &output_execution_id, &line)
-                    .instrument(output_span.clone())
-                    .await?
+            let Some(output_event) = append_output_line(
+                &ctx,
+                &thread_key,
+                &output_execution_id,
+                &line,
+            )
+            .instrument(output_span.clone())
+            .await?
             else {
-                warn!(
+                if reported_lost_stdout_ownership.insert(output_execution_id.clone()) {
+                    warn!(
+                        component = COMPONENT_SESSION_RUNTIME,
+                        event = "session_stdout_owner_lost",
+                        thread_key = %thread_key,
+                        execution_id = %output_execution_id,
+                        sandbox_id,
+                        stdout_owner_id = %ctx.stdout_owner_id,
+                        "stdout pump does not own execution output; skipping row until ownership changes"
+                    );
+                }
+                output_state.forget(&output_execution_id);
+                continue;
+            };
+            if reported_lost_stdout_ownership.remove(&output_execution_id) {
+                info!(
                     component = COMPONENT_SESSION_RUNTIME,
-                    event = "session_stdout_owner_lost",
+                    event = "session_stdout_owner_recovered",
                     thread_key = %thread_key,
                     execution_id = %output_execution_id,
                     sandbox_id,
                     stdout_owner_id = %ctx.stdout_owner_id,
-                    "stdout pump no longer owns execution output; suppressing further rows"
+                    "stdout pump resumed execution output after ownership changed"
                 );
-                lost_stdout_ownership.insert(output_execution_id.clone());
-                output_state.forget(&output_execution_id);
-                continue;
-            };
+            }
             if let Some(execution) = first_token_execution {
                 record_first_token_observation(
                     &ctx,
@@ -5714,9 +5707,6 @@ async fn record_finished_execution_metric(
         }
     };
     record_session_execution_finished(&harness_label, status, execution_duration(execution));
-    if let Some(duration) = execution_duration(execution) {
-        record_session_phase_duration("model_execution", status, &harness_label, duration);
-    }
     if let Some(failure_class) = failure_class {
         record_session_failure(&harness_label, failure_class);
     }
@@ -9704,6 +9694,76 @@ mod adoption_tests {
             Some("Completed after reattach.")
         );
         assert_eq!(backend.opens(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stdout_resumes_after_ownership_handoff() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:stdout-handoff-{}", uuid::Uuid::new_v4())).unwrap();
+        let execution_id =
+            orphaned_execution(&store, &thread_key, Some("sbx-stdout-handoff"), true).await;
+        assert!(
+            store
+                .claim_stdout_owner(
+                    &execution_id,
+                    "previous-control-plane",
+                    Duration::from_secs(60),
+                )
+                .await
+                .expect("claim previous owner")
+        );
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let (io, mut stdout, _stdin) = mock_io();
+        backend.push_io(io).await;
+        let runtime = runtime_with(&store, backend);
+        runtime
+            .ensure_session_pipe(&thread_key, "sbx-stdout-handoff")
+            .await
+            .expect("open stdout pump");
+
+        // A row received during the lease handoff is fenced, but must not
+        // permanently disable this pump for the execution.
+        stdout
+            .write_all(b"{\"type\":\"thread.started\",\"thread_id\":\"handoff-thread\"}\n")
+            .await
+            .unwrap();
+        sleep(Duration::from_millis(100)).await;
+        store
+            .release_stdout_owner(&execution_id, "previous-control-plane")
+            .await
+            .expect("release previous owner");
+        assert!(
+            store
+                .claim_stdout_owner(
+                    &execution_id,
+                    &runtime.stdout_owner_id,
+                    Duration::from_secs(60),
+                )
+                .await
+                .expect("claim current owner")
+        );
+
+        stdout
+            .write_all(&completed_output_bytes(
+                "Completed after ownership handoff.",
+            ))
+            .await
+            .unwrap();
+        wait_for_event(&store, &thread_key, "session.execution_completed").await;
+        let all = events(&store, &thread_key).await;
+        let completed = all
+            .iter()
+            .find(|event| event.event_type == "session.execution_completed")
+            .expect("completed event");
+        assert_eq!(
+            completed.payload["result_text"].as_str(),
+            Some("Completed after ownership handoff.")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

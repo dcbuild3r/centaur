@@ -27,5 +27,5 @@ build-backend = "hatchling.build"
 [tool.centaur]
 module = "client.py"
 secrets = [
-    {type = "http", name = "NOTION_API_KEY", secret_ref = "op://Centaur/Centaur.run - NOTION_API_KEY/password", mode = "inject", inject_header = "Authorization", inject_formatter = "Bearer {{ .Value }}", hosts = ["api.notion.com"]},
+    {type = "http", name = "NOTION_API_KEY", mode = "inject", inject_header = "Authorization", inject_formatter = "Bearer {{ .Value }}", hosts = ["api.notion.com"]},
 ]

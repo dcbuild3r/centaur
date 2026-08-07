@@ -251,22 +251,11 @@ export async function serializeMessage(
     raw: message.raw,
     rawSlackAttachmentCount: displayText.rawAttachmentCount,
     rawSlackBlockCount: displayText.rawBlockCount,
-    // Chat SDK normalizes the installation team onto `message.teamId`, while
-    // some Slack event payloads do not retain `team`/`team_id` in `raw`. Keep
-    // the normalized value so create-session metadata can select the
-    // team-scoped principal and credentials.
-    teamId: (normalizedSlackTeamId(message) || slackTeamId(message.raw)) as string,
+    teamId: slackTeamId(message.raw) as string,
     text: message.text,
     threadId: message.threadId,
     timestamp: message.metadata.dateSent.toISOString()
   }
-}
-
-function normalizedSlackTeamId(message: Message): string | undefined {
-  // The Chat SDK adapter attaches the installation team to the runtime
-  // message, but the shared `Message` type does not expose that adapter field.
-  const teamId = (message as Message & { teamId?: unknown }).teamId
-  return typeof teamId === 'string' && teamId.length > 0 ? teamId : undefined
 }
 
 function slackRawFileAttachments(raw: unknown, options?: SlackbotV2Options): Attachment[] {

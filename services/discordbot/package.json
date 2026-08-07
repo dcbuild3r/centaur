@@ -15,9 +15,9 @@
     "@chat-adapter/discord": "^4.31.0",
     "@chat-adapter/state-pg": "^4.31.0",
     "chat": "^4.31.0",
-    "discord.js": "^14.27.0",
-    "hono": "^4.12.32",
-    "pg": "^8.22.0"
+    "discord.js": "^14.25.1",
+    "hono": "^4.12.18",
+    "pg": "^8.21.0"
   },
   "devDependencies": {
     "@chat-adapter/state-memory": "^4.31.0",

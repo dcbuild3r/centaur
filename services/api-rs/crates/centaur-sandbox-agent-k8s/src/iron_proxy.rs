@@ -295,24 +295,20 @@ impl AgentSandboxBackend {
         };
         let pg = self.resolved_pg_for_recreation(Some(&sandbox));
         let replace_placeholders = self.effective_replace_placeholders(&principal_id).await?;
-        let observability_enabled = sandbox_observability_enabled(&sandbox, &self.config.container_name)
-            .unwrap_or_else(|| {
-                tracing::warn!(
-                    sandbox_id = id.as_str(),
-                    container_name = self.config.container_name.as_str(),
-                    "sandbox observability capability env is missing or invalid; defaulting to enabled network policy"
-                );
-                true
-            });
-        let api_server_enabled = sandbox_api_server_enabled(&sandbox, &self.config.container_name)
-            .unwrap_or_else(|| {
-                tracing::warn!(
-                    sandbox_id = id.as_str(),
-                    container_name = self.config.container_name.as_str(),
-                    "sandbox API server capability env is missing or invalid; defaulting to enabled network policy"
-                );
-                true
-            });
+        let observability_enabled = resolve_resume_capability(
+            sandbox_observability_enabled(&sandbox, &self.config.container_name),
+            sandbox.metadata.labels.as_ref(),
+            OBSERVABILITY_ENABLED_LABEL,
+            "observability",
+            id.as_str(),
+        );
+        let api_server_enabled = resolve_resume_capability(
+            sandbox_api_server_enabled(&sandbox, &self.config.container_name),
+            sandbox.metadata.labels.as_ref(),
+            API_SERVER_ENABLED_LABEL,
+            "api_server",
+            id.as_str(),
+        );
         Ok(Some(self.resolved_iron_proxy_for_principal(
             id,
             principal_id,
@@ -590,14 +586,23 @@ impl AgentSandboxBackend {
         if let Some(proxy_id) = proxy_id
             && self.has_usable_iron_proxy_resources(id).await?
         {
+            let sandbox = self
+                .sandboxes()
+                .get(id.as_str())
+                .await
+                .map_err(|err| map_kube_error("get sandbox for proxy principal check", err))?;
+            let assigned_principal = sandbox
+                .metadata
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.get(crate::IRON_CONTROL_PRINCIPAL_ANNOTATION));
+            if assigned_principal.map(String::as_str) == Some(principal_id) && labels.is_empty() {
+                return Ok(());
+            }
+
             let iron_control = self.config.iron_control.as_ref().ok_or_else(|| {
                 SandboxError::backend("iron-proxy requires iron-control to be configured")
             })?;
-            // Reassign even when the principal is unchanged. The effective
-            // secret source may have changed since this sandbox was created
-            // (for example, after a deployment moves OPENAI_API_KEY from
-            // 1Password back to the AWS-backed environment Secret). Reusing
-            // the proxy without a sync leaves it serving its stale config.
             let proxy = iron_control
                 .client
                 .assign_proxy_principal(&proxy_id, principal_id, labels)
@@ -642,25 +647,39 @@ impl AgentSandboxBackend {
         let replace_placeholders = self.effective_replace_placeholders(&principal_id).await?;
         let observability_enabled = sandbox
             .as_ref()
-            .and_then(|sandbox| sandbox_observability_enabled(sandbox, &self.config.container_name))
+            .map(|sandbox| {
+                resolve_resume_capability(
+                    sandbox_observability_enabled(sandbox, &self.config.container_name),
+                    sandbox.metadata.labels.as_ref(),
+                    OBSERVABILITY_ENABLED_LABEL,
+                    "observability",
+                    id.as_str(),
+                )
+            })
             .unwrap_or_else(|| {
                 tracing::warn!(
                     sandbox_id = id.as_str(),
-                    container_name = self.config.container_name.as_str(),
-                    "sandbox observability capability env is missing or invalid during proxy repair; defaulting to enabled network policy"
+                    "sandbox CR missing during proxy repair; failing closed for observability network policy"
                 );
-                true
+                false
             });
         let api_server_enabled = sandbox
             .as_ref()
-            .and_then(|sandbox| sandbox_api_server_enabled(sandbox, &self.config.container_name))
+            .map(|sandbox| {
+                resolve_resume_capability(
+                    sandbox_api_server_enabled(sandbox, &self.config.container_name),
+                    sandbox.metadata.labels.as_ref(),
+                    API_SERVER_ENABLED_LABEL,
+                    "api_server",
+                    id.as_str(),
+                )
+            })
             .unwrap_or_else(|| {
                 tracing::warn!(
                     sandbox_id = id.as_str(),
-                    container_name = self.config.container_name.as_str(),
-                    "sandbox API server capability env is missing or invalid during proxy repair; defaulting to enabled network policy"
+                    "sandbox CR missing during proxy repair; failing closed for API server network policy"
                 );
-                true
+                false
             });
         let resolved = self.resolved_iron_proxy_for_principal(
             id,
@@ -1741,6 +1760,32 @@ fn sandbox_api_server_enabled(sandbox: &crate::crd::Sandbox, container_name: &st
     .and_then(|value| value.parse().ok())
 }
 
+/// Prefer a present, parseable capability env. When env is missing/invalid,
+/// fall back to the sandbox CR label (`"true"` => enabled; absent => disabled).
+/// Never default missing state to enabled (fail closed).
+fn resolve_resume_capability(
+    env_enabled: Option<bool>,
+    labels: Option<&BTreeMap<String, String>>,
+    label_key: &str,
+    capability: &str,
+    sandbox_id: &str,
+) -> bool {
+    if let Some(enabled) = env_enabled {
+        return enabled;
+    }
+    let label_enabled = labels
+        .and_then(|labels| labels.get(label_key))
+        .is_some_and(|value| value == "true");
+    tracing::warn!(
+        sandbox_id,
+        capability,
+        label_key,
+        label_enabled,
+        "sandbox capability env missing or invalid; using CR label fallback (fail closed when absent)"
+    );
+    label_enabled
+}
+
 fn sandbox_env_value(
     sandbox: &crate::crd::Sandbox,
     name: &str,
@@ -2353,6 +2398,63 @@ mod tests {
             .unwrap();
         assert!(!policy_selector.contains_key(OBSERVABILITY_ENABLED_LABEL));
         assert!(!policy_selector.contains_key(API_SERVER_ENABLED_LABEL));
+    }
+
+    #[test]
+    fn resume_capability_prefers_valid_env_and_fails_closed_without_it() {
+        let mut labels = BTreeMap::new();
+        labels.insert(OBSERVABILITY_ENABLED_LABEL.to_owned(), "true".to_owned());
+        labels.insert(API_SERVER_ENABLED_LABEL.to_owned(), "true".to_owned());
+
+        assert!(resolve_resume_capability(
+            Some(true),
+            Some(&labels),
+            OBSERVABILITY_ENABLED_LABEL,
+            "observability",
+            "asbx-test",
+        ));
+        assert!(!resolve_resume_capability(
+            Some(false),
+            Some(&labels),
+            OBSERVABILITY_ENABLED_LABEL,
+            "observability",
+            "asbx-test",
+        ));
+        assert!(resolve_resume_capability(
+            None,
+            Some(&labels),
+            OBSERVABILITY_ENABLED_LABEL,
+            "observability",
+            "asbx-test",
+        ));
+        assert!(!resolve_resume_capability(
+            None,
+            Some(&BTreeMap::new()),
+            OBSERVABILITY_ENABLED_LABEL,
+            "observability",
+            "asbx-test",
+        ));
+        assert!(!resolve_resume_capability(
+            None,
+            None,
+            API_SERVER_ENABLED_LABEL,
+            "api_server",
+            "asbx-test",
+        ));
+        assert!(!resolve_resume_capability(
+            Some(false),
+            None,
+            API_SERVER_ENABLED_LABEL,
+            "api_server",
+            "asbx-test",
+        ));
+        assert!(resolve_resume_capability(
+            Some(true),
+            None,
+            API_SERVER_ENABLED_LABEL,
+            "api_server",
+            "asbx-test",
+        ));
     }
 
     #[test]

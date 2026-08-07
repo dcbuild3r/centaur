@@ -1,11 +1,11 @@
 //! Per-session principal registration.
 //!
 //! Roles are registered once at startup (see [`crate::register_role`]); a
-//! [`SessionRegistrar`] carries the resulting role OIDs and, when a session
-//! starts, upserts the session's principal. Brand-new principals receive the
-//! default roles once; existing principals keep their current assignments so
-//! operator revocations in console or ``centaur-perms`` remain sticky. The
-//! principal is derived from the thread key (see [`crate::derive_principal`]).
+//! When a session starts, [`SessionRegistrar`] upserts the session's principal.
+//! Iron-control owns default role assignment for brand-new principals, while
+//! existing principals keep their current assignments so operator revocations
+//! in console or ``centaur-perms`` remain sticky. The principal is derived from
+//! the thread key (see [`crate::derive_principal`]).
 
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -56,35 +56,22 @@ impl<'a> SessionPrincipalMetadata<'a> {
 pub struct SessionRegistrar {
     client: IronControlClient,
     namespace: String,
-    assign_role_ids: Vec<String>,
     channel_tool_role_foreign_ids: Vec<String>,
 }
 
 impl SessionRegistrar {
-    /// ``assign_role_ids`` are the iron-control role OIDs (from
-    /// [`crate::register_role`]) to assign to every session's principal.
-    pub fn new(
-        client: IronControlClient,
-        namespace: impl Into<String>,
-        assign_role_ids: Vec<String>,
-    ) -> Self {
-        Self::new_with_channel_tool_roles(client, namespace, assign_role_ids, Vec::new())
+    pub fn new(client: IronControlClient, namespace: impl Into<String>) -> Self {
+        Self::new_with_channel_tool_roles(client, namespace, Vec::new())
     }
 
-    /// Create a registrar with tool roles that are granted by a channel-name
-    /// policy. These role foreign ids are resolved at session time so a deploy
-    /// can reconcile the tool role after api-rs starts without requiring a
-    /// restart before the first eligible message.
     pub fn new_with_channel_tool_roles(
         client: IronControlClient,
         namespace: impl Into<String>,
-        assign_role_ids: Vec<String>,
         channel_tool_role_foreign_ids: Vec<String>,
     ) -> Self {
         Self {
             client,
             namespace: namespace.into(),
-            assign_role_ids,
             channel_tool_role_foreign_ids,
         }
     }
@@ -94,10 +81,8 @@ impl SessionRegistrar {
     /// the OID) so callers can bind the session's egress proxy to the same
     /// identity.
     ///
-    /// Default roles are assigned only when the principal does not already
-    /// exist. Re-registering an existing channel/user still refreshes identity
-    /// metadata; channel tool roles are separately reconciled by the explicit
-    /// World Foundation Slack policy below.
+    /// Re-registering an existing channel/user refreshes identity metadata but
+    /// leaves its role assignments to iron-control.
     pub async fn register_session(
         &self,
         thread_key: &str,
@@ -110,8 +95,8 @@ impl SessionRegistrar {
             metadata.slack_team_id,
             metadata.conversation_name,
         );
-        let mut input = principal.to_identity_input(&self.namespace);
-        apply_slack_dm_email_label(thread_key, metadata.slack_user_email, &mut input.labels);
+        let mut input = principal.to_principal_input(&self.namespace);
+        apply_slack_dm_email(thread_key, metadata.slack_user_email, &mut input);
         let existing = match self
             .client
             .get_principal(&self.namespace, &input.foreign_id)
@@ -124,10 +109,15 @@ impl SessionRegistrar {
         let exists = existing.is_some();
         if let Some(existing) = existing {
             let mut labels = existing.labels;
+            strip_compatibility_identity_labels(&mut labels);
             labels.extend(input.labels);
             input.labels = labels;
         }
-        let slack_permission = slack_permission_for_thread(thread_key, &input.labels);
+        let slack_permission = slack_permission_for_thread(
+            thread_key,
+            input.slack_channel_id.as_deref(),
+            input.slack_user_id.as_deref(),
+        );
         let should_upsert_slack_permission = !exists
             || slack_permission
                 .as_ref()
@@ -137,15 +127,6 @@ impl SessionRegistrar {
             self.client
                 .upsert_slack_channel_permission(&record.id, &permission)
                 .await?;
-        }
-        if !exists {
-            for role_id in &self.assign_role_ids {
-                match self.client.assign_role(&record.id, role_id).await {
-                    Ok(()) => {}
-                    Err(error) if is_status(&error, 409) || is_status(&error, 422) => {}
-                    Err(error) => return Err(error),
-                }
-            }
         }
         let wf_tools_allowed = wf_tool_access_allowed(
             thread_key,
@@ -164,9 +145,6 @@ impl SessionRegistrar {
             for role_foreign_id in &self.channel_tool_role_foreign_ids {
                 let role = match self.client.get_role(&self.namespace, role_foreign_id).await {
                     Ok(role) => role,
-                    // The deploy reconciler may create the tool role after
-                    // api-rs starts. Leave the session usable and retry on the
-                    // next message instead of failing the whole Slack turn.
                     Err(error) if is_status(&error, 404) => continue,
                     Err(error) => return Err(error),
                 };
@@ -198,25 +176,24 @@ impl SessionRegistrar {
 
 fn slack_permission_for_thread(
     thread_key: &str,
-    labels: &BTreeMap<String, String>,
+    slack_channel_id: Option<&str>,
+    slack_user_id: Option<&str>,
 ) -> Option<SlackChannelPermissionInput> {
-    if let Some(channel_id) = labels.get("slack_channel_id") {
+    if let Some(channel_id) = slack_channel_id {
         let channel_id = channel_id.trim();
         return (!is_direct_message(Some(channel_id)))
             .then(|| slack_permission(channel_id.to_owned()));
     }
 
-    if !labels.contains_key("slack_user_id") {
-        return None;
-    }
+    slack_user_id?;
     let conversation_id = slack_conversation_id(thread_key)?;
     is_direct_message(Some(conversation_id)).then(|| slack_permission(conversation_id.to_owned()))
 }
 
-fn apply_slack_dm_email_label(
+fn apply_slack_dm_email(
     thread_key: &str,
     slack_user_email: Option<&str>,
-    labels: &mut BTreeMap<String, String>,
+    input: &mut crate::models::PrincipalInput,
 ) {
     let Some(email) = slack_user_email
         .map(str::trim)
@@ -227,8 +204,20 @@ fn apply_slack_dm_email_label(
     let Some(conversation_id) = slack_conversation_id(thread_key) else {
         return;
     };
-    if is_direct_message(Some(conversation_id)) && labels.contains_key("slack_user_id") {
-        labels.insert("slack_email".to_owned(), email.to_owned());
+    if is_direct_message(Some(conversation_id)) && input.slack_user_id.is_some() {
+        input.slack_email = Some(email.to_owned());
+    }
+}
+
+fn strip_compatibility_identity_labels(labels: &mut BTreeMap<String, String>) {
+    for label in [
+        "kind",
+        "slack_user_id",
+        "slack_channel_id",
+        "slack_team_id",
+        "slack_email",
+    ] {
+        labels.remove(label);
     }
 }
 
@@ -243,13 +232,6 @@ fn slack_permission(channel_id: String) -> SlackChannelPermissionInput {
 
 const WORLD_FOUNDATION_SLACK_TEAM_ID: &str = "TL1HM8UUU";
 
-/// Grant the channel-scoped tools to World Foundation Slack identities.
-///
-/// One-to-one DMs are allowed for any user whose Slack event belongs to the
-/// World Foundation team. Multi-party access remains limited to internal
-/// `wf-*` channels plus the explicit `ai-agents` test channel; the `tfh`
-/// exclusions prevent shared or TFH-operated channels from inheriting the
-/// World Foundation credentials.
 fn wf_tool_access_allowed(
     thread_key: &str,
     slack_team_id: Option<&str>,
@@ -283,6 +265,7 @@ fn is_status(err: &IronControlError, code: u16) -> bool {
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use crate::derive_principal;
     use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -350,37 +333,66 @@ mod tests {
     }
 
     #[test]
-    fn slack_dm_email_label_applies_only_to_dm_user_principals() {
-        let mut dm_labels = BTreeMap::new();
-        dm_labels.insert("slack_user_id".to_owned(), "U123".to_owned());
-        apply_slack_dm_email_label(
+    fn slack_dm_email_applies_only_to_dm_user_principals() {
+        let mut dm_input = derive_principal("slack:T123:D123:ts", Some("U123"), None)
+            .to_principal_input("default");
+        apply_slack_dm_email(
             "slack:T123:D123:1773364194.179929",
             Some(" ada@example.com "),
-            &mut dm_labels,
+            &mut dm_input,
         );
-        assert_eq!(
-            dm_labels.get("slack_email").map(String::as_str),
-            Some("ada@example.com")
-        );
+        assert_eq!(dm_input.slack_email.as_deref(), Some("ada@example.com"));
 
-        let mut channel_labels = BTreeMap::new();
-        channel_labels.insert("slack_channel_id".to_owned(), "C123".to_owned());
-        apply_slack_dm_email_label(
+        let mut channel_input = derive_principal("slack:T123:C123:ts", Some("U123"), None)
+            .to_principal_input("default");
+        apply_slack_dm_email(
             "slack:T123:C123:1773364194.179929",
             Some("ada@example.com"),
-            &mut channel_labels,
+            &mut channel_input,
         );
-        assert_eq!(channel_labels.get("slack_email"), None);
+        assert_eq!(channel_input.slack_email, None);
+    }
+
+    #[test]
+    fn wf_tool_access_matches_wf_dms_and_internal_channels() {
+        for name in ["wf-legal-ask", "#wf-infrastructure", "ai-agents"] {
+            assert!(wf_tool_access_allowed(
+                "slack:TL1HM8UUU:C123:1773364194.179929",
+                Some("TL1HM8UUU"),
+                Some(name),
+            ));
+        }
+
+        for name in [
+            "wf-tfh-ai-agents",
+            "wf-tfhard",
+            "wf-project-tfh",
+            "ext-wf-legal-ask",
+            "general",
+        ] {
+            assert!(!wf_tool_access_allowed(
+                "slack:TL1HM8UUU:C123:1773364194.179929",
+                Some("TL1HM8UUU"),
+                Some(name),
+            ));
+        }
+        assert!(!wf_tool_access_allowed(
+            "slack:TOTHER:C123:1773364194.179929",
+            Some("TOTHER"),
+            Some("ai-agents"),
+        ));
+        assert!(wf_tool_access_allowed(
+            "slack:TL1HM8UUU:D123:1773364194.179929",
+            Some("TL1HM8UUU"),
+            Some("Ada Lovelace"),
+        ));
     }
 
     #[tokio::test]
-    async fn register_session_seeds_roles_for_new_principal() {
+    async fn register_session_leaves_default_roles_to_iron_control() {
         let (base_url, requests, server) = spawn_iron_control_stub(false).await;
-        let registrar = SessionRegistrar::new(
-            IronControlClient::new(base_url, "test-key"),
-            "default",
-            vec!["role_infra".to_owned()],
-        );
+        let registrar =
+            SessionRegistrar::new(IronControlClient::new(base_url, "test-key"), "default");
         let metadata = json!({
             "slack_user_id": "U123",
             "slack_team_id": "T123",
@@ -404,18 +416,20 @@ mod tests {
                 &"POST /api/v1/principals/prn_channel/slack_channel_permissions".to_owned()
             )
         );
-        assert!(requests.contains(&"POST /api/v1/principals/prn_channel/roles".to_owned()));
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request == "POST /api/v1/principals/prn_channel/roles"),
+            "iron-control assigns configured default roles during principal creation"
+        );
         server.abort();
     }
 
     #[tokio::test]
     async fn register_session_does_not_restore_roles_for_existing_principal() {
         let (base_url, requests, server) = spawn_iron_control_stub(true).await;
-        let registrar = SessionRegistrar::new(
-            IronControlClient::new(base_url, "test-key"),
-            "default",
-            vec!["role_infra".to_owned()],
-        );
+        let registrar =
+            SessionRegistrar::new(IronControlClient::new(base_url, "test-key"), "default");
         let metadata = json!({
             "slack_user_id": "U123",
             "slack_team_id": "T123",
@@ -452,11 +466,8 @@ mod tests {
     #[tokio::test]
     async fn register_session_upserts_slack_dm_permission_for_new_user_principal() {
         let (base_url, requests, server) = spawn_iron_control_stub(false).await;
-        let registrar = SessionRegistrar::new(
-            IronControlClient::new(base_url, "test-key"),
-            "default",
-            vec![],
-        );
+        let registrar =
+            SessionRegistrar::new(IronControlClient::new(base_url, "test-key"), "default");
         let metadata = json!({
             "slack_user_id": "U123",
             "slack_team_id": "T123",
@@ -480,11 +491,8 @@ mod tests {
     #[tokio::test]
     async fn register_session_upserts_slack_dm_permission_for_existing_user_principal() {
         let (base_url, requests, server) = spawn_iron_control_stub(true).await;
-        let registrar = SessionRegistrar::new(
-            IronControlClient::new(base_url, "test-key"),
-            "default",
-            vec!["role_infra".to_owned()],
-        );
+        let registrar =
+            SessionRegistrar::new(IronControlClient::new(base_url, "test-key"), "default");
         let metadata = json!({
             "slack_user_id": "U123",
             "slack_team_id": "T123",
@@ -513,47 +521,31 @@ mod tests {
 
     #[test]
     fn slack_permission_for_thread_skips_dm_channel_fallback_without_user() {
-        let mut labels = BTreeMap::new();
-        labels.insert("slack_channel_id".to_owned(), "D123".to_owned());
-
-        assert_eq!(slack_permission_for_thread("slack:D123:ts", &labels), None);
+        assert_eq!(
+            slack_permission_for_thread("slack:D123:ts", Some("D123"), None),
+            None
+        );
     }
 
     #[test]
-    fn wf_tool_access_matches_wf_dms_and_internal_channels() {
-        let allowed = ["wf-legal-ask", "#wf-infrastructure", "ai-agents"];
-        for name in allowed {
-            assert!(wf_tool_access_allowed(
-                "slack:TL1HM8UUU:C123:1773364194.179929",
-                Some("TL1HM8UUU"),
-                Some(name),
-            ));
-        }
+    fn compatibility_identity_labels_are_not_merged_back_into_writes() {
+        let mut labels = BTreeMap::from([
+            ("kind".to_owned(), "slack_dm".to_owned()),
+            ("slack_user_id".to_owned(), "U0123456789".to_owned()),
+            ("slack_team_id".to_owned(), "T0123456789".to_owned()),
+            ("managed-by".to_owned(), "centaur".to_owned()),
+            ("team".to_owned(), "platform".to_owned()),
+        ]);
 
-        let denied = [
-            "wf-tfh-ai-agents",
-            "wf-tfhard",
-            "wf-project-tfh",
-            "ext-wf-legal-ask",
-            "general",
-        ];
-        for name in denied {
-            assert!(!wf_tool_access_allowed(
-                "slack:TL1HM8UUU:C123:1773364194.179929",
-                Some("TL1HM8UUU"),
-                Some(name),
-            ));
-        }
-        assert!(!wf_tool_access_allowed(
-            "slack:TOTHER:C123:1773364194.179929",
-            Some("TOTHER"),
-            Some("ai-agents"),
-        ));
-        assert!(wf_tool_access_allowed(
-            "slack:TL1HM8UUU:D123:1773364194.179929",
-            Some("TL1HM8UUU"),
-            Some("Casey Harper"),
-        ));
+        strip_compatibility_identity_labels(&mut labels);
+
+        assert_eq!(
+            labels,
+            BTreeMap::from([
+                ("managed-by".to_owned(), "centaur".to_owned()),
+                ("team".to_owned(), "platform".to_owned()),
+            ])
+        );
     }
 
     async fn spawn_iron_control_stub(

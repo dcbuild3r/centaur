@@ -23,6 +23,20 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
     && rm -rf /usr/share/doc /usr/share/man /usr/share/info
 
+# reth's default JIT build uses revmc, which depends on llvm-sys 221.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
+      | gpg --dearmor -o /usr/share/keyrings/llvm-snapshot.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-22 main" \
+      | tee /etc/apt/sources.list.d/llvm-22.list > /dev/null \
+    && apt-get update && apt-get install -y --no-install-recommends \
+      clang-22 lld-22 llvm-22-dev libclang-22-dev libpolly-22-dev \
+    && rm -rf /usr/share/doc /usr/share/man /usr/share/info
+
+ENV LLVM_SYS_221_PREFIX=/usr/lib/llvm-22
+ENV LIBCLANG_PATH=/usr/lib/llvm-22/lib
+
 # ── Python deps ──────────────────────────────────────────────────────────────
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     pip3 install --break-system-packages --no-compile --ignore-installed "packaging>=24.2.0" \
@@ -40,6 +54,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     feedparser>=6.0.0 \
     httplib2>=0.20.0 \
     httpx>=0.28.0 \
+    "openai>=2.53.0" \
     opentelemetry-proto==1.42.1 \
     "psycopg[binary]>=3.2.0" \
     pysocks>=1.7.1 \
@@ -100,6 +115,19 @@ RUN set -eux; \
     chmod +x /usr/local/bin/kubectl; \
     kubectl version --client=true | grep -F "${KUBECTL_VERSION#v}"
 
+# ── AWS CLI v2 ─────────────────────────────────────────────────────────────
+RUN set -eux; \
+    aws_arch="$(case "$(dpkg --print-architecture)" in \
+      amd64) echo x86_64 ;; \
+      arm64) echo aarch64 ;; \
+      *) echo unsupported-architecture >&2; exit 1 ;; \
+    esac)"; \
+    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${aws_arch}.zip" -o /tmp/awscliv2.zip; \
+    unzip -q /tmp/awscliv2.zip -d /tmp; \
+    /tmp/aws/install; \
+    rm -rf /tmp/awscliv2.zip /tmp/aws; \
+    aws --version
+
 # ── Nushell ─────────────────────────────────────────────────────────────────
 RUN set -eux; \
     nu_arch="$(case "$(dpkg --print-architecture)" in \
@@ -146,20 +174,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         fonts-noto-color-emoji fonts-noto-cjk fonts-freefont-ttf; \
     else \
       echo "Skipping browser install: Chrome for Testing does not publish Linux ARM64 builds"; \
-    fi
-
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    if [ "$(dpkg --print-architecture)" = "arm64" ]; then \
-      apt-get update && apt-get install -y --no-install-recommends \
-        libxcb-shm0 libx11-xcb1 libx11-6 libxcb1 libxext6 libxrandr2 \
-        libxcomposite1 libxcursor1 libxdamage1 libxfixes3 libxi6 \
-        libgtk-3-0t64 libpangocairo-1.0-0 libpango-1.0-0 libatk1.0-0t64 \
-        libcairo-gobject2 libcairo2 libgdk-pixbuf-2.0-0 libxrender1 \
-        libasound2t64 libfreetype6 libfontconfig1 libdbus-1-3 libnss3 \
-        libnspr4 libdrm2 libxkbcommon0 \
-        libatspi2.0-0t64 libcups2t64 libxshmfence1 libgbm1 \
-        fonts-noto-color-emoji fonts-noto-cjk fonts-freefont-ttf; \
     fi
 
 USER agent
@@ -244,6 +258,13 @@ USER agent
 RUN set -eux; \
     agent-browser open about:blank; \
     agent-browser close
+
+# Keep Playwright in uv's image-backed cache so isolated tool environments do
+# not download its large Python driver package on first use. Browser binaries
+# are intentionally omitted because DocSend connects to Browserbase over CDP.
+ARG PLAYWRIGHT_VERSION=1.62.0
+RUN uv tool install "playwright==${PLAYWRIGHT_VERSION}" \
+    && playwright --version | grep -F "${PLAYWRIGHT_VERSION}"
 
 # ── Agent skills + workspace setup (rarely changes) ─────────────────────────
 RUN --mount=type=cache,target=/home/agent/.npm,uid=1001,gid=1001,sharing=locked \

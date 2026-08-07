@@ -142,10 +142,14 @@ export type SlackbotV2Options = {
   /**
    * Public origin of the Console UI (same value the Console itself uses,
    * `CENTAUR_CONSOLE_PUBLIC_URL`). When set, the first assistant message in a
-   * Slack thread gets an "Open chat in Console" context link. Unset skips
-   * the block entirely.
+   * Slack thread gets an "Open chat in Console" context link. Unset skips the
+   * link; response metadata renders independently according to its configured mode.
    */
   consolePublicUrl?: string
+  /** Controls whether response metadata renders on the first, every, or no live responses. */
+  responseMetadataMode?: 'first' | 'always' | 'never'
+  /** Include the Codex service tier in response metadata footers when they render. */
+  responseServiceTierEnabled?: boolean
   /**
    * Per-channel default harness/model/provider/reasoning, keyed by Slack
    * conversation id (SLACKBOTV2_CHANNEL_DEFAULTS). See channel-defaults.ts.
@@ -197,8 +201,6 @@ export type SlackbotV2Options = {
   maxDurationMs?: number
   postgresUrl?: string
   recoverRenderObligationsOnStart?: boolean
-  /** Interval for rescanning render obligations created after startup. Disabled when unset. */
-  renderRecoveryIntervalMs?: number
   /** Maximum Slack message age eligible for startup render recovery. */
   renderRecoveryMaxObligationAgeMs?: number
   /** Per-thread deadline for one recovery attempt during the startup scan. */
