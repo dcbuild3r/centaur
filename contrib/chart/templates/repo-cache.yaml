@@ -116,6 +116,11 @@ spec:
           command:
             - /usr/local/bin/repo-cache-sync
           env:
+            # The sandbox image defaults HOME to /home/agent, but this
+            # container intentionally runs as root to manage the host cache.
+            # Give git config --global a writable, runtime-local home.
+            - name: HOME
+              value: /tmp
             - name: REPOSITORIES
               value: {{ join " " $repoCacheRepositories | quote }}
             - name: REPOSITORY_REFS

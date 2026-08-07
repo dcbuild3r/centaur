@@ -8,6 +8,16 @@ SYSTEM_PROMPT = SANDBOX_DIR / "SYSTEM_PROMPT.md"
 
 
 class BrowserRuntimeTest(unittest.TestCase):
+    def test_browser_dependencies_are_cross_architecture(self) -> None:
+        dockerfile = DOCKERFILE.read_text()
+        dependency_block = dockerfile.split(
+            "# ── agent-browser system deps", 1
+        )[1].split("\nUSER agent\n", 1)[0]
+
+        self.assertNotIn('dpkg --print-architecture', dependency_block)
+        self.assertIn("libatk-bridge2.0-0t64", dependency_block)
+        self.assertIn("libgbm1", dependency_block)
+
     def test_image_uses_a_pinned_cross_arch_browser_and_launch_gate(self) -> None:
         dockerfile = DOCKERFILE.read_text()
 
