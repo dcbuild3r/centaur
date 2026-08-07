@@ -43,6 +43,13 @@ tokenBroker:
 
 console:
   enabled: true
+  publicUrl: https://centaur-dev.theworldnetwork.org
+  ssoEmailDomains:
+    - world.org
+  bootstrapAdmins:
+    - orbie-automation@world.org
+  googleOauth:
+    enabled: true
 
 slackbotv2:
   enabled: true
