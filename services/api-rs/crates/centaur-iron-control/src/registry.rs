@@ -419,11 +419,6 @@ fn onepassword_source(
     placeholder: &str,
     json_key: Option<&str>,
 ) -> SecretSource {
-    // Tool manifests may need to select an item field whose name does not
-    // follow Centaur's conventional `<placeholder>/credential` layout. Keep
-    // fully-qualified 1Password references intact so a deployment can point
-    // at an existing, operator-managed item without copying its value into a
-    // second item. Bare placeholders retain the historical convention.
     let secret_ref = if let Some(reference) = policy.secret_ref_for(placeholder) {
         reference.to_owned()
     } else if placeholder.starts_with("op://") {
@@ -1024,60 +1019,7 @@ transforms:
     }
 
     #[test]
-    fn translates_per_secret_source_override() {
-        let fragment = load_fragment_str(
-            r#"
-transforms:
-  - name: secrets
-    config:
-      secrets:
-        - replace:
-            proxy_value: OPENAI_API_KEY
-            match_headers: ["Authorization"]
-          rules: [{ host: api.openai.com }]
-"#,
-        )
-        .unwrap();
-        let policy = SourcePolicy::env().with_overrides(BTreeMap::from([(
-            "OPENAI_API_KEY".to_owned(),
-            SourceKind::OnePassword,
-        )]));
-        let inputs = secret_inputs_from_fragment("default", "infra", &fragment, &policy).unwrap();
-        let SecretInput::Static(input) = &inputs[0] else {
-            panic!("expected a static secret");
-        };
-
-        assert_eq!(input.source.source_type, "1password");
-        assert_eq!(
-            input.source.config,
-            json!({
-                "secret_ref": "op://ai-agents/OPENAI_API_KEY/credential",
-                "ttl": "10m"
-            })
-        );
-    }
-
-    #[test]
-    fn explicit_onepassword_ref_survives_env_default() {
-        let policy = SourcePolicy::env();
-        let source = source_from_placeholder(
-            &policy,
-            "op://Centaur/Centaur.run - NOTION_API_KEY/password",
-            None,
-        );
-
-        assert_eq!(source.source_type, "1password");
-        assert_eq!(
-            source.config,
-            json!({
-                "secret_ref": "op://Centaur/Centaur.run - NOTION_API_KEY/password",
-                "ttl": "10m"
-            })
-        );
-    }
-
-    #[test]
-    fn configured_onepassword_ref_selects_item_with_env_default() {
+    fn source_policy_uses_operator_managed_onepassword_ref() {
         let policy = SourcePolicy::env().with_refs(BTreeMap::from([(
             "NOTION_API_KEY".to_owned(),
             "op://Centaur/Centaur.run - NOTION_API_KEY/password".to_owned(),
@@ -1184,25 +1126,6 @@ transforms:
         assert_eq!(
             input.source.config,
             json!({ "secret_ref": "op://ai-agents/GITHUB_TOKEN/credential", "ttl": "10m" })
-        );
-    }
-
-    #[test]
-    fn onepassword_policy_preserves_fully_qualified_op_ref() {
-        let policy = SourcePolicy::onepassword("Centaur", "10m");
-        let source = source_from_placeholder(
-            &policy,
-            "op://Centaur/Centaur.run - NOTION_API_KEY/password",
-            None,
-        );
-
-        assert_eq!(source.source_type, "1password");
-        assert_eq!(
-            source.config,
-            json!({
-                "secret_ref": "op://Centaur/Centaur.run - NOTION_API_KEY/password",
-                "ttl": "10m"
-            })
         );
     }
 

@@ -13,7 +13,14 @@ helm lint "$chart_dir" -f "$chart_dir/values.aws-dev.yaml"
 
 helm template "$release_name" "$chart_dir" -n "$namespace" >/dev/null
 helm template "$release_name" "$chart_dir" -n "$namespace" -f "$chart_dir/values.dev.yaml" >/dev/null
-helm template "$release_name" "$chart_dir" -n "$namespace" -f "$chart_dir/values.aws-dev.yaml" >"$aws_render"
+# The role migration is a one-shot recovery hook and is disabled in the steady
+# state AWS values. Enable it only in this render so its template remains
+# covered without scheduling it on every deployment.
+helm template "$release_name" "$chart_dir" -n "$namespace" \
+  -f "$chart_dir/values.aws-dev.yaml" \
+  --set postgres.roleMigration.enabled=true \
+  --set postgres.roleMigration.previousUsername=world \
+  >"$aws_render"
 
 grep -Fq "postgres-role-migration" "$aws_render"
 grep -Fq "REASSIGN OWNED BY %I TO %I" "$aws_render"

@@ -1,6 +1,17 @@
 require "test_helper"
 
 class SlackChannelPermissionTest < ActiveSupport::TestCase
+  test "has an opaque id" do
+    permission = SlackChannelPermission.create!(
+      principal: principals(:acme_channel),
+      channel_id: "C0123456789",
+      upload_enabled: true
+    )
+
+    assert_match(/\Ascp_[A-Za-z0-9]+\z/, permission.oid)
+    assert_equal permission, SlackChannelPermission.find_by_oid!(permission.oid)
+  end
+
   test "normalizes channel id and requires at least one permission" do
     permission = SlackChannelPermission.new(
       principal: principals(:acme_channel),
@@ -35,10 +46,10 @@ class SlackChannelPermissionTest < ActiveSupport::TestCase
     assert_equal "C0123456789", permission.reload.channel_id
   end
 
-  test "replace_for_principal replaces permission rows" do
+  test "replace_for replaces principal permission rows" do
     principal = principals(:acme_channel)
 
-    SlackChannelPermission.replace_for_principal!(
+    SlackChannelPermission.replace_for!(
       principal,
       [
         {
@@ -109,11 +120,11 @@ class SlackChannelPermissionTest < ActiveSupport::TestCase
     end
   end
 
-  test "replace_for_role normalizes and merges duplicate rows" do
+  test "replace_for normalizes and merges duplicate role rows" do
     role = roles(:acme_infra)
     versions = Principal.where(id: role.principal_ids).pluck(:id, :sync_config_cache_version).to_h
 
-    SlackChannelPermission.replace_for_role!(
+    SlackChannelPermission.replace_for!(
       role,
       [
         {
@@ -150,7 +161,7 @@ class SlackChannelPermissionTest < ActiveSupport::TestCase
     versions = Principal.where(id: role.principal_ids).pluck(:id, :sync_config_cache_version).to_h
 
     assert_raises ActiveRecord::RecordInvalid do
-      SlackChannelPermission.replace_for_role!(
+      SlackChannelPermission.replace_for!(
         role,
         [
           {

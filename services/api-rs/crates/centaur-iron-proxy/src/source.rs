@@ -11,14 +11,7 @@ pub struct SourcePolicy {
     pub kind: SourceKind,
     pub op_vault: String,
     pub ttl: String,
-    /// Optional per-placeholder source overrides. This lets a deployment keep
-    /// the default source in one backend while migrating individual
-    /// credentials, for example using 1Password for `OPENAI_API_KEY` while
-    /// the remaining secrets still come from the Kubernetes environment.
     pub overrides: BTreeMap<String, SourceKind>,
-    /// Optional fully-qualified 1Password references keyed by placeholder.
-    /// This lets a deployment keep tool manifests in a shared upstream repo
-    /// while selecting an operator-managed item or field in its own vault.
     pub refs: BTreeMap<String, String>,
 }
 
@@ -64,9 +57,6 @@ impl SourcePolicy {
                     .contains_key(placeholder)
                     .then_some(SourceKind::OnePassword)
             })
-            // A fully-qualified `op://` reference is an explicit request for
-            // 1Password. Preserve that intent even when the deployment's
-            // default source is the Kubernetes environment.
             .or_else(|| {
                 (self.kind == SourceKind::Env && placeholder.starts_with("op://"))
                     .then_some(SourceKind::OnePassword)

@@ -18,30 +18,52 @@ class Principal < ApplicationRecord
   has_many :mcp_oauth_authorization_codes, dependent: :destroy
   has_many :mcp_oauth_refresh_tokens, dependent: :destroy
   belongs_to :created_by, class_name: "User"
+  belongs_to :console_user, class_name: "User", optional: true
 
-  accepts_nested_attributes_for :slack_channel_permissions,
-                                allow_destroy: true,
-                                reject_if: :reject_slack_channel_permission_attributes?
+  include SlackChannelPermissionOwner
 
   after_commit :auto_grant_matching_oauth_credentials, on: %i[create update]
+  after_create :assign_default_roles, if: :roles_blank_for_defaulting?
   before_validation :apply_sandbox_repo_cache_label
+  before_validation :validate_identity_label_consistency
+  before_validation :promote_identity_labels_to_fields
+  before_validation :strip_identity_labels
   before_commit :bump_own_sync_config_cache_version, on: :update, if: :sync_config_fields_changed?
 
   URL_SAFE_FORMAT = /\A[A-Za-z0-9\-._~]+\z/
   URL_SAFE_MESSAGE = "must contain only URL-safe characters (A-Z, a-z, 0-9, -, ., _, ~)"
   SANDBOX_REPO_CACHE_LABEL = "centaur.sandbox_repo_cache".freeze
   SANDBOX_REPO_CACHE_VALUES = %w[none public all].freeze
+  UNKNOWN_KIND = "unknown".freeze
+  KINDS = %w[
+    unknown user console_user workflow slack_channel slack_dm discord_channel linear_issue
+    teams_user teams_conversation
+  ].freeze
+  SLACK_USER_ID_FORMAT = /\A(?:[UW][A-Z0-9]{8,}|USLACK)\z/
+  SLACK_CHANNEL_ID_FORMAT = /\A[CDG][A-Z0-9]{8,}\z/
+  SLACK_TEAM_ID_FORMAT = /\A[TE][A-Z0-9]{8,}\z/
 
   validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
   validates :foreign_id, uniqueness: { scope: :namespace, allow_nil: true },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true
   validates :sandbox_repo_cache, inclusion: { in: SANDBOX_REPO_CACHE_VALUES }
+  validates :kind, presence: true,
+                   inclusion: { in: KINDS, message: "must be one of #{KINDS.join(", ")}" }
+  validates :slack_user_id, format: { with: SLACK_USER_ID_FORMAT, message: "is not a valid Slack user ID" },
+                            allow_nil: true, if: :will_save_change_to_slack_user_id?
+  validates :slack_channel_id, format: { with: SLACK_CHANNEL_ID_FORMAT, message: "is not a valid Slack channel ID" },
+                               allow_nil: true, if: :will_save_change_to_slack_channel_id?
+  validates :slack_team_id, format: { with: SLACK_TEAM_ID_FORMAT, message: "is not a valid Slack scope ID" },
+                            allow_nil: true, if: :will_save_change_to_slack_team_id?
+  validates :slack_email, format: { with: URI::MailTo::EMAIL_REGEXP, message: "is not a valid email address" },
+                          allow_nil: true, if: :will_save_change_to_slack_email?
+  validates :console_user_email, format: { with: URI::MailTo::EMAIL_REGEXP, message: "is not a valid email address" },
+                                 allow_nil: true, if: :will_save_change_to_console_user_email?
 
   # Stand-in for an inline secret value in redacted config: operator inspection
   # reports that a control_plane source carries a value without revealing it.
   REDACTED = "[redacted]".freeze
   SLACK_CHANNEL_ID_LABEL = "slack_channel_id".freeze
-  SLACK_CHANNEL_ID_FORMAT = /\A[CDG][A-Z0-9]{8,}\z/
 
   # The config of a principal with no effective grants; also what an unassigned
   # proxy resolves to.
@@ -105,37 +127,25 @@ class Principal < ApplicationRecord
   end
 
   def labels_with_sandbox_capabilities
-    labels.to_h.merge(SANDBOX_REPO_CACHE_LABEL => sandbox_repo_cache)
-  end
-
-  def slack_channel_permissions_payload
-    permissions = if association(:slack_channel_permissions).loaded?
-      slack_channel_permissions.sort_by { |permission| [ permission.channel_id, permission.id ] }
-    else
-      slack_channel_permissions.ordered
-    end
-    permissions.map(&:as_permission_json)
+    labels.to_h.merge(
+      PrincipalIdentityLabels.serialize(self),
+      SANDBOX_REPO_CACHE_LABEL => sandbox_repo_cache
+    )
   end
 
   def effective_slack_channel_permissions_payload
-    merged_slack_channel_permissions(effective_slack_channel_permissions)
+    @effective_slack_channel_permissions_payload ||= merged_slack_channel_permissions(effective_slack_channel_permissions)
   end
 
   def inherited_slack_channel_permissions_payload
-    permissions = if loaded_role_slack_channel_permissions?
-      roles.flat_map { |role| role.slack_channel_permissions.to_a }
-    else
-      SlackChannelPermission.where(role_id: role_ids)
+    @inherited_slack_channel_permissions_payload ||= begin
+      permissions = if loaded_role_slack_channel_permissions?
+        roles.flat_map { |role| role.slack_channel_permissions.to_a }
+      else
+        SlackChannelPermission.where(role_id: role_ids)
+      end
+      merged_slack_channel_permissions(permissions)
     end
-    merged_slack_channel_permissions(permissions)
-  end
-
-  def slack_upload_channel_ids
-    slack_channel_ids_by_permission.fetch(:upload)
-  end
-
-  def slack_download_channel_ids
-    slack_channel_ids_by_permission.fetch(:download)
   end
 
   def slack_history_channel_ids
@@ -147,22 +157,32 @@ class Principal < ApplicationRecord
   end
 
   def slack_channel_ids_by_permission
-    effective_slack_channel_permissions_payload.each_with_object(
-      { upload: [], download: [], history: [] }
-    ) do |row, channels|
-      channel_id = row.fetch("channel_id")
-      channels[:upload] << channel_id if row.fetch("upload_enabled")
-      channels[:download] << channel_id if row.fetch("download_enabled")
-      channels[:history] << channel_id if row.fetch("history_enabled")
+    @slack_channel_ids_by_permission ||= begin
+      initial = SlackChannelPermission::PERMISSION_FLAGS.to_h { |flag| [ flag.fetch(:key), [] ] }
+      effective_slack_channel_permissions_payload.each_with_object(initial) do |row, channels|
+        channel_id = row.fetch("channel_id")
+        SlackChannelPermission::PERMISSION_FLAGS.each do |flag|
+          channels[flag.fetch(:key)] << channel_id if row.fetch(flag.fetch(:attribute).to_s)
+        end
+      end
     end
   end
 
-  def self.bump_sync_config_cache_versions(ids)
-    ids = Array(ids).compact.uniq
-    return if ids.empty?
+  def reset_slack_channel_permissions_cache!
+    %i[
+      @effective_slack_channel_permissions_payload
+      @inherited_slack_channel_permissions_payload
+      @slack_channel_ids_by_permission
+    ].each do |ivar|
+      remove_instance_variable(ivar) if instance_variable_defined?(ivar)
+    end
+  end
 
-    where(id: ids).update_all("sync_config_cache_version = sync_config_cache_version + 1")
-    enqueue_sync_config_snapshot_warm(ids)
+  def self.bump_sync_config_cache_versions(targets)
+    scope = sync_config_cache_bump_scope(targets)
+    return unless scope
+
+    scope.update_all("sync_config_cache_version = sync_config_cache_version + 1")
   end
 
   def self.enqueue_sync_config_snapshot_warm(ids)
@@ -171,13 +191,20 @@ class Principal < ApplicationRecord
     end
   end
 
-  def self.effective_grantee_ids_for_grantable(grantable)
+  def self.effective_grantees_for_grantable(grantable)
     association = grantable.model_name.singular.to_sym
     grants = Grant.where(association => grantable)
-    direct_ids = grants.where.not(principal_id: nil).pluck(:principal_id)
-    role_ids = grants.where.not(role_id: nil).pluck(:role_id)
-    role_principal_ids = role_ids.empty? ? [] : PrincipalRole.where(role_id: role_ids).pluck(:principal_id)
-    direct_ids + role_principal_ids
+    direct = where(id: grants.where.not(principal_id: nil).select(:principal_id))
+    role_members = where(
+      id: PrincipalRole.where(
+        role_id: grants.where.not(role_id: nil).select(:role_id)
+      ).select(:principal_id)
+    )
+    direct.or(role_members)
+  end
+
+  def self.combine_scopes(scopes)
+    scopes.compact.reduce(none) { |combined, scope| combined.or(scope) }
   end
 
   # Deep-walk a config payload and blank out the inline value of every
@@ -197,6 +224,19 @@ class Principal < ApplicationRecord
 
   private
 
+  def roles_blank_for_defaulting?
+    association(:roles).target.empty? && !roles.exists?
+  end
+
+  def assign_default_roles
+    role_ids = Role.where(namespace: namespace, assign_by_default: true).ids
+    return if role_ids.empty?
+
+    # These assignments are part of the principal's initial state, so there is
+    # no prior sync config to invalidate.
+    PrincipalRole.insert_all!(role_ids.map { |role_id| { principal_id: id, role_id: role_id } })
+  end
+
   def auto_grant_matching_oauth_credentials
     PrincipalCredentialReconciliation.new.apply_for_principal(self)
   end
@@ -205,12 +245,24 @@ class Principal < ApplicationRecord
     self[:labels] = labels.to_h.merge(SANDBOX_REPO_CACHE_LABEL => sandbox_repo_cache)
   end
 
-  def supplied_key?(attributes, key)
-    attributes.key?(key) || attributes.key?(key.to_s)
+  def validate_identity_label_consistency
+    PrincipalIdentityLabels.validate_consistency(self)
   end
 
-  def reject_slack_channel_permission_attributes?(attributes)
-    attributes["id"].blank? && attributes["channel_id"].blank?
+  # Legacy API writers may still send principal identity through labels during
+  # the compatibility release. Promote only fields that were not assigned
+  # directly. Reserved identity labels are stripped below so columns remain
+  # authoritative.
+  def promote_identity_labels_to_fields
+    PrincipalIdentityLabels.assign(self)
+  end
+
+  def strip_identity_labels
+    PrincipalIdentityLabels.strip(self)
+  end
+
+  def supplied_key?(attributes, key)
+    attributes.key?(key) || attributes.key?(key.to_s)
   end
 
   def effective_slack_channel_permissions
@@ -238,14 +290,12 @@ class Principal < ApplicationRecord
     ordered.each_with_object({}) do |permission, by_channel|
       channel_id = permission.channel_id.to_s.strip.upcase
       row = by_channel[channel_id] ||= {
-        "channel_id" => channel_id,
-        "upload_enabled" => false,
-        "download_enabled" => false,
-        "history_enabled" => false
+        "channel_id" => channel_id
       }
-      row["upload_enabled"] ||= permission.upload_enabled
-      row["download_enabled"] ||= permission.download_enabled
-      row["history_enabled"] ||= permission.history_enabled
+      SlackChannelPermission::PERMISSION_ATTRIBUTE_NAMES.each { |flag| row[flag] = false unless row.key?(flag) }
+      SlackChannelPermission::PERMISSION_ATTRIBUTE_NAMES.each do |flag|
+        row[flag] ||= permission.public_send(flag)
+      end
     end.values.sort_by { |row| row.fetch("channel_id") }
   end
 
@@ -263,6 +313,17 @@ class Principal < ApplicationRecord
       .reject(&:blank?)
       .uniq
   end
+
+  def self.sync_config_cache_bump_scope(targets)
+    case targets
+    when ActiveRecord::Relation
+      targets
+    else
+      ids = Array(targets).compact.uniq
+      where(id: ids) if ids.any?
+    end
+  end
+  private_class_method :sync_config_cache_bump_scope
 
   # The single place secret order is decided for every sync array. iron-proxy
   # applies matching transforms in array order and the LAST one wins, so we emit
@@ -292,9 +353,10 @@ class Principal < ApplicationRecord
   end
 
   def sync_config_fields_changed?
-    previous_changes.key?("name") ||
-      previous_changes.key?("labels") ||
-      previous_changes.key?("sandbox_api_server_enabled")
+    identity_fields = PrincipalIdentityLabels.columns
+    ([ "name", "labels", "sandbox_api_server_enabled" ] + identity_fields).any? do |field|
+      previous_changes.key?(field)
+    end
   end
 
   def bump_own_sync_config_cache_version

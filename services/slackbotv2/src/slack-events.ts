@@ -1,7 +1,7 @@
 import type { Logger, Message } from 'chat'
 import { withSlackApiTimeout } from './session-api'
 import type { JsonValue, SlackbotV2Options } from './types'
-import { isJsonObject, splitEnvList, stringValue } from './utils'
+import { isJsonObject, stringValue } from './utils'
 
 type RawSlackBotProfile = {
   app_id?: JsonValue
@@ -331,6 +331,13 @@ async function fetchTriggerBotUserAppId(
 
 function normalizedIdentifierSet(...values: Array<string | undefined>): Set<string> {
   return new Set(values.map(value => value?.trim()).filter((value): value is string => Boolean(value)))
+}
+
+function splitEnvList(value: string | undefined): string[] {
+  return (value ?? '')
+    .split(/[\s,]+/)
+    .map(part => part.trim())
+    .filter(Boolean)
 }
 
 function isRawSlackEvent(value: unknown): value is RawSlackEvent {

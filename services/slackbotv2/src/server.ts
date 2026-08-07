@@ -1,11 +1,9 @@
 import { createSlackbotV2, type SlackbotV2Options } from './index'
 import { parseChannelDefaults } from './channel-defaults'
-import { DEFAULT_DELETE_REACTION } from './delete-message'
 import {
   createFlagMessageOverridesStrategy,
   createOpenAiMessageOverridesStrategy
 } from './message-overrides-strategy'
-import { splitEnvList } from './utils'
 
 const port = numberEnv('PORT', 3002)
 const apiUrl = stringEnv('CENTAUR_API_URL', 'http://127.0.0.1:8080')
@@ -47,11 +45,9 @@ const options: SlackbotV2Options = {
   channelDefaults: parseChannelDefaults(optionalEnv('SLACKBOTV2_CHANNEL_DEFAULTS'), reason =>
     consoleLogger.warn('slackbotv2 SLACKBOTV2_CHANNEL_DEFAULTS', { reason })
   ),
-  deleteReaction: optionalEnv('SLACKBOTV2_DELETE_REACTION') ?? DEFAULT_DELETE_REACTION,
-  deleteAllowedUsers: splitEnvList(optionalEnv('SLACKBOTV2_DELETE_ALLOWED_USERS')),
-  deleteAllowedTeamIds: splitEnvList(optionalEnv('SLACKBOTV2_DELETE_ALLOWED_TEAM_IDS')),
-  deleteAllowedChannels: splitEnvList(optionalEnv('SLACKBOTV2_DELETE_ALLOWED_CHANNELS')),
   consolePublicUrl: optionalEnv('CENTAUR_CONSOLE_PUBLIC_URL'),
+  responseMetadataMode: responseMetadataModeEnv('SLACKBOTV2_RESPONSE_METADATA_MODE'),
+  responseServiceTierEnabled: booleanEnv('SLACKBOTV2_RESPONSE_SERVICE_TIER_ENABLED', false),
   defaultHarnessType: optionalEnv('SLACKBOTV2_DEFAULT_HARNESS'),
   // Same env vars deployers use to override the sandbox harness model
   // (sandbox.extraEnv); the chart mirrors them here so displayed defaults
@@ -78,7 +74,6 @@ const options: SlackbotV2Options = {
   renderRecoveryMaxObligationAgeMs: optionalNumberEnv(
     'SLACKBOTV2_RENDER_RECOVERY_MAX_OBLIGATION_AGE_MS'
   ),
-  renderRecoveryIntervalMs: numberEnv('SLACKBOTV2_RENDER_RECOVERY_INTERVAL_MS', 30_000),
   sessionApiTimeoutMs: optionalNumberEnv('SLACKBOTV2_SESSION_API_TIMEOUT_MS'),
   signingSecret,
   slackApiUrl: optionalEnv('SLACK_API_URL'),
@@ -105,6 +100,8 @@ console.log(
     message_overrides_strategy: messageOverridesStrategyMode,
     message_overrides_strategy_enabled:
       messageOverridesStrategyMode !== 'llm' || Boolean(messageOverridesStrategyApiKey),
+    response_metadata_mode: options.responseMetadataMode,
+    response_service_tier_enabled: options.responseServiceTierEnabled,
     port: server.port,
     api_url: apiUrl
   })
@@ -144,6 +141,13 @@ function messageOverridesStrategyModeEnv(name: string): 'flags' | 'llm' {
   if (!value) return 'flags'
   if (value === 'flags' || value === 'llm') return value
   throw new Error(`${name} must be "flags" or "llm"`)
+}
+
+function responseMetadataModeEnv(name: string): 'first' | 'always' | 'never' {
+  const value = optionalEnv(name)?.toLowerCase()
+  if (!value) return 'first'
+  if (value === 'first' || value === 'always' || value === 'never') return value
+  throw new Error(`${name} must be "first", "always", or "never"`)
 }
 
 function createMessageOverridesStrategy(): SlackbotV2Options['messageOverridesStrategy'] {

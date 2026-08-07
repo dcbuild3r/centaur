@@ -11,7 +11,8 @@ use std::path::PathBuf;
 
 use centaur_iron_control::{
     BrokerCredentialInput, Grant, GrantSecret, Grantee, IdentityInput, IronControlClient,
-    IronControlError, Role, RoleSpec, SECRET_TYPES, grant_inputs_to_role, managed_labels,
+    IronControlError, PrincipalInput, Role, RoleSpec, SECRET_TYPES, grant_inputs_to_role,
+    managed_labels,
 };
 use centaur_iron_proxy::SourcePolicy;
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -247,9 +248,7 @@ struct PrincipalSelector {
 
 #[derive(Args, Debug)]
 struct PrincipalGrantArgs {
-    /// Slack/Teams/Discord thread key (derived), raw principal `foreign_id`,
-    /// or an existing principal OID (`prn_…`). OIDs are resolved directly and
-    /// are never upserted as foreign ids.
+    /// Slack/Teams/Discord thread key (derived) or raw principal `foreign_id`.
     principal: String,
 
     /// Acting Slack user id, used only to key a DM principal from a thread key.
@@ -391,8 +390,9 @@ async fn principals_show(
     client: &IronControlClient,
     args: &PrincipalSelector,
 ) -> Result<()> {
-    let principal =
-        resolve_principal_record(cli, client, &args.principal, args.slack_user.as_deref()).await?;
+    let identity =
+        principal::resolve_principal(&args.principal, args.slack_user.as_deref(), &cli.namespace);
+    let principal = get_principal_or_fail(client, &cli.namespace, &identity.foreign_id).await?;
     println!(
         "principal: {} ({}) — {}",
         principal.foreign_id.as_deref().unwrap_or("-"),
@@ -462,16 +462,10 @@ async fn principals_grant(
         bail!("--grant-id is only valid for `principals revoke`");
     }
     let policy = build_source_policy(cli)?;
-    let principal_record =
-        resolve_principal_record(cli, client, &args.principal, args.slack_user.as_deref()).await?;
-    let principal_id = principal_record.id.clone();
-    println!(
-        "principal: {} ({principal_id})",
-        principal_record
-            .foreign_id
-            .as_deref()
-            .unwrap_or(&args.principal)
-    );
+    let identity =
+        principal::resolve_principal(&args.principal, args.slack_user.as_deref(), &cli.namespace);
+    let principal_id = ensure_principal(client, &identity).await?;
+    println!("principal: {} ({principal_id})", identity.foreign_id);
 
     let dirs =
         tools::resolve_tool_dirs(&cli.tools_dirs, std::env::var("TOOL_DIRS").ok().as_deref());
@@ -532,13 +526,10 @@ async fn principals_revoke(
     {
         bail!("nothing to revoke: pass at least one --tool, --role, --secret, or --grant-id");
     }
-    let principal =
-        resolve_principal_record(cli, client, &args.principal, args.slack_user.as_deref()).await?;
-    println!(
-        "principal: {} ({})",
-        principal.foreign_id.as_deref().unwrap_or(&args.principal),
-        principal.id
-    );
+    let identity =
+        principal::resolve_principal(&args.principal, args.slack_user.as_deref(), &cli.namespace);
+    let principal = get_principal_or_fail(client, &cli.namespace, &identity.foreign_id).await?;
+    println!("principal: {} ({})", identity.foreign_id, principal.id);
 
     let assigned = client.list_principal_roles(&principal.id).await?;
     let role_targets = args
@@ -1062,40 +1053,28 @@ fn parse_kv(raw: &str, flag: &str) -> Result<(String, String)> {
     }
 }
 
-/// Resolve an operator principal selector to the exact control-plane record.
-/// OIDs are looked up directly so a legacy principal in another namespace can
-/// be granted access without creating a duplicate foreign-id row. Thread keys
-/// and foreign ids retain the existing namespaced upsert behavior.
-async fn resolve_principal_record(
-    cli: &Cli,
-    client: &IronControlClient,
-    selector: &str,
-    slack_user: Option<&str>,
-) -> Result<centaur_iron_control::Principal> {
-    if principal::is_principal_oid(selector) {
-        return client
-            .get_principal(&cli.namespace, selector)
-            .await
-            .map_err(Into::into);
-    }
-
-    let identity = principal::resolve_principal(selector, slack_user, &cli.namespace);
-    ensure_principal(client, &identity).await
-}
-
-/// Ensure the principal exists, returning its full record. Looks it up first
-/// so an existing principal (e.g. one a session created) is never clobbered;
-/// creates it only when absent.
-async fn ensure_principal(
-    client: &IronControlClient,
-    identity: &IdentityInput,
-) -> Result<centaur_iron_control::Principal> {
+/// Ensure the principal exists, returning its OID. Looks it up first so an
+/// existing principal (e.g. one a session created) is never clobbered; creates
+/// it only when absent.
+async fn ensure_principal(client: &IronControlClient, identity: &PrincipalInput) -> Result<String> {
     match client
         .get_principal(&identity.namespace, &identity.foreign_id)
         .await
     {
+        Ok(p) => Ok(p.id),
+        Err(e) if is_status(&e, 404) => Ok(client.upsert_principal(identity).await?.id),
+        Err(e) => Err(e.into()),
+    }
+}
+
+async fn get_principal_or_fail(
+    client: &IronControlClient,
+    namespace: &str,
+    ident: &str,
+) -> Result<centaur_iron_control::Principal> {
+    match client.get_principal(namespace, ident).await {
         Ok(p) => Ok(p),
-        Err(e) if is_status(&e, 404) => Ok(client.upsert_principal(identity).await?),
+        Err(e) if is_status(&e, 404) => bail!("principal {ident:?} not found in iron-control"),
         Err(e) => Err(e.into()),
     }
 }
