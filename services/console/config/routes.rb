@@ -39,6 +39,7 @@ Rails.application.routes.draw do
 
   # Operator console (server-rendered HTML UI).
   root "console#principals"
+  get "console", to: redirect("/console/principals"), as: :console_root
   get "console/principals", to: "console#principals", as: :console_principals
   namespace :console do
     get  "principals/new", to: "principals#new",    as: :new_principal

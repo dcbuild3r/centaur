@@ -8,6 +8,28 @@
         "replicaCount": { "type": "integer" },
         "publicUrl": { "type": "string" },
         "railsEnv": { "type": "string" },
+        "passwordLoginEnabled": { "type": "boolean" },
+        "publicSlackThreadsEnabled": { "type": "boolean" },
+        "ssoEmailDomains": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "bootstrapAdmins": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "googleOauth": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" }
+          }
+        },
+        "slackOauth": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" }
+          }
+        },
         "image": {
           "type": "object",
           "properties": {

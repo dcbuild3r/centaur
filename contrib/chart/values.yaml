@@ -124,6 +124,9 @@ console:
   # Optional SSO admission policy. When non-empty, only identities whose email
   # domain matches this list can sign in through Google or Slack.
   ssoEmailDomains: []
+  # Verified SSO identities on this list become active admins on first login.
+  # Keep this narrow; other accepted SSO identities become active operators.
+  bootstrapAdmins: []
   image:
     repository: centaur-console
     tag: latest

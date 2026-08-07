@@ -1,4 +1,5 @@
-{{- if and .Values.ingress.enabled (or .Values.slackbotv2.enabled .Values.linearbot.enabled .Values.githubbot.enabled) }}
+{{- $console := include "centaur.consoleValues" . | fromYaml }}
+{{- if and .Values.ingress.enabled (or .Values.slackbotv2.enabled .Values.linearbot.enabled .Values.githubbot.enabled $console.publicUrl) }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -26,6 +27,19 @@ spec:
       {{- end }}
       http:
         paths:
+{{- if $console.publicUrl }}
+          # Console UI, authentication, OAuth, PWA, and static-asset paths must
+          # precede Slackbot's catch-all path on the shared public origin.
+{{- range list "/console" "/login" "/logout" "/pending" "/auth" "/oauth" "/mcp/oauth" "/.well-known" "/assets" "/manifest" "/service-worker" "/launch" }}
+          - path: {{ . }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "centaur.consoleName" $ }}
+                port:
+                  number: {{ $console.service.httpPort }}
+{{- end }}
+{{- end }}
 {{- if .Values.linearbot.enabled }}
           # Linear webhook deliveries route to the linearbot; everything else
           # stays with slackbotv2 (the catch-all below). Funnel-style

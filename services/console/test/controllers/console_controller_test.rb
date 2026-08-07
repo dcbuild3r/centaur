@@ -12,6 +12,11 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_redirected_to login_path
   end
 
+  test "console root redirects to the principals page" do
+    get console_root_url
+    assert_redirected_to console_principals_path
+  end
+
   test "an active non-admin is redirected away from every Control page" do
     delete logout_url
     post login_url, params: { email: users(:member_user).email, password: "password123456" }
