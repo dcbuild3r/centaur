@@ -22,6 +22,12 @@ apiRs:
   sandboxReadyTimeoutSecs: 240
   sandboxWarmPoolSize: 3
 
+# The Foundation fork carries private Orbie tools that do not exist upstream.
+# Keep repo-cache on this deployment's source repository so policy
+# reconciliation and sandboxes see the same tool tree as the built images.
+toolServer:
+  repo: worldcoin-foundation/centaur
+
 sandbox:
   image:
     pullPolicy: IfNotPresent

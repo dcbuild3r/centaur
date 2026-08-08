@@ -359,13 +359,13 @@ jobs:
             --source-policy onepassword \
             --op-vault Centaur \
             --source-refs '{"GOOGLE_TOKEN_JSON":"op://Centaur/GOOGLE_TOKEN_JSON/credential","MEETING_OPS_SCRIPT_ID":"op://Centaur/MEETING_OPS_SCRIPT_ID/credential"}' \
-            principals grant warm-pool-bootstrap --tool meeting-ops
+            principals grant warm-pool-bootstrap --tool meeting_ops
 
           kubectl --namespace "$HELM_NAMESPACE" exec \
             deployment/centaur-centaur-api-rs -- \
             /usr/local/bin/centaur-perms \
             --tools-dir /app/tools \
-            principals revoke warm-pool-bootstrap --tool meeting-ops
+            principals revoke warm-pool-bootstrap --tool meeting_ops
 
           # The initial pilot is private and may run only from the operator's
           # World Slack DM principals. Cadence scheduling should move to a
@@ -377,7 +377,7 @@ jobs:
             --source-policy onepassword \
             --op-vault Centaur \
             --source-refs '{"GOOGLE_TOKEN_JSON":"op://Centaur/GOOGLE_TOKEN_JSON/credential","MEETING_OPS_SCRIPT_ID":"op://Centaur/MEETING_OPS_SCRIPT_ID/credential"}' \
-            principals grant slack-user-tl1hm8uuu-u03tnh0duqp --tool meeting-ops
+            principals grant slack-user-tl1hm8uuu-u03tnh0duqp --tool meeting_ops
 
           kubectl --namespace "$HELM_NAMESPACE" exec \
             deployment/centaur-centaur-api-rs -- \
@@ -386,7 +386,7 @@ jobs:
             --source-policy onepassword \
             --op-vault Centaur \
             --source-refs '{"GOOGLE_TOKEN_JSON":"op://Centaur/GOOGLE_TOKEN_JSON/credential","MEETING_OPS_SCRIPT_ID":"op://Centaur/MEETING_OPS_SCRIPT_ID/credential"}' \
-            principals grant slack-user-u03tnh0duqp --tool meeting-ops
+            principals grant slack-user-u03tnh0duqp --tool meeting_ops
 
           # Remove historical DM/channel grants. New grants are made by api-rs
           # only for the explicit World Foundation channel policy; the session

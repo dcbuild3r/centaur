@@ -9,8 +9,11 @@ the Docs/Slack handoff:
 - `acknowledge_notification(notification_id)` removes an outbox item only
   after Orbie has confirmed Slack delivery.
 
-The target Script ID is fixed by the `MEETING_OPS_SCRIPT_ID` grant. It is not a
-method argument, so a caller cannot execute another Apps Script project.
+The target Apps Script executable deployment ID is fixed by the
+`MEETING_OPS_SCRIPT_ID` grant. Google names the REST path parameter `scriptId`,
+but the Execution API requires the deployment ID returned by the deployment
+resource. It is not a method argument, so a caller cannot execute another Apps
+Script deployment.
 `GOOGLE_TOKEN_JSON` remains behind iron-proxy; the sandbox receives only a
 path placeholder and proxy-injected short-lived OAuth access token.
 

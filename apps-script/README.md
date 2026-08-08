@@ -23,6 +23,7 @@ The worker never receives Notion or Slack credentials in a cadence payload.
 3. In Apps Script **Project Settings → Script properties**, set:
    - `CADENCE_CONFIG_JSON`: the normalized cadence array supplied by Orbie.
      `MEETING_CONFIG_JSON` remains a backwards-compatible fallback.
+     Each cadence may set `templateTabName`; it defaults to `Template`.
    - `ALLOWED_WF_CHANNEL_IDS`: comma-separated Slack channel IDs approved for
      this project. This is a fail-closed allowlist; WF-TFH channels are not
      permitted.
@@ -72,6 +73,6 @@ bun test apps-script/test/pure.test.js
 ```
 
 Live pilot validation still requires the real Google identity, an authenticated
-Apps Script Execution API caller, the Notion Cadences schema, and Orbie’s live
-Slack delivery. A green local test does not prove the user-visible end-to-end
-surface.
+Apps Script Execution API caller using the executable deployment ID, the Notion
+Cadences schema, and Orbie’s live Slack delivery. A green local test does not
+prove the user-visible end-to-end surface.

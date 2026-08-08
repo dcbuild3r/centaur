@@ -52,7 +52,24 @@ test('normalizes a public Notion cadence for Orbie delivery', () => {
     visibility: 'public',
     notificationMode: 'orbie',
     cadence: 'weekly',
+    templateTabName: 'Template',
   })
+})
+
+test('normalizes an explicit Google Docs template tab name', () => {
+  expect(pure.normalizeCadence({
+    id: 'private-format',
+    title: 'Private format',
+    sourceDocId: 'doc-1',
+    outputFolderId: 'folder-1',
+    nextOccurrenceAt: '2026-08-07T12:00:00Z',
+    docNameTemplate: 'Private — {YYYY-MM-DD}',
+    visibility: 'private',
+    notificationMode: 'orbie',
+    ownerSlackUserId: 'U123',
+    notificationRecipients: ['U123'],
+    templateTabName: 'Format',
+  }).templateTabName).toBe('Format')
 })
 
 test('private cadences require an owner and DM recipients', () => {

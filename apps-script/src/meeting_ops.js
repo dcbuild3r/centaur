@@ -1,7 +1,7 @@
 var AGENDA_RECORD_PREFIX = 'AGENDA_RECORD:';
 var NEXT_OCCURRENCE_PREFIX = 'NEXT_OCCURRENCE:';
 var ORBIE_OUTBOX_PREFIX = 'ORBIE_OUTBOX:';
-var TEMPLATE_TAB_TITLE = 'Template';
+var DEFAULT_TEMPLATE_TAB_TITLE = 'Template';
 var DEFAULT_TIME_ZONE = 'Europe/Warsaw';
 
 // Entry point for Orbie via the Apps Script Execution API. The caller supplies
@@ -211,7 +211,11 @@ function createDocumentFromTemplate_(meeting, docName) {
   try {
     var folder = DriveApp.getFolderById(meeting.outputFolderId);
     targetFile.moveTo(folder);
-    copyTemplateTab_(meeting.sourceDocId, target.getId(), TEMPLATE_TAB_TITLE);
+    copyTemplateTab_(
+      meeting.sourceDocId,
+      target.getId(),
+      meeting.templateTabName || DEFAULT_TEMPLATE_TAB_TITLE
+    );
     replacePlaceholders_(target.getId(), meeting);
     return targetFile;
   } catch (error) {
@@ -266,7 +270,7 @@ function appendCopiedElement_(body, element) {
       body.appendImage(copy);
       return;
     default:
-      throw new Error('Unsupported Template tab element: ' + element.getType());
+      throw new Error('Unsupported template tab element: ' + element.getType());
   }
 }
 
