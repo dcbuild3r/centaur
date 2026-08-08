@@ -22,15 +22,20 @@ apiRs:
   sandboxReadyTimeoutSecs: 240
   sandboxWarmPoolSize: 3
 
-# The Foundation fork carries private Orbie tools that do not exist upstream.
-# Keep repo-cache on this deployment's source repository so policy
-# reconciliation and sandboxes see the same tool tree as the built images.
+# The Foundation fork is private, while this environment does not provision a
+# long-lived GitHub token for repo-cache. Use the immutable tool trees baked
+# into the api-rs and sandbox images built from the same deployment commit.
 toolServer:
-  repo: worldcoin-foundation/centaur
+  enabled: false
+
+repoCache:
+  enabled: false
 
 sandbox:
   image:
     pullPolicy: IfNotPresent
+  extraEnv:
+    TOOL_DIRS: /opt/centaur/tools
 
 ironProxy:
   # Keep the production harness credential on the AWS-backed Kubernetes
