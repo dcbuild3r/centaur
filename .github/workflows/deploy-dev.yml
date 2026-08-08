@@ -348,6 +348,46 @@ jobs:
             --tools-dir /app/tools \
             principals revoke warm-pool-bootstrap --tool dune
 
+          # Bootstrap the Meeting Ops role and refresh both Google secret
+          # references without leaving the warm-pool principal authorized.
+          # The script ID is path-bound by the tool metadata, so callers cannot
+          # redirect the OAuth grant to another Apps Script project.
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            --source-policy onepassword \
+            --op-vault Centaur \
+            --source-refs '{"GOOGLE_TOKEN_JSON":"op://Centaur/GOOGLE_TOKEN_JSON/credential","MEETING_OPS_SCRIPT_ID":"op://Centaur/MEETING_OPS_SCRIPT_ID/credential"}' \
+            principals grant warm-pool-bootstrap --tool meeting-ops
+
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            principals revoke warm-pool-bootstrap --tool meeting-ops
+
+          # The initial pilot is private and may run only from the operator's
+          # World Slack DM principals. Cadence scheduling should move to a
+          # dedicated workflow principal before broad production rollout.
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            --source-policy onepassword \
+            --op-vault Centaur \
+            --source-refs '{"GOOGLE_TOKEN_JSON":"op://Centaur/GOOGLE_TOKEN_JSON/credential","MEETING_OPS_SCRIPT_ID":"op://Centaur/MEETING_OPS_SCRIPT_ID/credential"}' \
+            principals grant slack-user-tl1hm8uuu-u03tnh0duqp --tool meeting-ops
+
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            --source-policy onepassword \
+            --op-vault Centaur \
+            --source-refs '{"GOOGLE_TOKEN_JSON":"op://Centaur/GOOGLE_TOKEN_JSON/credential","MEETING_OPS_SCRIPT_ID":"op://Centaur/MEETING_OPS_SCRIPT_ID/credential"}' \
+            principals grant slack-user-u03tnh0duqp --tool meeting-ops
+
           # Remove historical DM/channel grants. New grants are made by api-rs
           # only for the explicit World Foundation channel policy; the session
           # registrar also revokes stale grants on disallowed Slack principals
