@@ -33,6 +33,7 @@ These are broadly useful across most deployments and are good candidates to conf
 | `notion` | Search and update Notion pages, databases, blocks, and comments | `NOTION_API_KEY` |
 | `slack` | Search Slack, read threads, inspect channels/users, and send or upload messages | `SLACK_BOT_TOKEN`; optional: `SLACK_SEARCH_TOKEN`, `SLACK_ETL_TOKEN` |
 | `gsuite` | Use Gmail, Calendar, Drive, Docs, Sheets, Slides, and Google Analytics | `GOOGLE_TOKEN_JSON` |
+| `meeting-ops` | Run approved Google Apps Script meeting cadences and manage the Orbie notification outbox | `GOOGLE_TOKEN_JSON`, `MEETING_OPS_SCRIPT_ID` |
 | `websearch` | Free web search via Parallel and deep research | None; `PARALLEL_API_KEY` for `deep_research`; `ANTHROPIC_API_KEY` for search synthesis |
 | `company_context` | Search indexed company history, private Slack conversations, and Google Docs | None |
 | `grafana` | Query dashboards, alerts, VictoriaMetrics, VictoriaLogs, and annotations | `GRAFANA_URL`, `GRAFANA_API_KEY` |
@@ -82,6 +83,7 @@ These are broadly useful across most deployments and are good candidates to conf
 | `figma` | Extract Figma files, nodes, components, styles, and variables | `FIGMA_ACCESS_TOKEN` |
 | `granola` | Search and read Granola notes and transcripts | `GRANOLA_API_KEY` |
 | `gsuite` | Gmail, Calendar, Drive, Docs, Sheets, Slides, and Google Analytics | `GOOGLE_TOKEN_JSON` |
+| `meeting-ops` | Approved Apps Script cadence execution and Orbie notification outbox | `GOOGLE_TOKEN_JSON`, `MEETING_OPS_SCRIPT_ID` |
 | `linear` | Linear issues, projects, cycles, teams, workflow states, and labels | `LINEAR_API_KEY` |
 | `notion` | Notion pages, databases, blocks, comments, and users | `NOTION_API_KEY` |
 | `opentable` | Search OpenTable restaurant reservations | None |

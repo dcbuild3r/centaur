@@ -963,3 +963,54 @@ fn real_gsuite_tool_parses_oauth() {
         "expected gsuite's oauth_token secret"
     );
 }
+
+#[test]
+fn real_meeting_ops_tool_is_limited_to_the_fixed_apps_script() {
+    let Some(tools_dir) = repo_tools_dir() else {
+        return;
+    };
+    let manifest = tools::find_tool(&[tools_dir], "meeting_ops").unwrap();
+    assert_eq!(manifest.name, "meeting_ops");
+    assert_eq!(manifest.secrets.len(), 2);
+
+    let oauth = manifest
+        .secrets
+        .iter()
+        .find_map(|secret| match secret {
+            ParsedSecret::OAuthToken(secret) => Some(secret),
+            _ => None,
+        })
+        .expect("expected the GOOGLE_TOKEN_JSON oauth_token secret");
+    assert_eq!(oauth.name, "GOOGLE_TOKEN_JSON");
+    assert_eq!(oauth.hosts, vec!["script.googleapis.com"]);
+    assert_eq!(
+        oauth
+            .fields
+            .iter()
+            .map(|(name, source)| (
+                name.as_str(),
+                source.secret_ref.as_str(),
+                source.json_key.as_deref()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("client_id", "GOOGLE_TOKEN_JSON", Some("client_id")),
+            ("client_secret", "GOOGLE_TOKEN_JSON", Some("client_secret")),
+            ("refresh_token", "GOOGLE_TOKEN_JSON", Some("refresh_token")),
+        ]
+    );
+
+    let script_id = manifest
+        .secrets
+        .iter()
+        .find_map(|secret| match secret {
+            ParsedSecret::Http(secret) if secret.name == "MEETING_OPS_SCRIPT_ID" => Some(secret),
+            _ => None,
+        })
+        .expect("expected the fixed Apps Script ID path replacement");
+    assert_eq!(script_id.hosts, vec!["script.googleapis.com"]);
+    assert_eq!(script_id.mode, SecretMode::Replace);
+    assert!(script_id.match_path);
+    assert!(script_id.match_headers.is_empty());
+    assert!(!script_id.match_query);
+}

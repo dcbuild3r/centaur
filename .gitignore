@@ -27,6 +27,7 @@ htmlcov/
 .env
 .env.local
 .env.local.*
+apps-script/.clasp.json
 
 # Local-only dev scripts (not committed)
 scripts/local_invest_smoke.sh

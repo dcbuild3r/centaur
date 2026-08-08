@@ -1,0 +1,13 @@
+{
+  "timeZone": "Europe/Warsaw",
+  "dependencies": {},
+  "exceptionLogging": "CLOUD",
+  "runtimeVersion": "V8",
+  "executionApi": {
+    "access": "DOMAIN"
+  },
+  "oauthScopes": [
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/documents"
+  ]
+}

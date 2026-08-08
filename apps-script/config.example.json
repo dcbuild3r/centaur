@@ -1,0 +1,40 @@
+[
+  {
+    "id": "pilot-all-hands",
+    "title": "All Hands",
+    "visibility": "public",
+    "notificationMode": "orbie",
+    "sourceDocId": "REPLACE_WITH_SOURCE_DOC_ID",
+    "outputFolderId": "REPLACE_WITH_OUTPUT_FOLDER_ID",
+    "nextOccurrenceAt": "2026-08-05T12:00:00+02:00",
+    "cadence": "weekly",
+    "notifyChannel": "REPLACE_WITH_SLACK_CHANNEL_ID",
+    "notifyChannelName": "#wf-ai-workstream",
+    "notificationRecipients": [],
+    "notifyLeadMin": 60,
+    "notesDelayMin": 60,
+    "durationMin": 60,
+    "docNameTemplate": "All Hands — {YYYY-MM-DD}",
+    "attendees": ["person@example.com"],
+    "status": "active"
+  },
+  {
+    "id": "pilot-ai-workstream",
+    "title": "AI Workstream Weekly",
+    "visibility": "public",
+    "notificationMode": "orbie",
+    "sourceDocId": "REPLACE_WITH_SOURCE_DOC_ID",
+    "outputFolderId": "REPLACE_WITH_OUTPUT_FOLDER_ID",
+    "nextOccurrenceAt": "2026-08-06T12:00:00+02:00",
+    "cadence": "weekly",
+    "notifyChannel": "REPLACE_WITH_SLACK_CHANNEL_ID",
+    "notifyChannelName": "#wf-ai-workstream",
+    "notificationRecipients": [],
+    "notifyLeadMin": 60,
+    "notesDelayMin": 60,
+    "durationMin": 60,
+    "docNameTemplate": "AI Workstream Weekly — {YYYY-MM-DD}",
+    "attendees": ["person@example.com"],
+    "status": "active"
+  }
+]

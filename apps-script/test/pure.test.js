@@ -1,0 +1,120 @@
+const { expect, test } = require('bun:test')
+const fs = require('node:fs')
+const path = require('node:path')
+const pure = require('../src/pure.js')
+
+global.Utilities = {
+  formatDate(date, _timeZone, format) {
+    if (format !== 'yyyy-MM-dd') throw new Error(`unexpected format: ${format}`)
+    return date.toISOString().slice(0, 10)
+  },
+}
+
+test('resolves the date placeholder without changing other text', () => {
+  expect(pure.resolveDocName('All Hands — {YYYY-MM-DD}', new Date('2026-08-03T10:00:00Z'), 'UTC'))
+    .toBe('All Hands — 2026-08-03')
+})
+
+test('escapes regex metacharacters for Apps Script replaceText', () => {
+  expect(pure.escapeRegExp('{date}')).toBe('\\{date\\}')
+})
+
+test('agenda window includes the lead boundary and bounded late retry', () => {
+  const occurrence = new Date('2026-08-05T12:00:00Z')
+  expect(pure.isWithinAgendaWindow(new Date('2026-08-05T11:00:00Z'), occurrence, 60, 720)).toBe(true)
+  expect(pure.isWithinAgendaWindow(new Date('2026-08-06T00:01:00Z'), occurrence, 60, 720)).toBe(false)
+})
+
+test('weekly cadence advances exactly one week', () => {
+  expect(pure.nextWeeklyOccurrence(new Date('2026-08-05T12:00:00Z')).toISOString())
+    .toBe('2026-08-12T12:00:00.000Z')
+})
+
+test('notes notification waits for the configured delay', () => {
+  const occurrence = new Date('2026-08-05T12:00:00Z')
+  expect(pure.shouldPost(new Date('2026-08-05T12:59:59Z'), occurrence, 60)).toBe(false)
+  expect(pure.shouldPost(new Date('2026-08-05T13:00:00Z'), occurrence, 60)).toBe(true)
+})
+
+test('normalizes a public Notion cadence for Orbie delivery', () => {
+  expect(pure.normalizeCadence({
+    id: 'cadence-1',
+    title: 'AI Workstream Weekly',
+    sourceDocId: 'doc-1',
+    outputFolderId: 'folder-1',
+    nextOccurrenceAt: '2026-08-05T12:00:00Z',
+    docNameTemplate: 'AI Workstream — {YYYY-MM-DD}',
+    attendees: ['dc.builder@world.org'],
+    notifyChannel: 'C123',
+    notifyChannelName: '#wf-ai-workstream',
+  })).toMatchObject({
+    id: 'cadence-1',
+    visibility: 'public',
+    notificationMode: 'orbie',
+    cadence: 'weekly',
+  })
+})
+
+test('private cadences require an owner and DM recipients', () => {
+  expect(() => pure.normalizeCadence({
+    id: 'private-1',
+    title: 'Private sync',
+    sourceDocId: 'doc-1',
+    outputFolderId: 'folder-1',
+    nextOccurrenceAt: '2026-08-05T12:00:00Z',
+    docNameTemplate: 'Private — {YYYY-MM-DD}',
+    visibility: 'private',
+  })).toThrow('private cadences require ownerSlackUserId')
+
+  expect(pure.normalizeCadence({
+    id: 'private-1',
+    title: 'Private sync',
+    sourceDocId: 'doc-1',
+    outputFolderId: 'folder-1',
+    nextOccurrenceAt: '2026-08-05T12:00:00Z',
+    docNameTemplate: 'Private — {YYYY-MM-DD}',
+    visibility: 'private',
+    ownerSlackUserId: 'UOWNER',
+    notificationRecipients: ['UOWNER'],
+  }).notificationRecipients).toEqual(['UOWNER'])
+})
+
+test('direct Apps Script Slack delivery is rejected', () => {
+  expect(() => pure.normalizeCadence({
+    visibility: 'public',
+    notificationMode: 'apps-script',
+  })).toThrow('notificationMode must be orbie')
+})
+
+test('only the approved Execution API entrypoints are public', () => {
+  const srcDir = path.join(__dirname, '..', 'src')
+  const publicFunctions = fs.readdirSync(srcDir)
+    .filter((name) => name.endsWith('.js'))
+    .flatMap((name) => {
+      const source = fs.readFileSync(path.join(srcDir, name), 'utf8')
+      return [...source.matchAll(/^function ([A-Za-z0-9_]+)\s*\(/gm)]
+        .map((match) => match[1])
+        .filter((functionName) => !functionName.endsWith('_'))
+    })
+    .sort()
+
+  expect(publicFunctions).toEqual([
+    'acknowledgeOrbieNotification',
+    'getPendingOrbieNotifications',
+    'runCadenceJob',
+  ])
+})
+
+test('outbox payload uses the client acknowledgement field name', () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, '..', 'src', 'meeting_ops.js'),
+    'utf8',
+  )
+  expect(source).toContain('notificationId: notificationId')
+  expect(source).not.toContain('\n    id: notificationId')
+})
+
+test('notification keys are stable per cadence occurrence and kind', () => {
+  expect(pure.notificationKey('cadence-1', new Date('2026-08-05T12:00:00Z'), 'UTC', 'agenda'))
+    .toBe('agenda:cadence-1:2026-08-05')
+})
