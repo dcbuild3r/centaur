@@ -294,6 +294,9 @@ jobs:
 
       - name: Deploy chart
         run: |
+          # repo-cache runs the agent image, which is several GB because it
+          # includes the browser runtime. Allow fresh nodes to pull it before
+          # Helm declares the DaemonSet unavailable.
           helm upgrade --install "$HELM_RELEASE" contrib/chart \
             --namespace "$HELM_NAMESPACE" \
             --take-ownership \
@@ -311,9 +314,6 @@ jobs:
             --set "slackbotv2.image.repository=$ECR_REGISTRY/centaur-slackbotv2" \
             --set "slackbotv2.image.tag=$GITHUB_SHA" \
             --wait \
-            # repo-cache runs the agent image, which is several GB because it
-            # includes the browser runtime. Allow fresh nodes to pull it
-            # before Helm declares the DaemonSet unavailable.
             --timeout 30m
 
       - name: Reconcile production tool policy
