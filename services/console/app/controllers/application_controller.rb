@@ -207,6 +207,8 @@ class ApplicationController < ActionController::Base
       console_sidebar_console_thread_owner_sql,
       (console_sidebar_slack_thread_owner_sql(slack_owners) if slack_owners.any?)
     ].compact
+    conditions << CentaurSession::SLACK_SOURCE_SQL if
+      acting_admin? && CentaurSession.admin_slack_threads_enabled?
 
     return CentaurSession.where("1=0") if conditions.empty?
 

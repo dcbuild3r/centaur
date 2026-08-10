@@ -107,6 +107,25 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_select "body", text: /Chat not found/
   end
 
+  test "an admin can open a Slack thread directly when admin Slack visibility is enabled" do
+    skip_unless_session_table
+
+    thread_key = "slack:C0DIRECT:#{SecureRandom.hex(6)}"
+    insert_slack_session(
+      thread_key,
+      slack_user_id: "U_OTHER",
+      slack_user_name: "someone-else"
+    )
+
+    with_env("CENTAUR_CONSOLE_ADMIN_SLACK_THREADS_ENABLED" => "true") do
+      get console_threads_url(thread: thread_key)
+    end
+
+    assert_response :ok
+    assert_select ".console-thread-detail-header", count: 1
+    assert_select "textarea[name=prompt]", count: 0
+  end
+
   test "public Slack channel threads are readable by every console user only when enabled" do
     skip_unless_session_table
     skip_unless_slack_channel_table

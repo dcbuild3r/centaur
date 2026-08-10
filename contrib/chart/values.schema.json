@@ -10,6 +10,7 @@
         "railsEnv": { "type": "string" },
         "passwordLoginEnabled": { "type": "boolean" },
         "publicSlackThreadsEnabled": { "type": "boolean" },
+        "adminSlackThreadsEnabled": { "type": "boolean" },
         "ssoEmailDomains": {
           "type": "array",
           "items": { "type": "string" }

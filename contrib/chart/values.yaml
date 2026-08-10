@@ -123,6 +123,10 @@ console:
   # visibility fails closed without that catalog. Individual chats can still
   # be shared by their owner from the Threads UI.
   publicSlackThreadsEnabled: false
+  # Trusted operator deployments may let admins browse every Slack-originated
+  # session, including private channels and DMs. Sessions remain read-only
+  # unless the admin owns them.
+  adminSlackThreadsEnabled: false
   # Optional SSO admission policy. When non-empty, only identities whose email
   # domain matches this list can sign in through Google or Slack.
   ssoEmailDomains: []

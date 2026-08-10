@@ -17,6 +17,18 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_redirected_to console_principals_path
   end
 
+  test "login preserves a directly linked Slack chat as the post-login destination" do
+    delete logout_url
+    thread_key = "slack:C0BM50CQ3D4:1786392697.227619"
+
+    get console_threads_url(thread: thread_key)
+    assert_redirected_to login_path
+
+    post login_url, params: { email: @operator.email, password: "password123456" }
+
+    assert_redirected_to console_threads_path(thread: thread_key)
+  end
+
   test "an active non-admin is redirected away from every Control page" do
     delete logout_url
     post login_url, params: { email: users(:member_user).email, password: "password123456" }
