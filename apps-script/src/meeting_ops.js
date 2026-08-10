@@ -118,7 +118,12 @@ function processAgenda_(meeting, now, requesterSlackUserId) {
     if (!file) {
       file = createDocumentFromTemplate_(meeting, docName, occurrence);
     } else {
-      prepareTemplateCopy_(file.getId(), meeting, occurrence);
+      try {
+        prepareTemplateCopy_(file.getId(), meeting, occurrence);
+      } catch (error) {
+        supersedeMalformedDocument_(file);
+        file = createDocumentFromTemplate_(meeting, docName, occurrence);
+      }
     }
     record = {
       meetingId: meeting.id,
@@ -129,6 +134,20 @@ function processAgenda_(meeting, now, requesterSlackUserId) {
       agendaNotified: false,
       notesNotified: false
     };
+  } else {
+    try {
+      assertTemplateCopyReady_(record.docId, meeting, false);
+    } catch (error) {
+      supersedeMalformedDocument_(DriveApp.getFileById(record.docId));
+      var replacement = createDocumentFromTemplate_(meeting, docName, occurrence);
+      record.docId = replacement.getId();
+      record.docUrl = replacement.getUrl();
+      record.docName = docName;
+      record.agendaNotified = false;
+      record.agendaNotifiedRecipients = [];
+      record.notesNotified = false;
+      record.notesNotifiedRecipients = [];
+    }
   }
   assertTemplateCopyReady_(record.docId, meeting, false);
 
@@ -389,6 +408,12 @@ function createDocumentFromTemplate_(meeting, docName, occurrence) {
   }
 }
 
+function supersedeMalformedDocument_(file) {
+  var suffix = ' — superseded malformed copy ' +
+    Utilities.formatDate(new Date(), DEFAULT_TIME_ZONE, 'yyyy-MM-dd HH:mm:ss');
+  file.setName(file.getName() + suffix);
+}
+
 function prepareTemplateCopy_(documentId, meeting, occurrence) {
   assertTemplateCopyReady_(documentId, meeting);
   var document = DocumentApp.openById(documentId);
@@ -413,8 +438,8 @@ function findTabByTitle_(tabs, title) {
 
 function assertTemplateCopyReady_(documentId, meeting, compareSourceTopology) {
   var target = DocumentApp.openById(documentId);
+  var source = DocumentApp.openById(meeting.sourceDocId);
   if (compareSourceTopology !== false) {
-    var source = DocumentApp.openById(meeting.sourceDocId);
     var sourceTopology = tabTopology_(source.getTabs(), '');
     var targetTopology = tabTopology_(target.getTabs(), '');
     if (JSON.stringify(sourceTopology) !== JSON.stringify(targetTopology)) {
@@ -429,6 +454,29 @@ function assertTemplateCopyReady_(documentId, meeting, compareSourceTopology) {
   if (!findTabByTitle_(target.getTabs(), formatTitle)) {
     throw new Error('Template copy has no ' + formatTitle + ' tab');
   }
+  [notesTitle, formatTitle].forEach(function (title) {
+    var sourceTab = findTabByTitle_(source.getTabs(), title);
+    var targetTab = findTabByTitle_(target.getTabs(), title);
+    assertTabStructurePreserved_(sourceTab, targetTab, title);
+  });
+}
+
+function assertTabStructurePreserved_(sourceTab, targetTab, title) {
+  if (!sourceTab) throw new Error('Source template has no ' + title + ' tab');
+  var sourceSignature = bodyStructureSignature_(sourceTab.asDocumentTab().getBody());
+  var targetSignature = bodyStructureSignature_(targetTab.asDocumentTab().getBody());
+  if (targetSignature.children < sourceSignature.children ||
+      targetSignature.tables < sourceSignature.tables) {
+    throw new Error(title + ' tab has lost source template structure');
+  }
+}
+
+function bodyStructureSignature_(body) {
+  var signature = { children: body.getNumChildren(), tables: 0 };
+  for (var index = 0; index < body.getNumChildren(); index += 1) {
+    if (String(body.getChild(index).getType()) === 'TABLE') signature.tables += 1;
+  }
+  return signature;
 }
 
 function tabTopology_(tabs, parentPath) {
@@ -486,6 +534,7 @@ function withScriptLock_(callback) {
 if (typeof module !== 'undefined') {
   module.exports = {
     assertTemplateCopyReady_: assertTemplateCopyReady_,
+    bodyStructureSignature_: bodyStructureSignature_,
     createDocumentFromTemplate_: createDocumentFromTemplate_,
     findCurrentAgendaOccurrence_: findCurrentAgendaOccurrence_,
     prepareTemplateCopy_: prepareTemplateCopy_,

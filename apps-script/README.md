@@ -82,6 +82,9 @@ agenda job is created.
   Weekly Sync template, `Meeting Notes` retains its prompts, progress sections,
   decisions, and feedback table while `Format` remains a separate tab.
 - Retries validate the existing copy without replacing attendee-entered notes.
+  If an older generated document has lost the source tab structure, it is
+  renamed as a superseded malformed copy and a fresh native clone is created;
+  the old document is retained for recovery instead of being deleted.
 - If template copying, tab validation, or safe date replacement fails, the
   newly created file is trashed and the occurrence is not advanced.
 - Public outbox entries are keyed by cadence, occurrence, and notification

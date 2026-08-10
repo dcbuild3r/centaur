@@ -135,6 +135,14 @@ class FakeFile {
   setTrashed(trashed) {
     this.trashed = trashed
   }
+
+  getName() {
+    return this.name
+  }
+
+  setName(name) {
+    this.name = name
+  }
 }
 
 const documents = new Map()
@@ -283,6 +291,20 @@ test('retry validation does not modify attendee notes', () => {
   assertTemplateCopyReady_('existing-copy', cadence())
 
   expect(copy.tabs[0].body.children.at(-1).getText()).toBe('Attendee note with {date}')
+})
+
+test('retry validation rejects a named tab that lost the cloned notes structure', () => {
+  documents.set('weekly-template', weeklyTemplate())
+  documents.set('malformed-copy', new FakeDocument([
+    new FakeTab('Meeting Notes', ['', 'Smoke-test attendee note']),
+    new FakeTab('Format', ['Meeting format', 'Aim: Keep the Foundation aligned']),
+  ]))
+
+  expect(() => assertTemplateCopyReady_(
+    'malformed-copy',
+    cadence(),
+    false,
+  )).toThrow('Meeting Notes tab has lost source template structure')
 })
 
 test('meeting date replacement fails closed when notes do not start with text', () => {
