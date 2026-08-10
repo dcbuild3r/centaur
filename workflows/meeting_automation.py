@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -14,16 +15,42 @@ MEETING_OPS_TOOL = "meeting-ops"
 
 
 def _tool_output(result: Any) -> Any:
-    """Unwrap the workflow bridge's ToolResult envelope when present."""
+    """Unwrap workflow bridge and MCP-compatible result envelopes."""
 
-    if (
-        isinstance(result, dict)
-        and result.get("tool") == MEETING_OPS_TOOL
-        and "method" in result
-        and "output" in result
-    ):
-        return result["output"]
-    return result
+    value = result
+    for _ in range(6):
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                return value
+            continue
+        if not isinstance(value, dict):
+            return value
+        if "output" in value and (
+            "tool" in value
+            or "method" in value
+            or set(value).issubset({"output", "ok", "status"})
+        ):
+            value = value["output"]
+            continue
+        if "data" in value and set(value).issubset({"data", "ok", "status"}):
+            value = value["data"]
+            continue
+        if "structuredContent" in value:
+            value = value["structuredContent"]
+            continue
+        if set(value).issubset({"result", "ok", "status"}) and "result" in value:
+            value = value["result"]
+            continue
+        content = value.get("content")
+        if isinstance(content, list) and len(content) == 1:
+            block = content[0]
+            if isinstance(block, dict) and block.get("type") == "text" and "text" in block:
+                value = block["text"]
+                continue
+        return value
+    return value
 
 
 @dataclass

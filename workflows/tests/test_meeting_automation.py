@@ -115,6 +115,44 @@ def test_tool_client_unwraps_workflow_bridge_output_envelope():
     assert result == [cadence]
 
 
+@pytest.mark.parametrize(
+    "wrapped",
+    [
+        {
+            "tool": "meeting-ops",
+            "method": "authorized_cadences",
+            "output": {"ok": True, "result": [{"id": "private-ai"}]},
+        },
+        {
+            "content": [{
+                "type": "text",
+                "text": '[{"id":"private-ai"}]',
+            }],
+        },
+        {
+            "structuredContent": {
+                "result": [{"id": "private-ai"}],
+            },
+        },
+        {
+            "ok": True,
+            "output": [{"id": "private-ai"}],
+        },
+        {
+            "status": "success",
+            "data": [{"id": "private-ai"}],
+        },
+    ],
+)
+def test_tool_client_unwraps_nested_and_mcp_compatible_results(wrapped):
+    context = RecordingToolContext(wrapped)
+    client = meeting_automation.MeetingOpsToolClient(context)
+
+    result = asyncio.run(client.authorized_cadences("U123", "TL1HM8UUU"))
+
+    assert result == [{"id": "private-ai"}]
+
+
 def test_tool_client_preserves_unwrapped_tool_results():
     result = {"meetingId": "private-ai", "docUrl": "https://docs/doc-1"}
     context = RecordingToolContext(result)
