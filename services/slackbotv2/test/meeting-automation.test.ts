@@ -48,7 +48,15 @@ describe('meeting automation command parsing', () => {
     ['run cadence weekly team sync', 'weekly team sync'],
     ['run meeting automation "Leadership 1:1"', 'Leadership 1:1'],
     ['meeting ops private cadence', 'private cadence'],
-    [`<@${BOT_USER_ID}|orbie> run cadence  weekly team sync  `, 'weekly team sync']
+    [`<@${BOT_USER_ID}|orbie> run cadence  weekly team sync  `, 'weekly team sync'],
+    [
+      'run cadence Piotr Meeting Ops Demo\n\nSent using @ChatGPT',
+      'Piotr Meeting Ops Demo'
+    ],
+    [
+      'run cadence "Piotr Meeting Ops Demo" Sent using @ChatGPT',
+      'Piotr Meeting Ops Demo'
+    ]
   ])('parses %s', (text, cadenceQuery) => {
     expect(parseMeetingAutomationCommand(text, BOT_USER_ID)).toEqual({ cadenceQuery })
   })

@@ -26,8 +26,12 @@ export function parseMeetingAutomationCommand(
 ): MeetingAutomationCommand | null {
   const commandText = stripLeadingBotMention(text, botUserId).trim()
   const match = MEETING_AUTOMATION_COMMAND.exec(commandText)
-  const cadenceQuery = unquoteCadenceQuery(match?.[1]?.trim())
+  const cadenceQuery = unquoteCadenceQuery(stripTrailingChatGptAttribution(match?.[1]))
   return cadenceQuery ? { cadenceQuery } : null
+}
+
+function stripTrailingChatGptAttribution(value: string | undefined): string | undefined {
+  return value?.replace(/\s*Sent using @ChatGPT\s*$/i, '').trim()
 }
 
 function unquoteCadenceQuery(value: string | undefined): string | undefined {
