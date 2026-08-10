@@ -1,9 +1,10 @@
 # Meeting Ops Google Docs Worker
 
 Apps Script is the Google-native worker for Meeting Ops. Orbie owns cadence
-configuration, access checks, and Slack delivery; this project copies the
-`Template` tab into a new Google Doc and exposes an idempotent notification
-outbox for Orbie.
+configuration, access checks, and Slack delivery; this project preserves the
+configured meeting-format tab in a new Google Doc, creates a separate
+`Meeting notes` tab from that format, adds the occurrence date at the top, and
+exposes an idempotent notification outbox for Orbie.
 
 Cadences have two sources:
 
@@ -75,6 +76,9 @@ agenda job is created.
 - Agenda and notes notifications are recorded in Script Properties per meeting,
   occurrence, and private requester, so each authorized user can validate the
   same document once while retries from that user remain duplicate-free.
+- The generated document keeps one format tab and one `Meeting notes` tab.
+  Retries add a missing notes tab or date heading but never create duplicates
+  or overwrite notes already entered by attendees.
 - If template copying or placeholder replacement fails, the newly created file
   is trashed and the occurrence is not advanced.
 - Public outbox entries are keyed by cadence, occurrence, and notification

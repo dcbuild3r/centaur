@@ -7,7 +7,8 @@ handoff:
 - `authorized_cadences(user_id, team_id)` lists public and permitted private
   cadences.
 - `run_cadence(cadence_id, requester_slack_user_id=...,
-  requester_slack_team_id=...)` creates or reuses an agenda Doc and
+  requester_slack_team_id=...)` creates or reuses an agenda Doc, preserves the
+  configured meeting-format tab, creates one dated `Meeting notes` copy, and
   re-checks private access in Apps Script.
 - `pending_notifications_for_caller(user_id, team_id)` reads only that user's
   private notifications.
@@ -42,3 +43,5 @@ Private outbox entries are created once per recipient. Production grants must
 remain exclusive to the Meeting Automation workflow principal rather than
 individual end users. Public-channel notifications remain in the public
 outbox and are intentionally not consumed by the caller-scoped worker.
+An immediate retry must reuse the same Doc and must not duplicate the notes
+tab, date heading, notification, or any attendee-entered notes.

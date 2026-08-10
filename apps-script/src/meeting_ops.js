@@ -2,6 +2,7 @@ var AGENDA_RECORD_PREFIX = 'AGENDA_RECORD:';
 var NEXT_OCCURRENCE_PREFIX = 'NEXT_OCCURRENCE:';
 var ORBIE_OUTBOX_PREFIX = 'ORBIE_OUTBOX:';
 var DEFAULT_TEMPLATE_TAB_TITLE = 'Template';
+var MEETING_NOTES_TAB_TITLE = 'Meeting notes';
 var DEFAULT_TIME_ZONE = 'Europe/Warsaw';
 var WORLD_SLACK_TEAM_ID = 'TL1HM8UUU';
 
@@ -95,7 +96,7 @@ function processAgenda_(meeting, now, requesterSlackUserId) {
   var staleWindowMin = meeting.staleWindowMin == null
     ? 12 * 60
     : Number(meeting.staleWindowMin);
-  var occurrence = findPendingAgendaOccurrence_(
+  var occurrence = findCurrentAgendaOccurrence_(
     meeting,
     now,
     leadMin,
@@ -115,7 +116,7 @@ function processAgenda_(meeting, now, requesterSlackUserId) {
   if (!record) {
     var file = findDocument_(meeting.outputFolderId, docName);
     if (!file) {
-      file = createDocumentFromTemplate_(meeting, docName);
+      file = createDocumentFromTemplate_(meeting, docName, occurrence);
     }
     record = {
       meetingId: meeting.id,
@@ -127,6 +128,12 @@ function processAgenda_(meeting, now, requesterSlackUserId) {
       notesNotified: false
     };
   }
+  ensureMeetingNotesTab_(
+    record.docId,
+    meeting.templateTabName || DEFAULT_TEMPLATE_TAB_TITLE,
+    occurrence,
+    timeZone
+  );
 
   if (!MeetingOpsPure.wasNotificationDelivered(
     record,
@@ -326,14 +333,13 @@ function getNextOccurrence_(meeting) {
   return new Date(stored || meeting.nextOccurrenceAt);
 }
 
-function findPendingAgendaOccurrence_(
+function findCurrentAgendaOccurrence_(
   meeting,
   now,
   leadMin,
   staleWindowMin,
   requesterSlackUserId
 ) {
-  if (meeting.visibility !== 'private' || !requesterSlackUserId) return null;
   var prefix = AGENDA_RECORD_PREFIX + meeting.id + ':';
   var all = PropertiesService.getScriptProperties().getProperties();
   var pending = Object.keys(all).filter(function (key) {
@@ -345,10 +351,6 @@ function findPendingAgendaOccurrence_(
       occurrence,
       leadMin,
       staleWindowMin
-    ) && !MeetingOpsPure.wasNotificationDelivered(
-      record,
-      'agenda',
-      requesterSlackUserId
     );
   }).map(function (key) {
     return new Date(JSON.parse(all[key]).occurrenceAt);
@@ -377,7 +379,7 @@ function findDocument_(folderId, name) {
   return null;
 }
 
-function createDocumentFromTemplate_(meeting, docName) {
+function createDocumentFromTemplate_(meeting, docName, occurrence) {
   var target = DocumentApp.create(docName);
   var targetFile = DriveApp.getFileById(target.getId());
   try {
@@ -388,7 +390,18 @@ function createDocumentFromTemplate_(meeting, docName) {
       target.getId(),
       meeting.templateTabName || DEFAULT_TEMPLATE_TAB_TITLE
     );
-    replacePlaceholders_(target.getId(), meeting);
+    replacePlaceholdersInFormatTab_(
+      target.getId(),
+      meeting,
+      occurrence,
+      meeting.templateTabName || DEFAULT_TEMPLATE_TAB_TITLE
+    );
+    ensureMeetingNotesTab_(
+      target.getId(),
+      meeting.templateTabName || DEFAULT_TEMPLATE_TAB_TITLE,
+      occurrence,
+      meeting.timeZone || DEFAULT_TIME_ZONE
+    );
     return targetFile;
   } catch (error) {
     targetFile.setTrashed(true);
@@ -409,6 +422,72 @@ function copyTemplateTab_(sourceDocId, targetDocId, tabTitle) {
   for (var index = 0; index < sourceBody.getNumChildren(); index += 1) {
     appendCopiedElement_(targetBody, sourceBody.getChild(index));
   }
+  target.saveAndClose();
+  updateDocumentTabTitle_(targetDocId, targetTab.getId(), tabTitle);
+}
+
+function ensureMeetingNotesTab_(documentId, formatTabTitle, occurrence, timeZone) {
+  var document = DocumentApp.openById(documentId);
+  var formatTab = findFormatTab_(document.getTabs(), formatTabTitle);
+
+  var notesTab = findTabByTitle_(document.getTabs(), MEETING_NOTES_TAB_TITLE);
+  if (!notesTab) {
+    document.saveAndClose();
+    addDocumentTab_(documentId, MEETING_NOTES_TAB_TITLE);
+    document = DocumentApp.openById(documentId);
+    formatTab = findFormatTab_(document.getTabs(), formatTabTitle);
+    notesTab = findTabByTitle_(document.getTabs(), MEETING_NOTES_TAB_TITLE);
+    if (!notesTab) throw new Error('Google Docs did not create the Meeting notes tab');
+  }
+  var notesBody = notesTab.asDocumentTab().getBody();
+  ensureMeetingDateHeading_(notesBody, occurrence, timeZone);
+  if (isDateOnlyMeetingNotes_(notesBody, occurrence, timeZone)) {
+    var formatBody = formatTab.asDocumentTab().getBody();
+    for (var index = 0; index < formatBody.getNumChildren(); index += 1) {
+      appendCopiedElement_(notesBody, formatBody.getChild(index));
+    }
+  }
+}
+
+function addDocumentTab_(documentId, title) {
+  batchUpdateDocument_(documentId, [{
+    addDocumentTab: {
+      tabProperties: { title: title }
+    }
+  }]);
+}
+
+function updateDocumentTabTitle_(documentId, tabId, title) {
+  batchUpdateDocument_(documentId, [{
+    updateDocumentTabProperties: {
+      tabProperties: { tabId: tabId, title: title },
+      fields: 'title'
+    }
+  }]);
+}
+
+function batchUpdateDocument_(documentId, requests) {
+  Docs.Documents.batchUpdate({ requests: requests }, documentId);
+}
+
+function ensureMeetingDateHeading_(body, occurrence, timeZone) {
+  var heading = 'Meeting date: ' + MeetingOpsPure.dateKey(occurrence, timeZone);
+  if (body.getNumChildren() > 0 && body.getChild(0).getText() === heading) return;
+  body.insertParagraph(0, heading);
+}
+
+function isDateOnlyMeetingNotes_(body, occurrence, timeZone) {
+  var heading = 'Meeting date: ' + MeetingOpsPure.dateKey(occurrence, timeZone);
+  if (body.getNumChildren() === 0 || body.getChild(0).getText() !== heading) {
+    return false;
+  }
+  for (var index = 1; index < body.getNumChildren(); index += 1) {
+    var child = body.getChild(index);
+    if (child.getType() !== DocumentApp.ElementType.PARAGRAPH || child.getText().trim()) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function findTabByTitle_(tabs, title) {
@@ -418,6 +497,27 @@ function findTabByTitle_(tabs, title) {
     if (child) return child;
   }
   return null;
+}
+
+function findFormatTab_(tabs, expectedTitle) {
+  var exact = findTabByTitle_(tabs, expectedTitle);
+  if (exact) return exact;
+  var candidates = [];
+  collectTabsExcept_(tabs, MEETING_NOTES_TAB_TITLE, candidates);
+  if (candidates.length === 1) return candidates[0];
+  if (candidates.length === 0) {
+    throw new Error('Generated document has no meeting format tab');
+  }
+  throw new Error(
+    'Generated document has multiple tabs and no ' + expectedTitle + ' format tab'
+  );
+}
+
+function collectTabsExcept_(tabs, excludedTitle, output) {
+  for (var index = 0; index < tabs.length; index += 1) {
+    if (tabs[index].getTitle() !== excludedTitle) output.push(tabs[index]);
+    collectTabsExcept_(tabs[index].getChildTabs(), excludedTitle, output);
+  }
 }
 
 function appendCopiedElement_(body, element) {
@@ -446,21 +546,18 @@ function appendCopiedElement_(body, element) {
   }
 }
 
-function replacePlaceholders_(documentId, meeting) {
+function replacePlaceholdersInFormatTab_(documentId, meeting, occurrence, formatTabTitle) {
   var document = DocumentApp.openById(documentId);
-  var body = document.getTabs()[0].asDocumentTab().getBody();
-  var occurrence = getNextOccurrence_(meeting);
+  var formatTab = findFormatTab_(document.getTabs(), formatTabTitle);
   var timeZone = meeting.timeZone || DEFAULT_TIME_ZONE;
   var replacements = {
     '{date}': MeetingOpsPure.dateKey(occurrence, timeZone),
     '{attendees}': (meeting.attendees || []).join(', '),
     '{prev_meeting_link}': meeting.previousMeetingLink || ''
   };
+  var body = formatTab.asDocumentTab().getBody();
   Object.keys(replacements).forEach(function (placeholder) {
-    body.replaceText(
-      MeetingOpsPure.escapeRegExp(placeholder),
-      replacements[placeholder]
-    );
+    body.replaceText(MeetingOpsPure.escapeRegExp(placeholder), replacements[placeholder]);
   });
 }
 
@@ -481,4 +578,12 @@ function withScriptLock_(callback) {
   } finally {
     lock.releaseLock();
   }
+}
+
+if (typeof module !== 'undefined') {
+  module.exports = {
+    ensureMeetingNotesTab_: ensureMeetingNotesTab_,
+    findCurrentAgendaOccurrence_: findCurrentAgendaOccurrence_,
+    replacePlaceholdersInFormatTab_: replacePlaceholdersInFormatTab_
+  };
 }
