@@ -61,12 +61,13 @@ class FakeContext:
 
 
 class RecordingToolContext:
-    def __init__(self):
+    def __init__(self, result=None):
         self.calls = []
+        self.result = [] if result is None else result
 
     async def call_tool(self, tool, method, args):
         self.calls.append((tool, method, args))
-        return []
+        return self.result
 
 
 def _input(query="AI Workstream", **overrides):
@@ -98,6 +99,34 @@ def test_tool_client_uses_the_installed_meeting_ops_cli_name():
             },
         )
     ]
+
+
+def test_tool_client_unwraps_workflow_bridge_output_envelope():
+    cadence = {"id": "private-ai", "title": "AI Workstream", "visibility": "private"}
+    context = RecordingToolContext({
+        "tool": "meeting-ops",
+        "method": "authorized_cadences",
+        "output": [cadence],
+    })
+    client = meeting_automation.MeetingOpsToolClient(context)
+
+    result = asyncio.run(client.authorized_cadences("U123", "TL1HM8UUU"))
+
+    assert result == [cadence]
+
+
+def test_tool_client_preserves_unwrapped_tool_results():
+    result = {"meetingId": "private-ai", "docUrl": "https://docs/doc-1"}
+    context = RecordingToolContext(result)
+    client = meeting_automation.MeetingOpsToolClient(context)
+
+    observed = asyncio.run(client.run_cadence(
+        "private-ai",
+        requester_slack_user_id="U123",
+        requester_slack_team_id="TL1HM8UUU",
+    ))
+
+    assert observed == result
 
 
 def test_private_cadence_delivers_and_acknowledges_only_callers_item(monkeypatch):

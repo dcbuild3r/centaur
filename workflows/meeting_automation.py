@@ -13,6 +13,19 @@ WORLD_SLACK_TEAM_ID = "TL1HM8UUU"
 MEETING_OPS_TOOL = "meeting-ops"
 
 
+def _tool_output(result: Any) -> Any:
+    """Unwrap the workflow bridge's ToolResult envelope when present."""
+
+    if (
+        isinstance(result, dict)
+        and result.get("tool") == MEETING_OPS_TOOL
+        and "method" in result
+        and "output" in result
+    ):
+        return result["output"]
+    return result
+
+
 @dataclass
 class Input:
     cadence_query: str
@@ -68,7 +81,8 @@ class MeetingOpsToolClient:
                 "requester_slack_team_id": team_id,
             },
         )
-        return [item for item in result if isinstance(item, dict)] if isinstance(result, list) else []
+        output = _tool_output(result)
+        return [item for item in output if isinstance(item, dict)] if isinstance(output, list) else []
 
     async def run_cadence(
         self,
@@ -86,7 +100,8 @@ class MeetingOpsToolClient:
                 "requester_slack_team_id": requester_slack_team_id,
             },
         )
-        return result if isinstance(result, dict) else None
+        output = _tool_output(result)
+        return output if isinstance(output, dict) else None
 
     async def pending_notifications_for_caller(
         self,
@@ -101,7 +116,8 @@ class MeetingOpsToolClient:
                 "requester_slack_team_id": team_id,
             },
         )
-        return [item for item in result if isinstance(item, dict)] if isinstance(result, list) else []
+        output = _tool_output(result)
+        return [item for item in output if isinstance(item, dict)] if isinstance(output, list) else []
 
     async def acknowledge_notification(
         self,
@@ -119,7 +135,8 @@ class MeetingOpsToolClient:
                 "requester_slack_team_id": requester_slack_team_id,
             },
         )
-        return result if isinstance(result, dict) else {}
+        output = _tool_output(result)
+        return output if isinstance(output, dict) else {}
 
 
 def _client(ctx: WorkflowContext) -> MeetingOpsClient:
