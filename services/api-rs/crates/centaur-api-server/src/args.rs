@@ -1193,6 +1193,22 @@ impl SandboxArgs {
             }
         }
 
+        // Workflow-host sandboxes run in the same agent image as interactive
+        // sandboxes and must receive the same operator-supplied environment.
+        // In baked-tool deployments this overrides api-rs's /app/tools with
+        // the agent image's /opt/centaur/tools. Keep this last so the explicit
+        // sandbox configuration wins over control-plane defaults.
+        for (name, value) in self.sandbox_extra_env() {
+            if let Some((_, existing_value)) = envs
+                .iter_mut()
+                .find(|(existing_name, _)| existing_name == &name)
+            {
+                *existing_value = value;
+            } else {
+                envs.push((name, value));
+            }
+        }
+
         Ok(envs)
     }
 
@@ -2613,6 +2629,43 @@ mod tests {
                 .find(|env| env.name == SLACK_BOT_TOKEN_ENV)
                 .map(|env| env.value.as_str()),
             Some(SLACK_BOT_TOKEN_ENV)
+        );
+    }
+
+    #[test]
+    fn workflow_host_env_template_applies_operator_sandbox_env_last() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-backend",
+            "agent-k8s",
+            "--tool-dirs",
+            "/app/tools",
+            "--session-sandbox-extra-env",
+            r#"[
+                {"name":"TOOL_DIRS","value":"/opt/centaur/tools"},
+                {"name":"WORKFLOW_HOST_MARKER","value":"enabled"}
+            ]"#,
+        ])
+        .unwrap();
+
+        let spec = args.sandbox.workflow_host_spec(None).unwrap();
+        let value = |key: &str| {
+            spec.env
+                .iter()
+                .find(|env| env.name == key)
+                .map(|env| env.value.as_str())
+        };
+
+        assert_eq!(value("TOOL_DIRS"), Some("/opt/centaur/tools"));
+        assert_eq!(value("WORKFLOW_HOST_MARKER"), Some("enabled"));
+        assert_eq!(
+            spec.env
+                .iter()
+                .filter(|env| env.name == "TOOL_DIRS")
+                .count(),
+            1
         );
     }
 
