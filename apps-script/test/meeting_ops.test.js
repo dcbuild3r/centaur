@@ -6,8 +6,8 @@ class FakeElement {
     this.type = type
   }
 
-  copy() {
-    return new FakeElement(this.text)
+  clone() {
+    return new FakeElement(this.text, this.type)
   }
 
   getText() {
@@ -17,15 +17,26 @@ class FakeElement {
   getType() {
     return this.type
   }
+
+  asParagraph() {
+    if (this.type !== 'PARAGRAPH') throw new Error('not a paragraph')
+    return this
+  }
+
+  setText(text) {
+    this.text = text
+  }
 }
 
 class FakeBody {
-  constructor(texts = []) {
-    this.children = texts.map((text) => new FakeElement(text))
+  constructor(elements = []) {
+    this.children = elements.map((element) => (
+      element instanceof FakeElement ? element : new FakeElement(element)
+    ))
   }
 
-  clear() {
-    this.children = []
+  clone() {
+    return new FakeBody(this.children.map((child) => child.clone()))
   }
 
   getNumChildren() {
@@ -36,12 +47,8 @@ class FakeBody {
     return this.children[index]
   }
 
-  getText() {
-    return this.children.map((child) => child.getText()).join('\n')
-  }
-
-  appendParagraph(element) {
-    this.children.push(element)
+  insertParagraph(index, text) {
+    this.children.splice(index, 0, new FakeElement(text))
   }
 
   replaceText(pattern, replacement) {
@@ -50,25 +57,25 @@ class FakeBody {
       child.text = child.text.replace(expression, replacement)
     })
   }
-
-  insertParagraph(index, text) {
-    this.children.splice(index, 0, new FakeElement(text))
-  }
 }
 
 class FakeTab {
-  constructor(title, texts = [], id = title.toLowerCase().replaceAll(' ', '-')) {
+  constructor(title, elements = [], children = []) {
     this.title = title
-    this.body = new FakeBody(texts)
-    this.id = id
+    this.body = new FakeBody(elements)
+    this.children = children
+  }
+
+  clone() {
+    return new FakeTab(
+      this.title,
+      this.body.children.map((child) => child.clone()),
+      this.children.map((child) => child.clone()),
+    )
   }
 
   getTitle() {
     return this.title
-  }
-
-  getId() {
-    return this.id
   }
 
   asDocumentTab() {
@@ -80,36 +87,81 @@ class FakeTab {
   }
 
   getChildTabs() {
-    return []
+    return this.children
   }
 }
 
 class FakeDocument {
   constructor(tabs) {
     this.tabs = tabs
+    this.saved = false
+  }
+
+  clone() {
+    return new FakeDocument(this.tabs.map((tab) => tab.clone()))
   }
 
   getTabs() {
     return this.tabs
   }
 
-  saveAndClose() {}
+  saveAndClose() {
+    this.saved = true
+  }
+}
 
+class FakeFile {
+  constructor(id, name = id) {
+    this.id = id
+    this.name = name
+    this.trashed = false
+  }
+
+  getId() {
+    return this.id
+  }
+
+  getUrl() {
+    return `https://docs.example/${this.id}`
+  }
+
+  makeCopy(name) {
+    const copyId = `${this.id}-copy`
+    documents.set(copyId, documents.get(this.id).clone())
+    files.set(copyId, new FakeFile(copyId, name))
+    return files.get(copyId)
+  }
+
+  setTrashed(trashed) {
+    this.trashed = trashed
+  }
 }
 
 const documents = new Map()
+const files = new Map()
 
 global.DocumentApp = {
   ElementType: {
     PARAGRAPH: 'PARAGRAPH',
-    LIST_ITEM: 'LIST_ITEM',
-    TABLE: 'TABLE',
-    PAGE_BREAK: 'PAGE_BREAK',
-    HORIZONTAL_RULE: 'HORIZONTAL_RULE',
-    INLINE_IMAGE: 'INLINE_IMAGE',
   },
   openById(id) {
     return documents.get(id)
+  },
+}
+
+global.DriveApp = {
+  getFileById(id) {
+    return files.get(id)
+  },
+  getFolderById(id) {
+    return { id }
+  },
+}
+
+global.Utilities = {
+  formatDate(date, _timeZone, format) {
+    if (format === 'MMM d, yyyy') return 'Aug 10, 2026'
+    return date.toISOString().slice(0, 10)
   },
 }
 
@@ -126,166 +178,156 @@ global.MeetingOpsPure = {
   },
 }
 
-global.Docs = {
-  Documents: {
-    batchUpdate(payload, documentId) {
-    const document = documents.get(documentId)
-      payload.requests.forEach((request) => {
-      if (request.addDocumentTab) {
-        document.tabs.push(new FakeTab(request.addDocumentTab.tabProperties.title))
-      }
-      if (request.updateDocumentTabProperties) {
-        const properties = request.updateDocumentTabProperties.tabProperties
-        document.tabs.find((tab) => tab.getId() === properties.tabId).title = properties.title
-      }
-    })
-    },
-  },
-}
-
 const {
-  ensureMeetingNotesTab_,
+  assertTemplateCopyReady_,
+  createDocumentFromTemplate_,
   findCurrentAgendaOccurrence_,
-  replacePlaceholdersInFormatTab_,
+  prepareTemplateCopy_,
+  setMeetingDate_,
 } = require('../src/meeting_ops.js')
 
-test('creates one Meeting notes tab from the format with the date at the top', () => {
-  const document = new FakeDocument([
-    new FakeTab('Meeting format', ['Agenda', 'Decisions', 'Actions']),
-  ])
-  documents.set('doc-1', document)
-
-  ensureMeetingNotesTab_(
-    'doc-1',
-    'Meeting format',
-    new Date('2026-08-10T14:00:00Z'),
-    'Europe/Prague',
-  )
-
-  expect(document.getTabs().map((tab) => tab.getTitle())).toEqual([
-    'Meeting format',
-    'Meeting notes',
-  ])
-  expect(document.getTabs()[1].getBody().children.map((element) => element.getText()))
-    .toEqual(['Meeting date: 2026-08-10', 'Agenda', 'Decisions', 'Actions'])
-})
-
-test('an immediate retry keeps existing notes and creates no duplicate tab or date', () => {
-  const document = new FakeDocument([
-    new FakeTab('Meeting format', ['Agenda']),
-    new FakeTab('Meeting notes', ['Meeting date: 2026-08-10', 'Agenda', 'User note']),
-  ])
-  documents.set('doc-2', document)
-
-  ensureMeetingNotesTab_(
-    'doc-2',
-    'Meeting format',
-    new Date('2026-08-10T14:00:00Z'),
-    'Europe/Prague',
-  )
-
-  expect(document.getTabs()).toHaveLength(2)
-  expect(document.getTabs()[1].getBody().children.map((element) => element.getText()))
-    .toEqual(['Meeting date: 2026-08-10', 'Agenda', 'User note'])
-})
-
-test('repairs an existing document when its preserved format title differs from config', () => {
-  const document = new FakeDocument([
-    new FakeTab('Meeting format', ['Agenda']),
-    new FakeTab('Meeting notes', ['Agenda', 'Existing note']),
-  ])
-  documents.set('doc-3', document)
-
-  ensureMeetingNotesTab_(
-    'doc-3',
-    'Format',
-    new Date('2026-08-10T14:00:00Z'),
-    'Europe/Prague',
-  )
-
-  expect(document.getTabs()).toHaveLength(2)
-  expect(document.getTabs()[1].getBody().children.map((element) => element.getText()))
-    .toEqual(['Meeting date: 2026-08-10', 'Agenda', 'Existing note'])
-})
-
-test('repairs a date-only Meeting notes tab left by an interrupted setup', () => {
-  const document = new FakeDocument([
-    new FakeTab('Format', ['Agenda', 'Decisions']),
-    new FakeTab('Meeting notes', ['Meeting date: 2026-08-10']),
-  ])
-  documents.set('doc-4', document)
-
-  ensureMeetingNotesTab_(
-    'doc-4',
-    'Format',
-    new Date('2026-08-10T14:00:00Z'),
-    'Europe/Prague',
-  )
-
-  expect(document.getTabs()[1].getBody().children.map((element) => element.getText()))
-    .toEqual(['Meeting date: 2026-08-10', 'Agenda', 'Decisions'])
-})
-
-test('does not treat non-text partial content as an empty interrupted setup', () => {
-  const notesTab = new FakeTab('Meeting notes', ['Meeting date: 2026-08-10'])
-  notesTab.getBody().children.push(new FakeElement('', 'INLINE_IMAGE'))
-  const document = new FakeDocument([
-    new FakeTab('Format', ['Agenda']),
-    notesTab,
-  ])
-  documents.set('doc-5', document)
-
-  ensureMeetingNotesTab_(
-    'doc-5',
-    'Format',
-    new Date('2026-08-10T14:00:00Z'),
-    'Europe/Prague',
-  )
-
-  expect(notesTab.getBody().children).toHaveLength(2)
-  expect(notesTab.getBody().children[1].getType()).toBe('INLINE_IMAGE')
-})
-
-test('fails closed when a missing format title has multiple candidates', () => {
-  const document = new FakeDocument([
-    new FakeTab('Legacy format', ['Agenda']),
-    new FakeTab('Attendee scratchpad', ['Note']),
-    new FakeTab('Meeting notes', ['Meeting date: 2026-08-10']),
-  ])
-  documents.set('doc-6', document)
-
-  expect(() => ensureMeetingNotesTab_(
-    'doc-6',
-    'Format',
-    new Date('2026-08-10T14:00:00Z'),
-    'Europe/Prague',
-  )).toThrow('multiple tabs and no Format format tab')
-})
-
-test('placeholder resolution changes only the immutable format tab', () => {
-  const document = new FakeDocument([
-    new FakeTab('Format', ['Agenda for {date}', 'Attendees: {attendees}']),
-    new FakeTab('Meeting notes', [
-      'Meeting date: 2026-08-10',
-      'Attendee typed literal {date} and {attendees}',
+function weeklyTemplate() {
+  return new FakeDocument([
+    new FakeTab('Meeting Notes', [
+      'Jul 20, 2026',
+      'Question TBC',
+      new FakeElement('Progress table', 'TABLE'),
+      new FakeElement('Feedback table', 'TABLE'),
     ]),
+    new FakeTab('Format', ['Meeting format', 'Aim: Keep the Foundation aligned']),
   ])
-  documents.set('doc-7', document)
+}
 
-  replacePlaceholdersInFormatTab_(
-    'doc-7',
-    { attendees: ['A', 'B'], timeZone: 'Europe/Prague' },
+function cadence(overrides = {}) {
+  return {
+    sourceDocId: 'weekly-template',
+    outputFolderId: 'output-folder',
+    templateTabName: 'Format',
+    notesTabName: 'Meeting Notes',
+    timeZone: 'Europe/Prague',
+    attendees: [],
+    ...overrides,
+  }
+}
+
+test('creates the new document as a full native copy of the weekly template', () => {
+  documents.set('weekly-template', weeklyTemplate())
+  files.set('weekly-template', new FakeFile('weekly-template'))
+
+  const copiedFile = createDocumentFromTemplate_(
+    cadence(),
+    'Weekly Sync — 2026-08-10',
     new Date('2026-08-10T14:00:00Z'),
+  )
+  const copy = documents.get(copiedFile.getId())
+
+  expect(copy.getTabs().map((tab) => tab.getTitle())).toEqual([
+    'Meeting Notes',
     'Format',
+  ])
+  expect(copy.getTabs()[0].getBody().children.map((child) => child.getText()))
+    .toEqual(['Aug 10, 2026', 'Question TBC', 'Progress table', 'Feedback table'])
+  expect(copy.getTabs()[0].getBody().children.map((child) => child.getType()))
+    .toEqual(['PARAGRAPH', 'PARAGRAPH', 'TABLE', 'TABLE'])
+  expect(copy.getTabs()[1].getBody().children.map((child) => child.getText()))
+    .toEqual(['Meeting format', 'Aim: Keep the Foundation aligned'])
+  expect(copy.saved).toBe(true)
+})
+
+test('preserves nested tab topology from the source template', () => {
+  const source = weeklyTemplate()
+  source.tabs[0].children.push(new FakeTab('Team updates', ['Updates']))
+  documents.set('weekly-template', source)
+  documents.set('nested-copy', source.clone())
+
+  expect(() => assertTemplateCopyReady_('nested-copy', cadence())).not.toThrow()
+})
+
+test('fails closed when the generated document does not preserve the template tabs', () => {
+  documents.set('weekly-template', weeklyTemplate())
+  documents.set('wrong-copy', new FakeDocument([
+    new FakeTab('Format', ['Meeting format']),
+    new FakeTab('Meeting notes', ['Meeting date: 2026-08-10']),
+  ]))
+
+  expect(() => assertTemplateCopyReady_('wrong-copy', cadence()))
+    .toThrow('does not preserve the source template tab tree')
+})
+
+test('initial preparation preserves template content beyond the date paragraph', () => {
+  documents.set('weekly-template', new FakeDocument([
+    new FakeTab('Meeting Notes', ['Jul 20, 2026', 'Attendees: {attendees}']),
+    new FakeTab('Format', ['Previous: {prev_meeting_link}']),
+  ]))
+  documents.set('placeholder-copy', documents.get('weekly-template').clone())
+
+  prepareTemplateCopy_(
+    'placeholder-copy',
+    cadence({ attendees: ['A', 'B'], previousMeetingLink: 'previous-link' }),
+    new Date('2026-08-10T14:00:00Z'),
   )
 
-  expect(document.getTabs()[0].getBody().children.map((element) => element.getText()))
-    .toEqual(['Agenda for 2026-08-10', 'Attendees: A, B'])
-  expect(document.getTabs()[1].getBody().children.map((element) => element.getText()))
-    .toEqual([
-      'Meeting date: 2026-08-10',
-      'Attendee typed literal {date} and {attendees}',
-    ])
+  const copy = documents.get('placeholder-copy')
+  expect(copy.tabs[0].body.children.map((child) => child.getText()))
+    .toEqual(['Aug 10, 2026', 'Attendees: {attendees}'])
+  expect(copy.tabs[1].body.children.map((child) => child.getText()))
+    .toEqual(['Previous: {prev_meeting_link}'])
+})
+
+test('retry validation does not modify attendee notes', () => {
+  documents.set('weekly-template', weeklyTemplate())
+  const copy = weeklyTemplate()
+  copy.tabs[0].body.children.push(new FakeElement('Attendee note with {date}'))
+  documents.set('existing-copy', copy)
+
+  assertTemplateCopyReady_('existing-copy', cadence())
+
+  expect(copy.tabs[0].body.children.at(-1).getText()).toBe('Attendee note with {date}')
+})
+
+test('meeting date replacement fails closed when notes do not start with text', () => {
+  const body = new FakeBody([new FakeElement('Native table', 'TABLE')])
+
+  expect(() => setMeetingDate_(
+    body,
+    new Date('2026-08-10T14:00:00Z'),
+    'Europe/Prague',
+  )).toThrow('does not start with a date paragraph')
+
+  expect(body.children.map((child) => child.getText())).toEqual(['Native table'])
+})
+
+test('meeting date replaces a copied native date chip exposed as empty text', () => {
+  const body = new FakeBody(['', 'Question TBC'])
+
+  setMeetingDate_(body, new Date('2026-08-10T14:00:00Z'), 'Europe/Prague')
+
+  expect(body.children.map((child) => child.getText()))
+    .toEqual(['Aug 10, 2026', 'Question TBC'])
+})
+
+test('meeting date replacement fails closed on an unexpected first paragraph', () => {
+  const body = new FakeBody(['Weekly Sync'])
+
+  expect(() => setMeetingDate_(
+    body,
+    new Date('2026-08-10T14:00:00Z'),
+    'Europe/Prague',
+  )).toThrow('starts with an unrecognized date')
+  expect(body.children[0].getText()).toBe('Weekly Sync')
+})
+
+test('retry validation allows attendee-added tabs while retaining required tabs', () => {
+  documents.set('weekly-template', weeklyTemplate())
+  const copy = weeklyTemplate()
+  copy.tabs.push(new FakeTab('Attendee scratchpad', ['Notes']))
+  documents.set('extended-copy', copy)
+
+  expect(() => assertTemplateCopyReady_(
+    'extended-copy',
+    cadence(),
+    false,
+  )).not.toThrow()
 })
 
 test('a public cadence can reuse the current occurrence for repair retries', () => {

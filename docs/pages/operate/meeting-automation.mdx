@@ -21,10 +21,11 @@ Orbie acknowledges the durable run, creates or reuses the agenda document, and
 posts the result back to the same DM. Replaying the same Slack message reuses
 the workflow run and does not create another document or message.
 
-The generated Google Doc contains two tabs: the configured meeting-format tab
-and a separate `Meeting notes` tab copied from that format. `Meeting notes`
-starts with the occurrence date. Retries repair a missing tab or date heading
-without duplicating tabs or overwriting notes attendees have entered.
+The generated Google Doc is a full native copy of the configured template. For
+the Weekly Sync cadence, `Meeting Notes` keeps the template's update prompts,
+progress sections, decisions, and feedback table, with the occurrence date at
+the top; `Format` remains a separate tab. Retries reuse and validate that copy
+without overwriting notes attendees have entered.
 
 ## Access model
 
@@ -61,9 +62,12 @@ After deployment, verify all of the following:
 3. A World Slack DM can queue an authorized cadence.
 4. An unrelated user cannot resolve a private cadence.
 5. Slack delivery succeeds before acknowledgement.
-6. The linked Doc contains the format tab plus one dated `Meeting notes` tab.
-7. Replaying the same Slack message produces no duplicate document, tab, date
-   heading, or Slack message.
+6. The linked Doc preserves the source template's full tab tree and native
+   structures; for Weekly Sync this is `Meeting Notes` followed by `Format`.
+7. `Meeting Notes` contains the template's notes layout with the occurrence
+   date at the top, while `Format` remains separate.
+8. Replaying the same Slack message produces no duplicate document or Slack
+   message and does not overwrite attendee-entered notes.
 
 Do not grant `meeting_ops` directly to Slack user, channel, or warm-pool
 principals.

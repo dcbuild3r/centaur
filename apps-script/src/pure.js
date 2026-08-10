@@ -73,6 +73,7 @@ var MeetingOpsPure = (function () {
       durationMin: cadence.durationMin,
       docNameTemplate: cadence.docNameTemplate,
       templateTabName: cadence.templateTabName || 'Template',
+      notesTabName: cadence.notesTabName || 'Meeting Notes',
       attendees: cadence.attendees || [],
       previousMeetingLink: cadence.previousMeetingLink || '',
       timeZone: cadence.timeZone || null,

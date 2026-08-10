@@ -1,10 +1,10 @@
 # Meeting Ops Google Docs Worker
 
 Apps Script is the Google-native worker for Meeting Ops. Orbie owns cadence
-configuration, access checks, and Slack delivery; this project preserves the
-configured meeting-format tab in a new Google Doc, creates a separate
-`Meeting notes` tab from that format, adds the occurrence date at the top, and
-exposes an idempotent notification outbox for Orbie.
+configuration, access checks, and Slack delivery; this project makes a full
+native copy of the configured Google Docs template, preserves its tab tree and
+native structures, replaces the date at the top of `Meeting Notes`, keeps the
+separate `Format` tab, and exposes an idempotent notification outbox for Orbie.
 
 Cadences have two sources:
 
@@ -24,7 +24,9 @@ The worker never receives Notion or Slack credentials in a cadence payload.
 3. In Apps Script **Project Settings → Script properties**, set:
    - `CADENCE_CONFIG_JSON`: the normalized cadence array supplied by Orbie.
      `MEETING_CONFIG_JSON` remains a backwards-compatible fallback.
-     Each cadence may set `templateTabName`; it defaults to `Template`.
+     Each cadence may set `templateTabName` for the preserved format tab and
+     `notesTabName` for the dated notes layout; they default to `Template` and
+     `Meeting Notes`, respectively.
    - `ALLOWED_WF_CHANNEL_IDS`: comma-separated Slack channel IDs approved for
      this project. This is a fail-closed allowlist; WF-TFH channels are not
      permitted.
@@ -76,11 +78,12 @@ agenda job is created.
 - Agenda and notes notifications are recorded in Script Properties per meeting,
   occurrence, and private requester, so each authorized user can validate the
   same document once while retries from that user remain duplicate-free.
-- The generated document keeps one format tab and one `Meeting notes` tab.
-  Retries add a missing notes tab or date heading but never create duplicates
-  or overwrite notes already entered by attendees.
-- If template copying or placeholder replacement fails, the newly created file
-  is trashed and the occurrence is not advanced.
+- The generated document is a full native copy of the source template. For the
+  Weekly Sync template, `Meeting Notes` retains its prompts, progress sections,
+  decisions, and feedback table while `Format` remains a separate tab.
+- Retries validate the existing copy without replacing attendee-entered notes.
+- If template copying, tab validation, or safe date replacement fails, the
+  newly created file is trashed and the occurrence is not advanced.
 - Public outbox entries are keyed by cadence, occurrence, and notification
   kind. Private entries add the recipient Slack user ID to the key.
 - Apps Script holds no Slack credential and cannot deliver Slack messages

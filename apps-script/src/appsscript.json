@@ -1,14 +1,6 @@
 {
   "timeZone": "Europe/Warsaw",
-  "dependencies": {
-    "enabledAdvancedServices": [
-      {
-        "userSymbol": "Docs",
-        "version": "v1",
-        "serviceId": "docs"
-      }
-    ]
-  },
+  "dependencies": {},
   "exceptionLogging": "CLOUD",
   "runtimeVersion": "V8",
   "executionApi": {

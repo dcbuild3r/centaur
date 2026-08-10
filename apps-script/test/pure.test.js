@@ -53,11 +53,12 @@ test('normalizes a public Notion cadence for Orbie delivery', () => {
     notificationMode: 'orbie',
     cadence: 'weekly',
     templateTabName: 'Template',
+    notesTabName: 'Meeting Notes',
   })
 })
 
-test('normalizes an explicit Google Docs template tab name', () => {
-  expect(pure.normalizeCadence({
+test('normalizes explicit Google Docs format and notes tab names', () => {
+  const normalized = pure.normalizeCadence({
     id: 'private-format',
     title: 'Private format',
     sourceDocId: 'doc-1',
@@ -69,7 +70,10 @@ test('normalizes an explicit Google Docs template tab name', () => {
     ownerSlackUserId: 'U123',
     notificationRecipients: ['U123'],
     templateTabName: 'Format',
-  }).templateTabName).toBe('Format')
+    notesTabName: 'Weekly Notes',
+  })
+  expect(normalized.templateTabName).toBe('Format')
+  expect(normalized.notesTabName).toBe('Weekly Notes')
 })
 
 test('private cadences require an owner and DM recipients', () => {

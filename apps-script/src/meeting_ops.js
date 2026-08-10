@@ -2,7 +2,7 @@ var AGENDA_RECORD_PREFIX = 'AGENDA_RECORD:';
 var NEXT_OCCURRENCE_PREFIX = 'NEXT_OCCURRENCE:';
 var ORBIE_OUTBOX_PREFIX = 'ORBIE_OUTBOX:';
 var DEFAULT_TEMPLATE_TAB_TITLE = 'Template';
-var MEETING_NOTES_TAB_TITLE = 'Meeting notes';
+var DEFAULT_MEETING_NOTES_TAB_TITLE = 'Meeting Notes';
 var DEFAULT_TIME_ZONE = 'Europe/Warsaw';
 var WORLD_SLACK_TEAM_ID = 'TL1HM8UUU';
 
@@ -117,6 +117,8 @@ function processAgenda_(meeting, now, requesterSlackUserId) {
     var file = findDocument_(meeting.outputFolderId, docName);
     if (!file) {
       file = createDocumentFromTemplate_(meeting, docName, occurrence);
+    } else {
+      prepareTemplateCopy_(file.getId(), meeting, occurrence);
     }
     record = {
       meetingId: meeting.id,
@@ -128,12 +130,7 @@ function processAgenda_(meeting, now, requesterSlackUserId) {
       notesNotified: false
     };
   }
-  ensureMeetingNotesTab_(
-    record.docId,
-    meeting.templateTabName || DEFAULT_TEMPLATE_TAB_TITLE,
-    occurrence,
-    timeZone
-  );
+  assertTemplateCopyReady_(record.docId, meeting, false);
 
   if (!MeetingOpsPure.wasNotificationDelivered(
     record,
@@ -380,28 +377,11 @@ function findDocument_(folderId, name) {
 }
 
 function createDocumentFromTemplate_(meeting, docName, occurrence) {
-  var target = DocumentApp.create(docName);
-  var targetFile = DriveApp.getFileById(target.getId());
+  var folder = DriveApp.getFolderById(meeting.outputFolderId);
+  var sourceFile = DriveApp.getFileById(meeting.sourceDocId);
+  var targetFile = sourceFile.makeCopy(docName, folder);
   try {
-    var folder = DriveApp.getFolderById(meeting.outputFolderId);
-    targetFile.moveTo(folder);
-    copyTemplateTab_(
-      meeting.sourceDocId,
-      target.getId(),
-      meeting.templateTabName || DEFAULT_TEMPLATE_TAB_TITLE
-    );
-    replacePlaceholdersInFormatTab_(
-      target.getId(),
-      meeting,
-      occurrence,
-      meeting.templateTabName || DEFAULT_TEMPLATE_TAB_TITLE
-    );
-    ensureMeetingNotesTab_(
-      target.getId(),
-      meeting.templateTabName || DEFAULT_TEMPLATE_TAB_TITLE,
-      occurrence,
-      meeting.timeZone || DEFAULT_TIME_ZONE
-    );
+    prepareTemplateCopy_(targetFile.getId(), meeting, occurrence);
     return targetFile;
   } catch (error) {
     targetFile.setTrashed(true);
@@ -409,85 +389,17 @@ function createDocumentFromTemplate_(meeting, docName, occurrence) {
   }
 }
 
-function copyTemplateTab_(sourceDocId, targetDocId, tabTitle) {
-  var source = DocumentApp.openById(sourceDocId);
-  var target = DocumentApp.openById(targetDocId);
-  var sourceTab = findTabByTitle_(source.getTabs(), tabTitle);
-  if (!sourceTab) throw new Error('Source document has no ' + tabTitle + ' tab');
-
-  var targetTab = target.getTabs()[0].asDocumentTab();
-  var targetBody = targetTab.getBody();
-  targetBody.clear();
-  var sourceBody = sourceTab.asDocumentTab().getBody();
-  for (var index = 0; index < sourceBody.getNumChildren(); index += 1) {
-    appendCopiedElement_(targetBody, sourceBody.getChild(index));
-  }
-  target.saveAndClose();
-  updateDocumentTabTitle_(targetDocId, targetTab.getId(), tabTitle);
-}
-
-function ensureMeetingNotesTab_(documentId, formatTabTitle, occurrence, timeZone) {
+function prepareTemplateCopy_(documentId, meeting, occurrence) {
+  assertTemplateCopyReady_(documentId, meeting);
   var document = DocumentApp.openById(documentId);
-  var formatTab = findFormatTab_(document.getTabs(), formatTabTitle);
-
-  var notesTab = findTabByTitle_(document.getTabs(), MEETING_NOTES_TAB_TITLE);
-  if (!notesTab) {
-    document.saveAndClose();
-    addDocumentTab_(documentId, MEETING_NOTES_TAB_TITLE);
-    document = DocumentApp.openById(documentId);
-    formatTab = findFormatTab_(document.getTabs(), formatTabTitle);
-    notesTab = findTabByTitle_(document.getTabs(), MEETING_NOTES_TAB_TITLE);
-    if (!notesTab) throw new Error('Google Docs did not create the Meeting notes tab');
-  }
-  var notesBody = notesTab.asDocumentTab().getBody();
-  ensureMeetingDateHeading_(notesBody, occurrence, timeZone);
-  if (isDateOnlyMeetingNotes_(notesBody, occurrence, timeZone)) {
-    var formatBody = formatTab.asDocumentTab().getBody();
-    for (var index = 0; index < formatBody.getNumChildren(); index += 1) {
-      appendCopiedElement_(notesBody, formatBody.getChild(index));
-    }
-  }
-}
-
-function addDocumentTab_(documentId, title) {
-  batchUpdateDocument_(documentId, [{
-    addDocumentTab: {
-      tabProperties: { title: title }
-    }
-  }]);
-}
-
-function updateDocumentTabTitle_(documentId, tabId, title) {
-  batchUpdateDocument_(documentId, [{
-    updateDocumentTabProperties: {
-      tabProperties: { tabId: tabId, title: title },
-      fields: 'title'
-    }
-  }]);
-}
-
-function batchUpdateDocument_(documentId, requests) {
-  Docs.Documents.batchUpdate({ requests: requests }, documentId);
-}
-
-function ensureMeetingDateHeading_(body, occurrence, timeZone) {
-  var heading = 'Meeting date: ' + MeetingOpsPure.dateKey(occurrence, timeZone);
-  if (body.getNumChildren() > 0 && body.getChild(0).getText() === heading) return;
-  body.insertParagraph(0, heading);
-}
-
-function isDateOnlyMeetingNotes_(body, occurrence, timeZone) {
-  var heading = 'Meeting date: ' + MeetingOpsPure.dateKey(occurrence, timeZone);
-  if (body.getNumChildren() === 0 || body.getChild(0).getText() !== heading) {
-    return false;
-  }
-  for (var index = 1; index < body.getNumChildren(); index += 1) {
-    var child = body.getChild(index);
-    if (child.getType() !== DocumentApp.ElementType.PARAGRAPH || child.getText().trim()) {
-      return false;
-    }
-  }
-  return true;
+  var notesTitle = meeting.notesTabName || DEFAULT_MEETING_NOTES_TAB_TITLE;
+  var notesTab = findTabByTitle_(document.getTabs(), notesTitle);
+  setMeetingDate_(
+    notesTab.asDocumentTab().getBody(),
+    occurrence,
+    meeting.timeZone || DEFAULT_TIME_ZONE
+  );
+  document.saveAndClose();
 }
 
 function findTabByTitle_(tabs, title) {
@@ -499,66 +411,57 @@ function findTabByTitle_(tabs, title) {
   return null;
 }
 
-function findFormatTab_(tabs, expectedTitle) {
-  var exact = findTabByTitle_(tabs, expectedTitle);
-  if (exact) return exact;
-  var candidates = [];
-  collectTabsExcept_(tabs, MEETING_NOTES_TAB_TITLE, candidates);
-  if (candidates.length === 1) return candidates[0];
-  if (candidates.length === 0) {
-    throw new Error('Generated document has no meeting format tab');
+function assertTemplateCopyReady_(documentId, meeting, compareSourceTopology) {
+  var target = DocumentApp.openById(documentId);
+  if (compareSourceTopology !== false) {
+    var source = DocumentApp.openById(meeting.sourceDocId);
+    var sourceTopology = tabTopology_(source.getTabs(), '');
+    var targetTopology = tabTopology_(target.getTabs(), '');
+    if (JSON.stringify(sourceTopology) !== JSON.stringify(targetTopology)) {
+      throw new Error('Generated document does not preserve the source template tab tree');
+    }
   }
-  throw new Error(
-    'Generated document has multiple tabs and no ' + expectedTitle + ' format tab'
-  );
+  var notesTitle = meeting.notesTabName || DEFAULT_MEETING_NOTES_TAB_TITLE;
+  var formatTitle = meeting.templateTabName || DEFAULT_TEMPLATE_TAB_TITLE;
+  if (!findTabByTitle_(target.getTabs(), notesTitle)) {
+    throw new Error('Template copy has no ' + notesTitle + ' tab');
+  }
+  if (!findTabByTitle_(target.getTabs(), formatTitle)) {
+    throw new Error('Template copy has no ' + formatTitle + ' tab');
+  }
 }
 
-function collectTabsExcept_(tabs, excludedTitle, output) {
+function tabTopology_(tabs, parentPath) {
+  var topology = [];
   for (var index = 0; index < tabs.length; index += 1) {
-    if (tabs[index].getTitle() !== excludedTitle) output.push(tabs[index]);
-    collectTabsExcept_(tabs[index].getChildTabs(), excludedTitle, output);
+    var path = parentPath + '/' + tabs[index].getTitle();
+    topology.push(path);
+    topology = topology.concat(tabTopology_(tabs[index].getChildTabs(), path));
   }
+  return topology;
 }
 
-function appendCopiedElement_(body, element) {
-  var copy = element.copy();
-  switch (element.getType()) {
-    case DocumentApp.ElementType.PARAGRAPH:
-      body.appendParagraph(copy);
-      return;
-    case DocumentApp.ElementType.LIST_ITEM:
-      body.appendListItem(copy);
-      return;
-    case DocumentApp.ElementType.TABLE:
-      body.appendTable(copy);
-      return;
-    case DocumentApp.ElementType.PAGE_BREAK:
-      body.appendPageBreak(copy);
-      return;
-    case DocumentApp.ElementType.HORIZONTAL_RULE:
-      body.appendHorizontalRule();
-      return;
-    case DocumentApp.ElementType.INLINE_IMAGE:
-      body.appendImage(copy);
-      return;
-    default:
-      throw new Error('Unsupported template tab element: ' + element.getType());
+function setMeetingDate_(body, occurrence, timeZone) {
+  var date = Utilities.formatDate(occurrence, timeZone, 'MMM d, yyyy');
+  if (body.getNumChildren() === 0) {
+    throw new Error('Meeting Notes template has no date paragraph');
   }
-}
-
-function replacePlaceholdersInFormatTab_(documentId, meeting, occurrence, formatTabTitle) {
-  var document = DocumentApp.openById(documentId);
-  var formatTab = findFormatTab_(document.getTabs(), formatTabTitle);
-  var timeZone = meeting.timeZone || DEFAULT_TIME_ZONE;
-  var replacements = {
-    '{date}': MeetingOpsPure.dateKey(occurrence, timeZone),
-    '{attendees}': (meeting.attendees || []).join(', '),
-    '{prev_meeting_link}': meeting.previousMeetingLink || ''
-  };
-  var body = formatTab.asDocumentTab().getBody();
-  Object.keys(replacements).forEach(function (placeholder) {
-    body.replaceText(MeetingOpsPure.escapeRegExp(placeholder), replacements[placeholder]);
-  });
+  var first = body.getChild(0);
+  if (first.getType() !== DocumentApp.ElementType.PARAGRAPH) {
+    throw new Error('Meeting Notes template does not start with a date paragraph');
+  }
+  if (first.getText() === date) return;
+  // Google Docs date smart chips are copied natively but DocumentApp exposes
+  // their paragraph text as empty. Replacing that one leading paragraph turns
+  // the stale chip into the occurrence date without touching the notes layout.
+  if (first.getText() === '') {
+    first.asParagraph().setText(date);
+    return;
+  }
+  if (!/^[A-Z][a-z]{2} [0-9]{1,2}, [0-9]{4}$/.test(first.getText())) {
+    throw new Error('Meeting Notes template starts with an unrecognized date');
+  }
+  first.asParagraph().setText(date);
 }
 
 function readJsonProperty_(properties, key) {
@@ -582,8 +485,10 @@ function withScriptLock_(callback) {
 
 if (typeof module !== 'undefined') {
   module.exports = {
-    ensureMeetingNotesTab_: ensureMeetingNotesTab_,
+    assertTemplateCopyReady_: assertTemplateCopyReady_,
+    createDocumentFromTemplate_: createDocumentFromTemplate_,
     findCurrentAgendaOccurrence_: findCurrentAgendaOccurrence_,
-    replacePlaceholdersInFormatTab_: replacePlaceholdersInFormatTab_
+    prepareTemplateCopy_: prepareTemplateCopy_,
+    setMeetingDate_: setMeetingDate_
   };
 }
