@@ -370,9 +370,9 @@ jobs:
             --tools-dir /app/tools \
             principals revoke warm-pool-bootstrap --tool meeting_ops
 
-          # The initial pilot is private and may run only from the operator's
-          # World Slack DM principals. Cadence scheduling should move to a
-          # dedicated workflow principal before broad production rollout.
+          # Only the durable workflow principal receives the shared Google
+          # worker and outbox authority. Slack users submit caller-bound broker
+          # requests; their session principals never receive this role.
           kubectl --namespace "$HELM_NAMESPACE" exec \
             deployment/centaur-centaur-api-rs -- \
             /usr/local/bin/centaur-perms \
@@ -380,16 +380,21 @@ jobs:
             --source-policy onepassword \
             --op-vault Centaur \
             --source-refs '{"GOOGLE_TOKEN_JSON":"op://Centaur/GOOGLE_TOKEN_JSON/credential","MEETING_OPS_SCRIPT_ID":"op://Centaur/MEETING_OPS_SCRIPT_ID/credential"}' \
-            principals grant slack-user-tl1hm8uuu-u03tnh0duqp --tool meeting_ops
+            principals grant workflow-meeting-automation --tool meeting_ops
+
+          # Remove both historical operator-principal variants now that the
+          # workflow owns execution. Revocation is idempotent.
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            principals revoke slack-user-tl1hm8uuu-u03tnh0duqp --tool meeting_ops
 
           kubectl --namespace "$HELM_NAMESPACE" exec \
             deployment/centaur-centaur-api-rs -- \
             /usr/local/bin/centaur-perms \
             --tools-dir /app/tools \
-            --source-policy onepassword \
-            --op-vault Centaur \
-            --source-refs '{"GOOGLE_TOKEN_JSON":"op://Centaur/GOOGLE_TOKEN_JSON/credential","MEETING_OPS_SCRIPT_ID":"op://Centaur/MEETING_OPS_SCRIPT_ID/credential"}' \
-            principals grant slack-user-u03tnh0duqp --tool meeting_ops
+            principals revoke slack-user-u03tnh0duqp --tool meeting_ops
 
           # Remove historical DM/channel grants. New grants are made by api-rs
           # only for the explicit World Foundation channel policy; the session

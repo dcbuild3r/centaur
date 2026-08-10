@@ -32,11 +32,24 @@ The worker never receives Notion or Slack credentials in a cadence payload.
 
 ## Orbie handoff contract
 
-Orbie invokes `runCadenceJob({ cadenceId, now })` through the Apps Script
-Execution API. The worker returns the created document URL. Orbie then reads
-`getPendingOrbieNotifications()`, posts each payload through its existing
-Slack runtime, and calls `acknowledgeOrbieNotification(notificationId)` only
-after Slack confirms delivery.
+Orbie invokes `runCadenceJob({ cadenceId, requesterSlackUserId, now })`
+through the Apps Script Execution API. `getAuthorizedCadences({
+requesterSlackUserId, requesterSlackTeamId })` returns only active public
+cadences and private cadences where the caller is the owner, has access, or is
+an explicit notification recipient. The worker returns the created document
+URL.
+
+The Meeting Automation workflow reads
+`getPendingOrbieNotificationsForCaller({ requesterSlackUserId,
+requesterSlackTeamId })`, posts only those private payloads to the trusted DM,
+and calls `acknowledgeOrbieNotificationForCaller({ notificationId,
+requesterSlackUserId, requesterSlackTeamId })` only after Slack confirms
+delivery. Public cadences are reported directly to the caller's DM; their
+allowlisted public-channel outbox entry is not consumed by that workflow.
+
+The legacy unscoped `getPendingOrbieNotifications()` and
+`acknowledgeOrbieNotification()` functions remain for the existing operator
+handoff, but are not used by the caller-facing workflow.
 
 Those are the project's only public Execution API functions; all helpers use
 Apps Script's trailing-underscore private naming convention. Re-running
@@ -44,8 +57,10 @@ Apps Script's trailing-underscore private naming convention. Re-running
 notification is due.
 
 Public notification payloads contain an allowlisted WF channel. Private
-payloads contain recipient Slack user IDs and no channel; Orbie delivers those
-as DMs after applying the owner/access policy.
+payloads are stored once per recipient and contain one `recipientSlackUserId`
+with no channel; Orbie delivers those as DMs after applying the owner/access
+policy. A caller-scoped acknowledgement cannot consume another recipient's
+entry.
 
 The worker currently supports `weekly`; Notion can retain the future
 `cadenceCron` value so Orbie can add timezone-aware recurrence later. Each
@@ -60,7 +75,8 @@ agenda job is created.
   and occurrence, so retries do not duplicate Slack posts.
 - If template copying or placeholder replacement fails, the newly created file
   is trashed and the occurrence is not advanced.
-- Orbie outbox entries are keyed by cadence, occurrence, and notification kind.
+- Public outbox entries are keyed by cadence, occurrence, and notification
+  kind. Private entries add the recipient Slack user ID to the key.
 - Apps Script holds no Slack credential and cannot deliver Slack messages
   directly.
 

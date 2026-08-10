@@ -117,7 +117,10 @@ test('only the approved Execution API entrypoints are public', () => {
 
   expect(publicFunctions).toEqual([
     'acknowledgeOrbieNotification',
+    'acknowledgeOrbieNotificationForCaller',
+    'getAuthorizedCadences',
     'getPendingOrbieNotifications',
+    'getPendingOrbieNotificationsForCaller',
     'runCadenceJob',
   ])
 })
@@ -134,4 +137,25 @@ test('outbox payload uses the client acknowledgement field name', () => {
 test('notification keys are stable per cadence occurrence and kind', () => {
   expect(pure.notificationKey('cadence-1', new Date('2026-08-05T12:00:00Z'), 'UTC', 'agenda'))
     .toBe('agenda:cadence-1:2026-08-05')
+  expect(pure.notificationKey(
+    'cadence-1',
+    new Date('2026-08-05T12:00:00Z'),
+    'UTC',
+    'agenda',
+    'U123',
+  )).toBe('agenda:cadence-1:2026-08-05:U123')
+})
+
+test('authorized cadences include public and private owner/access/recipient entries only', () => {
+  const cadences = [
+    { id: 'public', visibility: 'public', status: 'active' },
+    { id: 'owner', visibility: 'private', ownerSlackUserId: 'U123', status: 'active' },
+    { id: 'access', visibility: 'private', accessSlackUserIds: ['U123'], status: 'active' },
+    { id: 'recipient', visibility: 'private', notificationRecipients: ['U123'], status: 'active' },
+    { id: 'other', visibility: 'private', ownerSlackUserId: 'U999', status: 'active' },
+    { id: 'disabled', visibility: 'public', status: 'disabled' },
+  ]
+  expect(pure.authorizedCadences(cadences, 'U123').map((cadence) => cadence.id))
+    .toEqual(['public', 'owner', 'access', 'recipient'])
+  expect(pure.isCadenceAuthorized(cadences[5], 'U123')).toBe(false)
 })

@@ -249,6 +249,8 @@ export type SlackbotV2ThreadState = {
   model?: string | null
   /** Last thread-level model provider selected by Slack flags. Null clears persisted state. */
   provider?: string | null
+  /** Workflow responses keyed by the originating Slack message id. */
+  meetingAutomationRuns?: Record<string, JsonObject>
   renderObligation?: SlackbotV2RenderObligation | null
 }
 

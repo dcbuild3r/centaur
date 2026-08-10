@@ -80,17 +80,37 @@ var MeetingOpsPure = (function () {
     };
   }
 
-  function notificationKey(cadenceId, occurrence, timeZone, kind) {
-    return String(kind) + ':' + String(cadenceId) + ':' + dateKey(occurrence, timeZone);
+  function isCadenceAuthorized(cadence, requesterSlackUserId) {
+    if (!requesterSlackUserId) return false;
+    if (cadence.status && cadence.status !== 'active') return false;
+    if (cadence.visibility === 'public') return true;
+    var privateUsers = [cadence.ownerSlackUserId]
+      .concat(cadence.accessSlackUserIds || [])
+      .concat(cadence.notificationRecipients || []);
+    return privateUsers.indexOf(String(requesterSlackUserId)) !== -1;
+  }
+
+  function authorizedCadences(cadences, requesterSlackUserId) {
+    return (cadences || []).filter(function (cadence) {
+      return (!cadence.status || cadence.status === 'active') &&
+        isCadenceAuthorized(cadence, requesterSlackUserId);
+    });
+  }
+
+  function notificationKey(cadenceId, occurrence, timeZone, kind, recipientSlackUserId) {
+    var key = String(kind) + ':' + String(cadenceId) + ':' + dateKey(occurrence, timeZone);
+    return recipientSlackUserId ? key + ':' + String(recipientSlackUserId) : key;
   }
 
   return {
     dateKey: dateKey,
     escapeRegExp: escapeRegExp,
     isWithinAgendaWindow: isWithinAgendaWindow,
+    isCadenceAuthorized: isCadenceAuthorized,
     nextWeeklyOccurrence: nextWeeklyOccurrence,
     normalizeCadence: normalizeCadence,
     notificationKey: notificationKey,
+    authorizedCadences: authorizedCadences,
     resolveDocName: resolveDocName,
     shouldPost: shouldPost
   };

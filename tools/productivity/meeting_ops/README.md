@@ -1,13 +1,19 @@
 # Meeting Ops
 
 `meeting-ops` is the narrow Orbie-facing client for the Google Apps Script
-Meeting Ops worker. It exposes only the three approved functions needed for
-the Docs/Slack handoff:
+Meeting Ops worker. It exposes caller-scoped functions for the Docs/Slack
+handoff:
 
-- `run_cadence(cadence_id, now=None)` creates or reuses an agenda Doc.
-- `pending_notifications()` reads the durable Apps Script outbox.
-- `acknowledge_notification(notification_id)` removes an outbox item only
-  after Orbie has confirmed Slack delivery.
+- `authorized_cadences(user_id, team_id)` lists public and permitted private
+  cadences.
+- `run_cadence(cadence_id, requester_slack_user_id=...,
+  requester_slack_team_id=...)` creates or reuses an agenda Doc and
+  re-checks private access in Apps Script.
+- `pending_notifications_for_caller(user_id, team_id)` reads only that user's
+  private notifications.
+- `acknowledge_notification(notification_id, requester_slack_user_id=...,
+  requester_slack_team_id=...)` removes only that user's item after Orbie has
+  confirmed Slack delivery.
 
 The target Apps Script executable deployment ID is fixed by the
 `MEETING_OPS_SCRIPT_ID` grant. Google names the REST path parameter `scriptId`,
@@ -20,12 +26,19 @@ path placeholder and proxy-injected short-lived OAuth access token.
 ## CLI
 
 ```bash
-meeting-ops run-cadence private-weekly --now 2026-08-07T12:00:00Z
-meeting-ops notifications
-meeting-ops acknowledge private-weekly:2026-08-07:agenda
+meeting-ops cadences --requester-slack-user-id U123 --requester-slack-team-id TL1HM8UUU
+meeting-ops run-cadence private-weekly \
+  --requester-slack-user-id U123 --requester-slack-team-id TL1HM8UUU \
+  --now 2026-08-07T12:00:00Z
+meeting-ops notifications \
+  --requester-slack-user-id U123 --requester-slack-team-id TL1HM8UUU
+meeting-ops acknowledge agenda:private-weekly:2026-08-07:U123 \
+  --requester-slack-user-id U123 --requester-slack-team-id TL1HM8UUU
 ```
 
 Slack delivery remains Orbie's responsibility. An outbox item must not be
 acknowledged until the Slack API confirms the corresponding message.
-The outbox spans all configured cadences, so production grants must remain
-exclusive to Orbie's automation principal rather than individual end users.
+Private outbox entries are created once per recipient. Production grants must
+remain exclusive to the Meeting Automation workflow principal rather than
+individual end users. Public-channel notifications remain in the public
+outbox and are intentionally not consumed by the caller-scoped worker.

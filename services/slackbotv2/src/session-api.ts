@@ -574,6 +574,36 @@ export async function dispatchSlackBlockAction(
   await ensureApiOk(response, action)
 }
 
+export async function postSlackMeetingAutomationRun(
+  options: SlackbotV2Options,
+  request: SlackMeetingAutomationRunRequest
+): Promise<JsonObject> {
+  const action = 'create Slack meeting automation run'
+  const response = await recordSessionApiOperation(
+    'create_meeting_automation_run',
+    () =>
+      fetchWithTimeout(
+        options.fetch ?? globalThis.fetch,
+        new URL('/api/slack/meeting-automation/runs', ensureTrailingSlash(options.apiUrl)),
+        {
+          body: JSON.stringify(request),
+          headers: apiHeaders(options),
+          method: 'POST'
+        },
+        sessionApiTimeoutMs(options),
+        action
+      ),
+    sessionApiTimeoutMs(options),
+    action
+  )
+  await ensureApiOk(response, action)
+  const payload: unknown = await response.json()
+  if (!isJsonObject(payload)) {
+    throw new Error(`${action} returned a non-object response`)
+  }
+  return payload
+}
+
 export async function openSessionEventStream(
   options: SlackbotV2Options,
   input: Pick<ForwardSessionInput, 'afterEventId' | 'executionId' | 'onEventId' | 'threadId' | 'trace'>
@@ -729,6 +759,24 @@ type RequesterIdentity = {
   slackTeamId?: string
   slackUserId?: string
   slackUserName?: string
+}
+
+export const WORLD_FOUNDATION_SLACK_TEAM_ID = 'TL1HM8UUU'
+
+export type SlackMeetingAutomationRequester = {
+  slackChannelId: string
+  slackEmail?: string
+  slackTeamId: string
+  slackUserId: string
+}
+
+export type SlackMeetingAutomationRunRequest = {
+  cadence_query: string
+  requester_slack_user_id: string
+  requester_slack_team_id: string
+  requester_slack_email?: string
+  slack_channel_id: string
+  request_message_id: string
 }
 
 type RequesterIdentityCacheEntry = {
@@ -978,6 +1026,37 @@ async function resolveRequesterIdentity(
   }
   cacheRequesterIdentity(cacheKey, identity)
   return identity
+}
+
+/**
+ * Resolve the authenticated Slack requester and the existing DM destination
+ * for the meeting-automation broker. The caller never supplies these values
+ * in command text; they come from the verified Slack message and profile.
+ */
+export async function resolveSlackMeetingAutomationRequester(
+  options: SlackbotV2Options,
+  message: SlackbotV2ApiMessage
+): Promise<SlackMeetingAutomationRequester | null> {
+  const channelId = slackConversationId(message)
+  const teamId = messageSlackTeamId(message)
+  if (
+    teamId !== WORLD_FOUNDATION_SLACK_TEAM_ID
+    || !channelId
+    || slackConversationKind(channelId) !== 'dm'
+  ) {
+    return null
+  }
+
+  const identity = await resolveRequesterIdentity(options, message)
+  if (!identity.slackUserId || identity.slackTeamId !== WORLD_FOUNDATION_SLACK_TEAM_ID) {
+    return null
+  }
+  return {
+    slackChannelId: channelId,
+    ...(identity.slackEmail ? { slackEmail: identity.slackEmail } : {}),
+    slackTeamId: WORLD_FOUNDATION_SLACK_TEAM_ID,
+    slackUserId: identity.slackUserId
+  }
 }
 
 function requesterIdentityCacheKey(

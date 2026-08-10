@@ -90,38 +90,84 @@ def run_cadence(
     cadence_id: str,
     *,
     now: str | None = None,
+    requester_slack_user_id: str | None = None,
+    requester_slack_team_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Create the agenda for one approved cadence occurrence."""
 
     request: dict[str, str] = {"cadenceId": cadence_id}
     if now:
         request["now"] = now
+    if requester_slack_user_id:
+        request["requesterSlackUserId"] = requester_slack_user_id
+    if requester_slack_team_id:
+        request["requesterSlackTeamId"] = requester_slack_team_id
     result = _run_function("runCadenceJob", [request])
     if result is not None and not isinstance(result, dict):
         raise MeetingOpsError("runCadenceJob returned an unexpected result")
     return result
 
 
-def pending_notifications() -> list[dict[str, Any]]:
-    """Return notifications that Orbie has not yet delivered and acknowledged."""
+def authorized_cadences(
+    requester_slack_user_id: str,
+    requester_slack_team_id: str,
+) -> list[dict[str, Any]]:
+    """Return only active cadences authorized for one Slack caller."""
 
-    result = _run_function("getPendingOrbieNotifications")
+    result = _run_function(
+        "getAuthorizedCadences",
+        [{
+            "requesterSlackUserId": requester_slack_user_id,
+            "requesterSlackTeamId": requester_slack_team_id,
+        }],
+    )
     if result is None:
         return []
     if not isinstance(result, list) or not all(isinstance(item, dict) for item in result):
-        raise MeetingOpsError("getPendingOrbieNotifications returned an unexpected result")
+        raise MeetingOpsError("getAuthorizedCadences returned an unexpected result")
+    return result
+
+
+def pending_notifications_for_caller(
+    requester_slack_user_id: str,
+    requester_slack_team_id: str,
+) -> list[dict[str, Any]]:
+    """Return only private notifications addressed to this Slack caller."""
+
+    result = _run_function(
+        "getPendingOrbieNotificationsForCaller",
+        [{
+            "requesterSlackUserId": requester_slack_user_id,
+            "requesterSlackTeamId": requester_slack_team_id,
+        }],
+    )
+    if result is None:
+        return []
+    if not isinstance(result, list) or not all(isinstance(item, dict) for item in result):
+        raise MeetingOpsError(
+            "getPendingOrbieNotificationsForCaller returned an unexpected result"
+        )
     return result
 
 
 def acknowledge_notification(
     notification_id: str,
+    *,
+    requester_slack_user_id: str,
+    requester_slack_team_id: str,
 ) -> dict[str, Any]:
-    """Remove an outbox item after Orbie has confirmed Slack delivery."""
+    """Acknowledge only this caller's private item after Slack delivery."""
 
     result = _run_function(
-        "acknowledgeOrbieNotification",
-        [notification_id],
+        "acknowledgeOrbieNotificationForCaller",
+        [{
+            "notificationId": notification_id,
+            "requesterSlackUserId": requester_slack_user_id,
+            "requesterSlackTeamId": requester_slack_team_id,
+        }],
     )
     if not isinstance(result, dict):
-        raise MeetingOpsError("acknowledgeOrbieNotification returned an unexpected result")
+        raise MeetingOpsError(
+            "acknowledgeOrbieNotificationForCaller returned an unexpected result"
+        )
     return result

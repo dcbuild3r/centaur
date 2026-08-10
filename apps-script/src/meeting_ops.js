@@ -3,6 +3,7 @@ var NEXT_OCCURRENCE_PREFIX = 'NEXT_OCCURRENCE:';
 var ORBIE_OUTBOX_PREFIX = 'ORBIE_OUTBOX:';
 var DEFAULT_TEMPLATE_TAB_TITLE = 'Template';
 var DEFAULT_TIME_ZONE = 'Europe/Warsaw';
+var WORLD_SLACK_TEAM_ID = 'TL1HM8UUU';
 
 // Entry point for Orbie via the Apps Script Execution API. The caller supplies
 // a cadence id and a stable, testable clock; configuration and Google auth stay
@@ -14,16 +15,46 @@ function runCadenceJob(payload) {
       return item.id === request.cadenceId;
     })[0];
     if (!cadence) throw new Error('Unknown cadence ' + request.cadenceId);
+    if (request.requesterSlackUserId) {
+      var caller = parseCaller_(request);
+      if (!MeetingOpsPure.isCadenceAuthorized(cadence, caller.requesterSlackUserId)) {
+        throw new Error('Cadence is not authorized for ' + caller.requesterSlackUserId);
+      }
+    }
     var now = request.now ? new Date(request.now) : new Date();
     processNotesNotification_(cadence, now);
     return processAgenda_(cadence, now);
   });
 }
 
+// Return only active cadences the supplied Slack user may run. The workflow
+// validates the authenticated Slack team before calling this function; the
+// team check here is defense in depth for direct Execution API callers.
+function getAuthorizedCadences(payload) {
+  var caller = parseCaller_(payload);
+  return MeetingOpsPure.authorizedCadences(
+    getMeetingConfig_(),
+    caller.requesterSlackUserId
+  );
+}
+
 function getPendingOrbieNotifications() {
   var properties = PropertiesService.getScriptProperties().getProperties();
   return Object.keys(properties).filter(function (key) {
     return key.indexOf(ORBIE_OUTBOX_PREFIX) === 0;
+  }).map(function (key) {
+    return JSON.parse(properties[key]);
+  });
+}
+
+function getPendingOrbieNotificationsForCaller(payload) {
+  var caller = parseCaller_(payload);
+  var properties = PropertiesService.getScriptProperties().getProperties();
+  return Object.keys(properties).filter(function (key) {
+    if (key.indexOf(ORBIE_OUTBOX_PREFIX) !== 0) return false;
+    var notification = JSON.parse(properties[key]);
+    return notification.visibility === 'private' &&
+      notification.recipientSlackUserId === caller.requesterSlackUserId;
   }).map(function (key) {
     return JSON.parse(properties[key]);
   });
@@ -38,6 +69,25 @@ function acknowledgeOrbieNotification(notificationId) {
   }
   properties.deleteProperty(key);
   return { acknowledged: true, notificationId: notificationId };
+}
+
+function acknowledgeOrbieNotificationForCaller(payload) {
+  var request = typeof payload === 'string' ? JSON.parse(payload) : (payload || {});
+  var caller = parseCaller_(request);
+  if (!request.notificationId) {
+    throw new Error('notificationId is required');
+  }
+  var properties = PropertiesService.getScriptProperties();
+  var key = ORBIE_OUTBOX_PREFIX + request.notificationId;
+  var raw = properties.getProperty(key);
+  if (!raw) throw new Error('Unknown notification ' + request.notificationId);
+  var notification = JSON.parse(raw);
+  if (notification.visibility !== 'private' ||
+      notification.recipientSlackUserId !== caller.requesterSlackUserId) {
+    throw new Error('Notification is not authorized for ' + caller.requesterSlackUserId);
+  }
+  properties.deleteProperty(key);
+  return { acknowledged: true, notificationId: request.notificationId };
 }
 
 function processAgenda_(meeting, now) {
@@ -159,25 +209,60 @@ function deliverNotification_(meeting, record, kind, text, occurrence, recordKey
 function queueOrbieNotification_(meeting, record, kind, text, occurrence, recordKey) {
   if (meeting.visibility === 'public') assertAllowedChannel_(meeting);
   var timeZone = meeting.timeZone || DEFAULT_TIME_ZONE;
-  var notificationId = MeetingOpsPure.notificationKey(meeting.id, occurrence, timeZone, kind);
-  var payload = {
-    notificationId: notificationId,
-    kind: kind,
-    meetingId: meeting.id,
-    visibility: meeting.visibility,
-    channelId: meeting.notifyChannel || null,
-    channelName: meeting.notifyChannelName || null,
-    recipientUserIds: meeting.notificationRecipients || [],
-    text: text,
-    docId: record.docId,
-    docUrl: record.docUrl,
-    occurrenceAt: occurrence.toISOString(),
-    recordKey: recordKey
-  };
-  PropertiesService.getScriptProperties().setProperty(
-    ORBIE_OUTBOX_PREFIX + notificationId,
-    JSON.stringify(payload)
-  );
+  var recipients = meeting.visibility === 'private'
+    ? uniqueStrings_(meeting.notificationRecipients || [])
+    : [null];
+  recipients.forEach(function (recipientSlackUserId) {
+    var notificationId = MeetingOpsPure.notificationKey(
+      meeting.id,
+      occurrence,
+      timeZone,
+      kind,
+      recipientSlackUserId
+    );
+    var payload = {
+      notificationId: notificationId,
+      kind: kind,
+      meetingId: meeting.id,
+      visibility: meeting.visibility,
+      channelId: meeting.notifyChannel || null,
+      channelName: meeting.notifyChannelName || null,
+      recipientSlackUserId: recipientSlackUserId,
+      recipientUserIds: recipientSlackUserId ? [recipientSlackUserId] : [],
+      text: text,
+      docId: record.docId,
+      docUrl: record.docUrl,
+      occurrenceAt: occurrence.toISOString(),
+      recordKey: recordKey
+    };
+    PropertiesService.getScriptProperties().setProperty(
+      ORBIE_OUTBOX_PREFIX + notificationId,
+      JSON.stringify(payload)
+    );
+  });
+}
+
+function parseCaller_(payload) {
+  var request = typeof payload === 'string' ? JSON.parse(payload) : (payload || {});
+  if (!request.requesterSlackUserId) {
+    throw new Error('requesterSlackUserId is required');
+  }
+  if (!request.requesterSlackTeamId) {
+    throw new Error('requesterSlackTeamId is required');
+  }
+  if (request.requesterSlackTeamId !== WORLD_SLACK_TEAM_ID) {
+    throw new Error('Unsupported Slack team ' + request.requesterSlackTeamId);
+  }
+  return request;
+}
+
+function uniqueStrings_(values) {
+  var seen = {};
+  return (values || []).map(String).filter(function (value) {
+    if (!value || seen[value]) return false;
+    seen[value] = true;
+    return true;
+  });
 }
 
 function getNextOccurrence_(meeting) {

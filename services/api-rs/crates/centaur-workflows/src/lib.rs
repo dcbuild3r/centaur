@@ -3426,6 +3426,11 @@ async fn start_python_child_workflow(
                 "ctx.workflow.start requires a non-empty workflow_name".to_owned(),
             )
         })?;
+    if workflow_name == "meeting_automation" {
+        return Err(WorkflowRuntimeError::BadRequest(
+            "meeting_automation must be started by the authenticated Slack broker".to_owned(),
+        ));
+    }
     WorkflowEnablement::from_env()?.ensure_enabled(workflow_name)?;
     let child_input = message.get("input").cloned().unwrap_or_else(|| json!({}));
     if !child_input.is_object() {

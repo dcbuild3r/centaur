@@ -12,7 +12,7 @@ def test_run_cadence_outputs_machine_readable_result(monkeypatch):
     monkeypatch.setattr(
         client,
         "run_cadence",
-        lambda cadence_id, now=None: {
+        lambda cadence_id, now=None, **_kwargs: {
             "meetingId": cadence_id,
             "occurrenceAt": now,
             "docUrl": "https://docs.google.com/document/d/doc-123/edit",
@@ -21,7 +21,12 @@ def test_run_cadence_outputs_machine_readable_result(monkeypatch):
 
     result = runner.invoke(
         app,
-        ["run-cadence", "private-weekly", "--now", "2026-08-07T12:00:00Z"],
+        [
+            "run-cadence", "private-weekly",
+            "--requester-slack-user-id", "U123",
+            "--requester-slack-team-id", "TL1HM8UUU",
+            "--now", "2026-08-07T12:00:00Z",
+        ],
     )
 
     assert result.exit_code == 0
@@ -35,20 +40,24 @@ def test_run_cadence_outputs_machine_readable_result(monkeypatch):
 def test_notifications_and_acknowledgement_are_separate_commands(monkeypatch):
     monkeypatch.setattr(
         client,
-        "pending_notifications",
-        lambda: [{"notificationId": "notification-123", "text": "Agenda ready"}],
+        "pending_notifications_for_caller",
+        lambda *_args: [{"notificationId": "notification-123", "text": "Agenda ready"}],
     )
     monkeypatch.setattr(
         client,
         "acknowledge_notification",
-        lambda notification_id: {
+        lambda notification_id, **_kwargs: {
             "acknowledged": True,
             "notificationId": notification_id,
         },
     )
 
-    pending = runner.invoke(app, ["notifications"])
-    acknowledged = runner.invoke(app, ["acknowledge", "notification-123"])
+    caller_args = [
+        "--requester-slack-user-id", "U123",
+        "--requester-slack-team-id", "TL1HM8UUU",
+    ]
+    pending = runner.invoke(app, ["notifications", *caller_args])
+    acknowledged = runner.invoke(app, ["acknowledge", "notification-123", *caller_args])
 
     assert pending.exit_code == 0
     assert json.loads(pending.output)[0]["notificationId"] == "notification-123"

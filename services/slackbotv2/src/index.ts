@@ -74,6 +74,11 @@ import {
   parseSlackWebhookPayload
 } from './slack-events'
 import { isSlackStopCommand } from './stop-command'
+import {
+  dispatchMeetingAutomationCommand,
+  isWorldFoundationSlackDm,
+  parseMeetingAutomationCommand
+} from './meeting-automation'
 import type {
   ForwardSessionInput,
   JsonObject,
@@ -168,6 +173,7 @@ const LATE_SLACK_FILE_IDLE_POLL_MS = 500
 const LATE_SLACK_FILE_MESSAGE_TEXT = 'Late Slack file attachment for the previous message.'
 const SLACK_BLOCK_ACTION_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000
 const SLACK_BLOCK_ACTION_LEASE_TTL_MS = 60 * 1000
+const MEETING_AUTOMATION_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000
 
 type PendingLateSlackFileMention = {
   channel: string
@@ -515,19 +521,37 @@ async function handleSlackMessageHandoff(
     trigger: input.trigger
   })
   let initialAssistantStatusVisible = false
-  const assistantStatus = input.assistantStatusRequested
-    ? setInitialAssistantStatus(thread, input.options, trace)
-        .then(visible => {
-          initialAssistantStatusVisible = visible
-          return visible
-        })
-    : Promise.resolve(false)
-  if (input.assistantStatusRequested) {
-    backgroundWaitUntil(assistantStatus.then(() => undefined).catch(() => undefined))
-  }
+  let assistantStatus: Promise<boolean> = Promise.resolve(false)
   try {
     if (await handleStopCommand(thread, message, input.options, input.trigger)) {
       return
+    }
+    const meetingAutomationCommand =
+      input.mode === 'execute'
+        ? parseMeetingAutomationCommand(message.text, input.options.botUserId)
+        : null
+    if (meetingAutomationCommand && isWorldFoundationSlackDm(message)) {
+      if (
+        await handleMeetingAutomationCommand(
+          thread,
+          message,
+          meetingAutomationCommand,
+          input.options,
+          input.state,
+          trace
+        )
+      ) {
+        return
+      }
+    }
+    assistantStatus = input.assistantStatusRequested
+      ? setInitialAssistantStatus(thread, input.options, trace).then(visible => {
+          initialAssistantStatusVisible = visible
+          return visible
+        })
+      : Promise.resolve(false)
+    if (input.assistantStatusRequested) {
+      backgroundWaitUntil(assistantStatus.then(() => undefined).catch(() => undefined))
     }
     if (input.subscribe) {
       await subscribeSlackThreadForHandoff(thread, input.options, trace, input.trigger)
@@ -563,6 +587,58 @@ async function handleSlackMessageHandoff(
     )
     throw error
   }
+}
+
+async function handleMeetingAutomationCommand(
+  thread: Thread<SlackbotV2ThreadState>,
+  message: ChatMessage,
+  command: Parameters<typeof dispatchMeetingAutomationCommand>[2],
+  options: SlackbotV2Options,
+  state: StateAdapter,
+  trace: SlackbotV2Trace
+): Promise<boolean> {
+  const dedupeKey = `slackbotv2:meeting-automation:${thread.id}:${message.id}`
+  const leaseToken = randomUUID()
+  if (!(await state.setIfNotExists(dedupeKey, leaseToken, MEETING_AUTOMATION_DEDUPE_TTL_MS))) {
+    traceLog(options, 'slackbotv2_meeting_automation_duplicate_ignored', trace)
+    return true
+  }
+
+  try {
+    const dispatched = await dispatchMeetingAutomationCommand(options, message, command)
+    if (!dispatched) {
+      await state.delete(dedupeKey)
+      return false
+    }
+
+    const latest = (await thread.state) ?? {}
+    await thread.setState({
+      meetingAutomationRuns: {
+        ...(latest.meetingAutomationRuns ?? {}),
+        [message.id]: dispatched.response
+      }
+    })
+    await thread.post(meetingAutomationAcknowledgement(dispatched.response))
+    await state.set(dedupeKey, true, MEETING_AUTOMATION_DEDUPE_TTL_MS)
+    traceLog(options, 'slackbotv2_meeting_automation_queued', trace, {
+      created: dispatched.response.created,
+      run_id: stringValue(dispatched.response.run_id),
+      status: stringValue(dispatched.response.status)
+    })
+    return true
+  } catch (error) {
+    if ((await state.get(dedupeKey)) === leaseToken) {
+      await state.delete(dedupeKey)
+    }
+    throw error
+  }
+}
+
+function meetingAutomationAcknowledgement(response: JsonObject): string {
+  const alreadyQueued = response.created === false
+  return alreadyQueued
+    ? 'That meeting automation is already queued. I’ll post the result here.'
+    : 'Meeting automation queued. I’ll post the result here.'
 }
 
 async function handleStopCommand(
