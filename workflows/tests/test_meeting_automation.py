@@ -60,6 +60,15 @@ class FakeContext:
         return {"sent": True, "channel": channel}
 
 
+class RecordingToolContext:
+    def __init__(self):
+        self.calls = []
+
+    async def call_tool(self, tool, method, args):
+        self.calls.append((tool, method, args))
+        return []
+
+
 def _input(query="AI Workstream", **overrides):
     values = {
         "cadence_query": query,
@@ -71,6 +80,24 @@ def _input(query="AI Workstream", **overrides):
     }
     values.update(overrides)
     return meeting_automation.Input(**values)
+
+
+def test_tool_client_uses_the_installed_meeting_ops_cli_name():
+    context = RecordingToolContext()
+    client = meeting_automation.MeetingOpsToolClient(context)
+
+    asyncio.run(client.authorized_cadences("U123", "TL1HM8UUU"))
+
+    assert context.calls == [
+        (
+            "meeting-ops",
+            "authorized_cadences",
+            {
+                "requester_slack_user_id": "U123",
+                "requester_slack_team_id": "TL1HM8UUU",
+            },
+        )
+    ]
 
 
 def test_private_cadence_delivers_and_acknowledges_only_callers_item(monkeypatch):

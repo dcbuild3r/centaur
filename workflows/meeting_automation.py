@@ -10,6 +10,7 @@ from api.workflow_engine import WorkflowContext
 WORKFLOW_NAME = "meeting_automation"
 WORKFLOW_PRINCIPAL = True
 WORLD_SLACK_TEAM_ID = "TL1HM8UUU"
+MEETING_OPS_TOOL = "meeting-ops"
 
 
 @dataclass
@@ -60,7 +61,7 @@ class MeetingOpsToolClient:
 
     async def authorized_cadences(self, user_id: str, team_id: str) -> list[dict[str, Any]]:
         result = await self._ctx.call_tool(
-            "meeting_ops",
+            MEETING_OPS_TOOL,
             "authorized_cadences",
             {
                 "requester_slack_user_id": user_id,
@@ -77,7 +78,7 @@ class MeetingOpsToolClient:
         requester_slack_team_id: str,
     ) -> dict[str, Any] | None:
         result = await self._ctx.call_tool(
-            "meeting_ops",
+            MEETING_OPS_TOOL,
             "run_cadence",
             {
                 "cadence_id": cadence_id,
@@ -93,7 +94,7 @@ class MeetingOpsToolClient:
         team_id: str,
     ) -> list[dict[str, Any]]:
         result = await self._ctx.call_tool(
-            "meeting_ops",
+            MEETING_OPS_TOOL,
             "pending_notifications_for_caller",
             {
                 "requester_slack_user_id": user_id,
@@ -110,7 +111,7 @@ class MeetingOpsToolClient:
         requester_slack_team_id: str,
     ) -> dict[str, Any]:
         result = await self._ctx.call_tool(
-            "meeting_ops",
+            MEETING_OPS_TOOL,
             "acknowledge_notification",
             {
                 "notification_id": notification_id,
