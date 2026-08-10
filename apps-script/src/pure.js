@@ -97,6 +97,42 @@ var MeetingOpsPure = (function () {
     });
   }
 
+  function uniqueStrings(values) {
+    var seen = {};
+    return (values || []).map(String).filter(function (value) {
+      if (!value || seen[value]) return false;
+      seen[value] = true;
+      return true;
+    });
+  }
+
+  function notificationRecipients(cadence, requesterSlackUserId) {
+    if (cadence.visibility !== 'private') return [null];
+    if (!requesterSlackUserId) {
+      throw new Error('private notification delivery requires a requester');
+    }
+    return [String(requesterSlackUserId)];
+  }
+
+  function wasNotificationDelivered(record, kind, requesterSlackUserId) {
+    if (record[kind + 'Notified']) return true;
+    if (!requesterSlackUserId) return false;
+    return (record[kind + 'NotifiedRecipients'] || [])
+      .map(String)
+      .indexOf(String(requesterSlackUserId)) !== -1;
+  }
+
+  function markNotificationDelivered(record, kind, requesterSlackUserId) {
+    if (!requesterSlackUserId) {
+      record[kind + 'Notified'] = true;
+      return record;
+    }
+    record[kind + 'NotifiedRecipients'] = uniqueStrings(
+      (record[kind + 'NotifiedRecipients'] || []).concat([requesterSlackUserId])
+    );
+    return record;
+  }
+
   function notificationKey(cadenceId, occurrence, timeZone, kind, recipientSlackUserId) {
     var key = String(kind) + ':' + String(cadenceId) + ':' + dateKey(occurrence, timeZone);
     return recipientSlackUserId ? key + ':' + String(recipientSlackUserId) : key;
@@ -107,12 +143,15 @@ var MeetingOpsPure = (function () {
     escapeRegExp: escapeRegExp,
     isWithinAgendaWindow: isWithinAgendaWindow,
     isCadenceAuthorized: isCadenceAuthorized,
+    markNotificationDelivered: markNotificationDelivered,
     nextWeeklyOccurrence: nextWeeklyOccurrence,
     normalizeCadence: normalizeCadence,
+    notificationRecipients: notificationRecipients,
     notificationKey: notificationKey,
     authorizedCadences: authorizedCadences,
     resolveDocName: resolveDocName,
-    shouldPost: shouldPost
+    shouldPost: shouldPost,
+    wasNotificationDelivered: wasNotificationDelivered
   };
 })();
 

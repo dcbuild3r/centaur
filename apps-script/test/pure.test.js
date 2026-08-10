@@ -96,6 +96,39 @@ test('private cadences require an owner and DM recipients', () => {
   }).notificationRecipients).toEqual(['UOWNER'])
 })
 
+test('private runs queue only the authenticated requester', () => {
+  const cadence = {
+    visibility: 'private',
+    notificationRecipients: ['UOWNER', 'UCOLLABORATOR'],
+  }
+
+  expect(pure.notificationRecipients(cadence, 'UCOLLABORATOR')).toEqual([
+    'UCOLLABORATOR',
+  ])
+  expect(() => pure.notificationRecipients(cadence, null)).toThrow(
+    'private notification delivery requires a requester',
+  )
+})
+
+test('private delivery is idempotent per requester', () => {
+  const record = { agendaNotified: false }
+
+  expect(pure.wasNotificationDelivered(record, 'agenda', 'UOWNER')).toBe(false)
+  pure.markNotificationDelivered(record, 'agenda', 'UOWNER')
+  expect(pure.wasNotificationDelivered(record, 'agenda', 'UOWNER')).toBe(true)
+  expect(pure.wasNotificationDelivered(record, 'agenda', 'UCOLLABORATOR')).toBe(false)
+
+  pure.markNotificationDelivered(record, 'agenda', 'UCOLLABORATOR')
+  expect(record.agendaNotifiedRecipients).toEqual(['UOWNER', 'UCOLLABORATOR'])
+})
+
+test('legacy global delivery remains idempotent for every requester', () => {
+  const record = { notesNotified: true }
+
+  expect(pure.wasNotificationDelivered(record, 'notes', 'UOWNER')).toBe(true)
+  expect(pure.wasNotificationDelivered(record, 'notes', 'UCOLLABORATOR')).toBe(true)
+})
+
 test('direct Apps Script Slack delivery is rejected', () => {
   expect(() => pure.normalizeCadence({
     visibility: 'public',
@@ -132,6 +165,15 @@ test('outbox payload uses the client acknowledgement field name', () => {
   )
   expect(source).toContain('notificationId: notificationId')
   expect(source).not.toContain('\n    id: notificationId')
+})
+
+test('cadence execution requires caller validation before authorization', () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, '..', 'src', 'meeting_ops.js'),
+    'utf8',
+  )
+  expect(source).toContain('var caller = parseCaller_(request);')
+  expect(source).not.toContain('if (request.requesterSlackUserId)')
 })
 
 test('notification keys are stable per cadence occurrence and kind', () => {

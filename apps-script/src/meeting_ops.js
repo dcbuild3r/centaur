@@ -15,15 +15,14 @@ function runCadenceJob(payload) {
       return item.id === request.cadenceId;
     })[0];
     if (!cadence) throw new Error('Unknown cadence ' + request.cadenceId);
-    if (request.requesterSlackUserId) {
-      var caller = parseCaller_(request);
-      if (!MeetingOpsPure.isCadenceAuthorized(cadence, caller.requesterSlackUserId)) {
-        throw new Error('Cadence is not authorized for ' + caller.requesterSlackUserId);
-      }
+    var caller = parseCaller_(request);
+    if (!MeetingOpsPure.isCadenceAuthorized(cadence, caller.requesterSlackUserId)) {
+      throw new Error('Cadence is not authorized for ' + caller.requesterSlackUserId);
     }
     var now = request.now ? new Date(request.now) : new Date();
-    processNotesNotification_(cadence, now);
-    return processAgenda_(cadence, now);
+    var requesterSlackUserId = caller.requesterSlackUserId;
+    processNotesNotification_(cadence, now, requesterSlackUserId);
+    return processAgenda_(cadence, now, requesterSlackUserId);
   });
 }
 
@@ -90,13 +89,19 @@ function acknowledgeOrbieNotificationForCaller(payload) {
   return { acknowledged: true, notificationId: request.notificationId };
 }
 
-function processAgenda_(meeting, now) {
+function processAgenda_(meeting, now, requesterSlackUserId) {
   validateMeeting_(meeting);
-  var occurrence = getNextOccurrence_(meeting);
   var leadMin = meeting.notifyLeadMin == null ? 60 : Number(meeting.notifyLeadMin);
   var staleWindowMin = meeting.staleWindowMin == null
     ? 12 * 60
     : Number(meeting.staleWindowMin);
+  var occurrence = findPendingAgendaOccurrence_(
+    meeting,
+    now,
+    leadMin,
+    staleWindowMin,
+    requesterSlackUserId
+  ) || getNextOccurrence_(meeting);
   if (!MeetingOpsPure.isWithinAgendaWindow(now, occurrence, leadMin, staleWindowMin)) {
     return;
   }
@@ -123,11 +128,27 @@ function processAgenda_(meeting, now) {
     };
   }
 
-  if (!record.agendaNotified) {
+  if (!MeetingOpsPure.wasNotificationDelivered(
+    record,
+    'agenda',
+    requesterSlackUserId
+  )) {
     var agendaText = '📋 ' + meeting.title + ' agenda is ready: ' + record.docUrl +
       '\nAttendees: ' + formatAttendees_(meeting.attendees);
-    deliverNotification_(meeting, record, 'agenda', agendaText, occurrence, recordKey);
-    record.agendaNotified = true;
+    deliverNotification_(
+      meeting,
+      record,
+      'agenda',
+      agendaText,
+      occurrence,
+      recordKey,
+      requesterSlackUserId
+    );
+    MeetingOpsPure.markNotificationDelivered(
+      record,
+      'agenda',
+      requesterSlackUserId
+    );
   }
 
   writeJsonProperty_(properties, recordKey, record);
@@ -144,7 +165,7 @@ function processAgenda_(meeting, now) {
   };
 }
 
-function processNotesNotification_(meeting, now) {
+function processNotesNotification_(meeting, now, requesterSlackUserId) {
   validateMeeting_(meeting);
   var properties = PropertiesService.getScriptProperties();
   var prefix = AGENDA_RECORD_PREFIX + meeting.id + ':';
@@ -152,7 +173,11 @@ function processNotesNotification_(meeting, now) {
   Object.keys(all).forEach(function (key) {
     if (key.indexOf(prefix) !== 0) return;
     var record = JSON.parse(all[key]);
-    if (record.notesNotified) return;
+    if (MeetingOpsPure.wasNotificationDelivered(
+      record,
+      'notes',
+      requesterSlackUserId
+    )) return;
 
     var occurrence = new Date(record.occurrenceAt);
     var delayMin = meeting.notesDelayMin == null
@@ -167,9 +192,14 @@ function processNotesNotification_(meeting, now) {
       'notes',
       notesText,
       occurrence,
-      key
+      key,
+      requesterSlackUserId
     );
-    record.notesNotified = true;
+    MeetingOpsPure.markNotificationDelivered(
+      record,
+      'notes',
+      requesterSlackUserId
+    );
     writeJsonProperty_(properties, key, record);
   });
 }
@@ -202,16 +232,41 @@ function validateMeeting_(meeting) {
   }
 }
 
-function deliverNotification_(meeting, record, kind, text, occurrence, recordKey) {
-  queueOrbieNotification_(meeting, record, kind, text, occurrence, recordKey);
+function deliverNotification_(
+  meeting,
+  record,
+  kind,
+  text,
+  occurrence,
+  recordKey,
+  requesterSlackUserId
+) {
+  queueOrbieNotification_(
+    meeting,
+    record,
+    kind,
+    text,
+    occurrence,
+    recordKey,
+    requesterSlackUserId
+  );
 }
 
-function queueOrbieNotification_(meeting, record, kind, text, occurrence, recordKey) {
+function queueOrbieNotification_(
+  meeting,
+  record,
+  kind,
+  text,
+  occurrence,
+  recordKey,
+  requesterSlackUserId
+) {
   if (meeting.visibility === 'public') assertAllowedChannel_(meeting);
   var timeZone = meeting.timeZone || DEFAULT_TIME_ZONE;
-  var recipients = meeting.visibility === 'private'
-    ? uniqueStrings_(meeting.notificationRecipients || [])
-    : [null];
+  var recipients = MeetingOpsPure.notificationRecipients(
+    meeting,
+    requesterSlackUserId
+  );
   recipients.forEach(function (recipientSlackUserId) {
     var notificationId = MeetingOpsPure.notificationKey(
       meeting.id,
@@ -269,6 +324,38 @@ function getNextOccurrence_(meeting) {
   var properties = PropertiesService.getScriptProperties();
   var stored = properties.getProperty(NEXT_OCCURRENCE_PREFIX + meeting.id);
   return new Date(stored || meeting.nextOccurrenceAt);
+}
+
+function findPendingAgendaOccurrence_(
+  meeting,
+  now,
+  leadMin,
+  staleWindowMin,
+  requesterSlackUserId
+) {
+  if (meeting.visibility !== 'private' || !requesterSlackUserId) return null;
+  var prefix = AGENDA_RECORD_PREFIX + meeting.id + ':';
+  var all = PropertiesService.getScriptProperties().getProperties();
+  var pending = Object.keys(all).filter(function (key) {
+    if (key.indexOf(prefix) !== 0) return false;
+    var record = JSON.parse(all[key]);
+    var occurrence = new Date(record.occurrenceAt);
+    return MeetingOpsPure.isWithinAgendaWindow(
+      now,
+      occurrence,
+      leadMin,
+      staleWindowMin
+    ) && !MeetingOpsPure.wasNotificationDelivered(
+      record,
+      'agenda',
+      requesterSlackUserId
+    );
+  }).map(function (key) {
+    return new Date(JSON.parse(all[key]).occurrenceAt);
+  }).sort(function (left, right) {
+    return right.getTime() - left.getTime();
+  });
+  return pending[0] || null;
 }
 
 function advanceOccurrence_(meeting, occurrence) {

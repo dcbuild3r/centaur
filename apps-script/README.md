@@ -58,9 +58,10 @@ notification is due.
 
 Public notification payloads contain an allowlisted WF channel. Private
 payloads are stored once per recipient and contain one `recipientSlackUserId`
-with no channel; Orbie delivers those as DMs after applying the owner/access
-policy. A caller-scoped acknowledgement cannot consume another recipient's
-entry.
+with no channel. Every run requires Orbie's authenticated Slack caller context
+and queues only that caller's payload. Orbie delivers it to the trusted DM after
+applying the owner/access policy. A caller-scoped acknowledgement cannot consume
+another recipient's entry.
 
 The worker currently supports `weekly`; Notion can retain the future
 `cadenceCron` value so Orbie can add timezone-aware recurrence later. Each
@@ -71,8 +72,9 @@ agenda job is created.
 
 - A script lock serializes overlapping trigger executions.
 - A document is looked up by output folder and resolved title before creation.
-- Agenda and notes notifications are recorded in Script Properties per meeting
-  and occurrence, so retries do not duplicate Slack posts.
+- Agenda and notes notifications are recorded in Script Properties per meeting,
+  occurrence, and private requester, so each authorized user can validate the
+  same document once while retries from that user remain duplicate-free.
 - If template copying or placeholder replacement fails, the newly created file
   is trashed and the occurrence is not advanced.
 - Public outbox entries are keyed by cadence, occurrence, and notification
