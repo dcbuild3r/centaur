@@ -30,12 +30,14 @@ class BrowserRuntimeTest(unittest.TestCase):
             'AGENT_BROWSER_EXECUTABLE_PATH="/usr/local/bin/centaur-chromium"',
             dockerfile,
         )
+        self.assertIn("agent-browser@0.34.0", dockerfile)
+        self.assertIn("--ignore-certificate-errors", dockerfile)
         self.assertIn(
             'ln -s /usr/local/bin/centaur-chromium /usr/local/bin/chromium',
             dockerfile,
         )
         self.assertIn(
-            'AGENT_BROWSER_ARGS="--no-sandbox,--disable-dev-shm-usage"',
+            'AGENT_BROWSER_ARGS="--no-sandbox,--disable-dev-shm-usage,--ignore-certificate-errors"',
             dockerfile,
         )
         self.assertIn("agent-browser open about:blank", dockerfile)

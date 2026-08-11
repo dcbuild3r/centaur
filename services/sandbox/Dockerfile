@@ -151,7 +151,7 @@ RUN --mount=type=cache,target=/root/.npm,sharing=locked \
       "@openai/codex@${CODEX_VERSION}" \
       "@mariozechner/pi-coding-agent@${PI_CODING_AGENT_VERSION}" \
       "pnpm@${PNPM_VERSION}" \
-      agent-browser@0.26.0 \
+      agent-browser@0.34.0 \
     && find /usr/lib/node_modules -type f \( -name '*.map' -o -name '*.tsbuildinfo' \) -delete \
     && claude --version | grep -F "${CLAUDE_CODE_VERSION}" \
     && codex --version | grep -F "${CODEX_VERSION}" \
@@ -244,7 +244,7 @@ RUN set -eux; \
     rm -f /tmp/centaur-chromium-path
 
 ENV AGENT_BROWSER_EXECUTABLE_PATH="/usr/local/bin/centaur-chromium" \
-    AGENT_BROWSER_ARGS="--no-sandbox,--disable-dev-shm-usage"
+    AGENT_BROWSER_ARGS="--no-sandbox,--disable-dev-shm-usage,--ignore-certificate-errors"
 
 USER agent
 
