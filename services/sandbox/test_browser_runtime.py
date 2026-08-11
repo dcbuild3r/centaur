@@ -54,6 +54,18 @@ class BrowserRuntimeTest(unittest.TestCase):
         self.assertIn("agent-browser skills get core --full", prompt)
         self.assertIn("Never use a user's local-machine browser", prompt)
 
+    def test_browser_artifacts_stay_file_backed_until_chat_upload(self) -> None:
+        prompt = SYSTEM_PROMPT.read_text()
+
+        self.assertIn("agent-browser screenshot /tmp/", prompt)
+        self.assertIn("do not call `view_image`", prompt)
+        self.assertIn("upload the saved file directly", prompt)
+
+    def test_codex_does_not_retry_invalid_tool_images(self) -> None:
+        dockerfile = DOCKERFILE.read_text()
+
+        self.assertIn("ARG CODEX_VERSION=0.145.0", dockerfile)
+
 
 if __name__ == "__main__":
     unittest.main()

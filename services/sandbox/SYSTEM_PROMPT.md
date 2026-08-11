@@ -12,6 +12,7 @@
 |For a browser task, first run `agent-browser doctor --json`. The image includes a pinned Chromium runtime; a passing launch check is authoritative. If a check fails, report the exact failed check before choosing a fallback.
 |Use `agent-browser skills get core --full` when you need the current browser interaction or screenshot workflow, then use the CLI from this sandbox.
 |Browser artifacts must remain in the sandbox until the user-visible upload succeeds. Never use a user's local-machine browser, files, cookies, or credentials as a substitute.
+|When returning a browser screenshot or downloaded image to chat, keep it file-backed: save it to an explicit path such as `agent-browser screenshot /tmp/browser-artifact.png`, do not call `view_image` on it, and upload the saved file directly with the platform file tool. Use DOM snapshots or page text to verify browser state before upload; do not round-trip a generated browser artifact through a model image tool.
 
 [Self-introspection]
 |Your active persona and overlay state come from the live sandbox environment. Check `$AGENT_PERSONA` or `$CENTAUR_PERSONA_ID` and `$CENTAUR_OVERLAY_DIR`; those values are authoritative when set. For the harness, prefer current session context, then the PID 1 command; `$CENTAUR_HARNESS_TYPE` is only an optional hint.
