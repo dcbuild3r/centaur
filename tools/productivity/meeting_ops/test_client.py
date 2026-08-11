@@ -75,6 +75,26 @@ def test_run_cadence_invokes_only_the_worker_entrypoint(monkeypatch):
     ]
 
 
+def test_run_cadence_forwards_custom_instructions_to_apps_script(monkeypatch):
+    service = _Service({"done": True, "response": {"result": {"meetingId": "private-weekly"}}})
+    monkeypatch.setattr(client, "get_script_service", lambda: service)
+    monkeypatch.setattr(client, "secret", lambda name: "script-123")
+
+    client.run_cadence(
+        "private-weekly",
+        requester_slack_user_id="U123",
+        requester_slack_team_id="TL1HM8UUU",
+        custom_instructions="focus on decisions",
+    )
+
+    assert service.scripts_api.calls[0]["body"]["parameters"] == [{
+        "cadenceId": "private-weekly",
+        "customInstructions": "focus on decisions",
+        "requesterSlackTeamId": "TL1HM8UUU",
+        "requesterSlackUserId": "U123",
+    }]
+
+
 def test_execution_error_surfaces_apps_script_message(monkeypatch):
     service = _Service(
         {

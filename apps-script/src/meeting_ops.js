@@ -22,8 +22,14 @@ function runCadenceJob(payload) {
     }
     var now = request.now ? new Date(request.now) : new Date();
     var requesterSlackUserId = caller.requesterSlackUserId;
+    var customInstructions = MeetingOpsPure.normalizeCustomInstructions(
+      request.customInstructions
+    );
     processNotesNotification_(cadence, now, requesterSlackUserId);
-    return processAgenda_(cadence, now, requesterSlackUserId);
+    return processAgenda_(cadence, now, requesterSlackUserId, {
+      manual: true,
+      customInstructions: customInstructions
+    });
   });
 }
 
@@ -90,22 +96,28 @@ function acknowledgeOrbieNotificationForCaller(payload) {
   return { acknowledged: true, notificationId: request.notificationId };
 }
 
-function processAgenda_(meeting, now, requesterSlackUserId) {
+function processAgenda_(meeting, now, requesterSlackUserId, options) {
+  options = options || {};
   validateMeeting_(meeting);
   var leadMin = meeting.notifyLeadMin == null ? 60 : Number(meeting.notifyLeadMin);
   var staleWindowMin = meeting.staleWindowMin == null
     ? 12 * 60
     : Number(meeting.staleWindowMin);
-  var occurrence = findCurrentAgendaOccurrence_(
+  var occurrenceSelection = selectAgendaOccurrence_(
     meeting,
     now,
     leadMin,
     staleWindowMin,
-    requesterSlackUserId
-  ) || getNextOccurrence_(meeting);
-  if (!MeetingOpsPure.isWithinAgendaWindow(now, occurrence, leadMin, staleWindowMin)) {
+    requesterSlackUserId,
+    options.manual === true
+  );
+  if (!occurrenceSelection) {
     return;
   }
+  var occurrence = occurrenceSelection.occurrence;
+  var customInstructions = MeetingOpsPure.normalizeCustomInstructions(
+    options.customInstructions
+  );
 
   var timeZone = meeting.timeZone || DEFAULT_TIME_ZONE;
   var date = MeetingOpsPure.dateKey(occurrence, timeZone);
@@ -116,13 +128,23 @@ function processAgenda_(meeting, now, requesterSlackUserId) {
   if (!record) {
     var file = findDocument_(meeting.outputFolderId, docName);
     if (!file) {
-      file = createDocumentFromTemplate_(meeting, docName, occurrence);
+      file = createDocumentFromTemplate_(
+        meeting,
+        docName,
+        occurrence,
+        customInstructions
+      );
     } else {
       try {
         prepareTemplateCopy_(file.getId(), meeting, occurrence);
       } catch (error) {
         supersedeMalformedDocument_(file);
-        file = createDocumentFromTemplate_(meeting, docName, occurrence);
+        file = createDocumentFromTemplate_(
+          meeting,
+          docName,
+          occurrence,
+          customInstructions
+        );
       }
     }
     record = {
@@ -131,15 +153,22 @@ function processAgenda_(meeting, now, requesterSlackUserId) {
       docId: file.getId(),
       docUrl: file.getUrl(),
       docName: docName,
+      oneOffManual: occurrenceSelection.oneOffManual,
       agendaNotified: false,
       notesNotified: false
     };
+    if (customInstructions) record.customInstructions = customInstructions;
   } else {
     try {
       assertTemplateCopyReady_(record.docId, meeting, false);
     } catch (error) {
       supersedeMalformedDocument_(DriveApp.getFileById(record.docId));
-      var replacement = createDocumentFromTemplate_(meeting, docName, occurrence);
+      var replacement = createDocumentFromTemplate_(
+        meeting,
+        docName,
+        occurrence,
+        customInstructions
+      );
       record.docId = replacement.getId();
       record.docUrl = replacement.getUrl();
       record.docName = docName;
@@ -147,6 +176,11 @@ function processAgenda_(meeting, now, requesterSlackUserId) {
       record.agendaNotifiedRecipients = [];
       record.notesNotified = false;
       record.notesNotifiedRecipients = [];
+      if (customInstructions) {
+        record.customInstructions = customInstructions;
+      } else {
+        delete record.customInstructions;
+      }
     }
   }
   assertTemplateCopyReady_(record.docId, meeting, false);
@@ -175,17 +209,23 @@ function processAgenda_(meeting, now, requesterSlackUserId) {
   }
 
   writeJsonProperty_(properties, recordKey, record);
-  properties.setProperty(
-    NEXT_OCCURRENCE_PREFIX + meeting.id,
-    advanceOccurrence_(meeting, occurrence).toISOString()
-  );
-  return {
+  if (!occurrenceSelection.oneOffManual) {
+    properties.setProperty(
+      NEXT_OCCURRENCE_PREFIX + meeting.id,
+      advanceOccurrence_(meeting, occurrence).toISOString()
+    );
+  }
+  var result = {
     meetingId: meeting.id,
     occurrenceAt: occurrence.toISOString(),
     docId: record.docId,
     docUrl: record.docUrl,
     notificationMode: meeting.notificationMode
   };
+  if (record.customInstructions) {
+    result.customInstructions = record.customInstructions;
+  }
+  return result;
 }
 
 function processNotesNotification_(meeting, now, requesterSlackUserId) {
@@ -349,6 +389,71 @@ function getNextOccurrence_(meeting) {
   return new Date(stored || meeting.nextOccurrenceAt);
 }
 
+function selectAgendaOccurrence_(
+  meeting,
+  now,
+  leadMin,
+  staleWindowMin,
+  requesterSlackUserId,
+  manual
+) {
+  if (manual) {
+    var timeZone = meeting.timeZone || DEFAULT_TIME_ZONE;
+    var sameDateRecord = findAgendaRecordForDate_(meeting, now, timeZone);
+    if (sameDateRecord) {
+      return {
+        occurrence: new Date(sameDateRecord.occurrenceAt),
+        oneOffManual: Boolean(sameDateRecord.oneOffManual)
+      };
+    }
+  }
+
+  var current = findCurrentAgendaOccurrence_(
+    meeting,
+    now,
+    leadMin,
+    staleWindowMin,
+    requesterSlackUserId
+  );
+  if (current) {
+    var currentRecord = findAgendaRecordForOccurrence_(meeting, current);
+    return {
+      occurrence: current,
+      oneOffManual: Boolean(currentRecord && currentRecord.oneOffManual)
+    };
+  }
+
+  if (manual) {
+    return {
+      occurrence: new Date(now.getTime()),
+      oneOffManual: true
+    };
+  }
+
+  var next = getNextOccurrence_(meeting);
+  if (!MeetingOpsPure.isWithinAgendaWindow(now, next, leadMin, staleWindowMin)) {
+    return null;
+  }
+  return { occurrence: next, oneOffManual: false };
+}
+
+function findAgendaRecordForOccurrence_(meeting, occurrence) {
+  return findAgendaRecordForDate_(
+    meeting,
+    occurrence,
+    meeting.timeZone || DEFAULT_TIME_ZONE
+  );
+}
+
+function findAgendaRecordForDate_(meeting, date, timeZone) {
+  var key = AGENDA_RECORD_PREFIX + meeting.id + ':' +
+    MeetingOpsPure.dateKey(date, timeZone);
+  return readJsonProperty_(
+    PropertiesService.getScriptProperties(),
+    key
+  );
+}
+
 function findCurrentAgendaOccurrence_(
   meeting,
   now,
@@ -395,12 +500,17 @@ function findDocument_(folderId, name) {
   return null;
 }
 
-function createDocumentFromTemplate_(meeting, docName, occurrence) {
+function createDocumentFromTemplate_(meeting, docName, occurrence, customInstructions) {
   var folder = DriveApp.getFolderById(meeting.outputFolderId);
   var sourceFile = DriveApp.getFileById(meeting.sourceDocId);
   var targetFile = sourceFile.makeCopy(docName, folder);
   try {
-    prepareTemplateCopy_(targetFile.getId(), meeting, occurrence);
+    prepareTemplateCopy_(
+      targetFile.getId(),
+      meeting,
+      occurrence,
+      customInstructions
+    );
     return targetFile;
   } catch (error) {
     targetFile.setTrashed(true);
@@ -414,7 +524,7 @@ function supersedeMalformedDocument_(file) {
   file.setName(file.getName() + suffix);
 }
 
-function prepareTemplateCopy_(documentId, meeting, occurrence) {
+function prepareTemplateCopy_(documentId, meeting, occurrence, customInstructions) {
   assertTemplateCopyReady_(documentId, meeting);
   var document = DocumentApp.openById(documentId);
   var notesTitle = meeting.notesTabName || DEFAULT_MEETING_NOTES_TAB_TITLE;
@@ -424,7 +534,17 @@ function prepareTemplateCopy_(documentId, meeting, occurrence) {
     occurrence,
     meeting.timeZone || DEFAULT_TIME_ZONE
   );
+  insertCustomInstructions_(
+    notesTab.asDocumentTab().getBody(),
+    customInstructions
+  );
   document.saveAndClose();
+}
+
+function insertCustomInstructions_(body, customInstructions) {
+  var instructions = MeetingOpsPure.normalizeCustomInstructions(customInstructions);
+  if (!instructions) return;
+  body.insertParagraph(1, instructions);
 }
 
 function findTabByTitle_(tabs, title) {
@@ -537,7 +657,10 @@ if (typeof module !== 'undefined') {
     bodyStructureSignature_: bodyStructureSignature_,
     createDocumentFromTemplate_: createDocumentFromTemplate_,
     findCurrentAgendaOccurrence_: findCurrentAgendaOccurrence_,
+    insertCustomInstructions_: insertCustomInstructions_,
     prepareTemplateCopy_: prepareTemplateCopy_,
+    processAgenda_: processAgenda_,
+    runCadenceJob: runCadenceJob,
     setMeetingDate_: setMeetingDate_
   };
 }

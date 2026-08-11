@@ -173,6 +173,7 @@ impl AppState {
 const MAX_WEBHOOK_BODY_BYTES: usize = 1024 * 1024;
 const WORLD_FOUNDATION_SLACK_TEAM_ID: &str = "TL1HM8UUU";
 const MEETING_AUTOMATION_WORKFLOW: &str = "meeting_automation";
+const MAX_CUSTOM_INSTRUCTIONS_CHARS: usize = 4000;
 const REDACTED_WEBHOOK_HEADERS: &[&str] = &[
     "authorization",
     "cookie",
@@ -2578,6 +2579,8 @@ async fn create_workflow_run(
 #[derive(Debug, Deserialize)]
 struct SlackMeetingAutomationRunRequest {
     cadence_query: String,
+    #[serde(default)]
+    custom_instructions: Option<String>,
     requester_slack_user_id: String,
     requester_slack_team_id: String,
     #[serde(default)]
@@ -2593,27 +2596,37 @@ async fn create_slack_meeting_automation_run(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     verify_slackbot_api_key(&headers)?;
     let request = validate_slack_meeting_automation_request(request)?;
+    let workflow_request = slack_meeting_automation_workflow_request(&request);
+    let workflows = workflow_runtime(&state)?;
+    let run = workflows.create_run(workflow_request).await?;
+    Ok(Json(serde_json::to_value(run)?))
+}
+
+fn slack_meeting_automation_workflow_request(
+    request: &SlackMeetingAutomationRunRequest,
+) -> CreateWorkflowRunRequest {
     let idempotency_key = format!(
         "slack-meeting-automation:{}:{}:{}",
         request.requester_slack_team_id, request.slack_channel_id, request.request_message_id
     );
-    let workflow_request = CreateWorkflowRunRequest {
+    let mut input = json!({
+        "cadence_query": request.cadence_query,
+        "requester_slack_user_id": request.requester_slack_user_id,
+        "requester_slack_team_id": request.requester_slack_team_id,
+        "requester_slack_email": request.requester_slack_email,
+        "slack_channel_id": request.slack_channel_id,
+        "request_message_id": request.request_message_id,
+    });
+    if let Some(custom_instructions) = &request.custom_instructions {
+        input["custom_instructions"] = json!(custom_instructions);
+    }
+    CreateWorkflowRunRequest {
         workflow_name: MEETING_AUTOMATION_WORKFLOW.to_owned(),
-        input: json!({
-            "cadence_query": request.cadence_query,
-            "requester_slack_user_id": request.requester_slack_user_id,
-            "requester_slack_team_id": request.requester_slack_team_id,
-            "requester_slack_email": request.requester_slack_email,
-            "slack_channel_id": request.slack_channel_id,
-            "request_message_id": request.request_message_id,
-        }),
+        input,
         idempotency_key: Some(idempotency_key),
         harness_type: None,
         max_attempts: Some(3),
-    };
-    let workflows = workflow_runtime(&state)?;
-    let run = workflows.create_run(workflow_request).await?;
-    Ok(Json(serde_json::to_value(run)?))
+    }
 }
 
 fn verify_slackbot_api_key(headers: &HeaderMap) -> Result<(), ApiError> {
@@ -2664,6 +2677,21 @@ fn validate_slack_meeting_automation_request(
             "meeting automation must be requested from an existing Slack DM".to_owned(),
         ));
     }
+    if let Some(custom_instructions) = request.custom_instructions.as_ref() {
+        if custom_instructions.chars().count() > MAX_CUSTOM_INSTRUCTIONS_CHARS
+            || custom_instructions
+                .chars()
+                .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+        {
+            return Err(ApiError::BadRequest(
+                "custom_instructions must contain at most 4000 printable characters".to_owned(),
+            ));
+        }
+    }
+    request.custom_instructions = request
+        .custom_instructions
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
     if request.cadence_query.is_empty()
         || request.cadence_query.len() > 160
         || request.cadence_query.chars().any(char::is_control)
@@ -2702,6 +2730,7 @@ mod slack_meeting_automation_request_tests {
     fn request() -> SlackMeetingAutomationRunRequest {
         SlackMeetingAutomationRunRequest {
             cadence_query: "  private weekly  ".to_owned(),
+            custom_instructions: None,
             requester_slack_user_id: "U123ABC".to_owned(),
             requester_slack_team_id: WORLD_FOUNDATION_SLACK_TEAM_ID.to_owned(),
             requester_slack_email: Some("  person@world.org ".to_owned()),
@@ -2717,6 +2746,34 @@ mod slack_meeting_automation_request_tests {
         assert_eq!(
             request.requester_slack_email.as_deref(),
             Some("person@world.org")
+        );
+    }
+
+    #[test]
+    fn forwards_custom_instructions_and_omits_them_when_absent() {
+        let mut request = validate_slack_meeting_automation_request(request()).unwrap();
+        let without_instructions = slack_meeting_automation_workflow_request(&request);
+        assert!(
+            without_instructions
+                .input
+                .get("custom_instructions")
+                .is_none()
+        );
+
+        request.custom_instructions = Some("  focus on decisions  ".to_owned());
+        let request = validate_slack_meeting_automation_request(request).unwrap();
+        assert_eq!(
+            request.custom_instructions.as_deref(),
+            Some("focus on decisions")
+        );
+        let with_instructions = slack_meeting_automation_workflow_request(&request);
+        assert_eq!(
+            with_instructions.input.get("custom_instructions"),
+            Some(&json!("focus on decisions"))
+        );
+        assert_eq!(
+            with_instructions.idempotency_key.as_deref(),
+            Some("slack-meeting-automation:TL1HM8UUU:D123ABC:1786000000.123456")
         );
     }
 
@@ -2752,6 +2809,21 @@ mod slack_meeting_automation_request_tests {
         for cadence_query in ["   ", "private\nweekly"] {
             let mut request = request();
             request.cadence_query = cadence_query.to_owned();
+            assert!(matches!(
+                validate_slack_meeting_automation_request(request),
+                Err(ApiError::BadRequest(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_oversized_or_control_character_custom_instructions() {
+        for custom_instructions in [
+            "x".repeat(MAX_CUSTOM_INSTRUCTIONS_CHARS + 1),
+            "focus\u{0007}".to_owned(),
+        ] {
+            let mut request = request();
+            request.custom_instructions = Some(custom_instructions);
             assert!(matches!(
                 validate_slack_meeting_automation_request(request),
                 Err(ApiError::BadRequest(_))

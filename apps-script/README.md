@@ -35,8 +35,11 @@ The worker never receives Notion or Slack credentials in a cadence payload.
 
 ## Orbie handoff contract
 
-Orbie invokes `runCadenceJob({ cadenceId, requesterSlackUserId, now })`
-through the Apps Script Execution API. `getAuthorizedCadences({
+Orbie invokes `runCadenceJob({ cadenceId, requesterSlackUserId, now,
+customInstructions? })` through the Apps Script Execution API. `now` is the
+manual request time, and `customInstructions` is optional plain text bounded to
+4,000 characters after control-character removal and whitespace normalization.
+`getAuthorizedCadences({
 requesterSlackUserId, requesterSlackTeamId })` returns only active public
 cadences and private cadences where the caller is the owner, has access, or is
 an explicit notification recipient. The worker returns the created document
@@ -67,9 +70,12 @@ applying the owner/access policy. A caller-scoped acknowledgement cannot consume
 another recipient's entry.
 
 The worker currently supports `weekly`; Notion can retain the future
-`cadenceCron` value so Orbie can add timezone-aware recurrence later. Each
-cadence starts from `nextOccurrenceAt` and advances by one week after the
-agenda job is created.
+`cadenceCron` value so Orbie can add timezone-aware recurrence later. A manual
+run reuses an existing eligible occurrence; otherwise it uses the request time
+as a one-off occurrence, even when `nextOccurrenceAt` is future-dated or the
+scheduled occurrence is stale. One-off manual runs do not advance
+`NEXT_OCCURRENCE`. The default `processAgenda_` helper remains
+scheduled-windowed for any scheduled caller.
 
 ## Idempotency and failure behavior
 
@@ -81,6 +87,9 @@ agenda job is created.
 - The generated document is a full native copy of the source template. For the
   Weekly Sync template, `Meeting Notes` retains its prompts, progress sections,
   decisions, and feedback table while `Format` remains a separate tab.
+- When supplied, custom instructions are inserted as plain text immediately
+  after the date in a newly created `Meeting Notes` tab. Retries never insert
+  them into an existing copy, and attendee-entered notes are not overwritten.
 - Retries validate the existing copy without replacing attendee-entered notes.
   If an older generated document has lost the source tab structure, it is
   renamed as a superseded malformed copy and a fresh native clone is created;

@@ -1,6 +1,7 @@
 var MeetingOpsPure = (function () {
   var MINUTE_MS = 60 * 1000;
   var WEEK_MS = 7 * 24 * 60 * MINUTE_MS;
+  var MAX_CUSTOM_INSTRUCTIONS_LENGTH = 4000;
 
   function escapeRegExp(value) {
     return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -26,6 +27,16 @@ var MeetingOpsPure = (function () {
 
   function shouldPost(now, occurrence, delayMin) {
     return now.getTime() >= occurrence.getTime() + delayMin * MINUTE_MS;
+  }
+
+  function normalizeCustomInstructions(value) {
+    if (typeof value !== 'string') return '';
+    return value
+      .replace(/\r\n?/g, '\n')
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, '')
+      .trim()
+      .slice(0, MAX_CUSTOM_INSTRUCTIONS_LENGTH)
+      .trim();
   }
 
   function normalizeCadence(input) {
@@ -145,6 +156,7 @@ var MeetingOpsPure = (function () {
     isWithinAgendaWindow: isWithinAgendaWindow,
     isCadenceAuthorized: isCadenceAuthorized,
     markNotificationDelivered: markNotificationDelivered,
+    normalizeCustomInstructions: normalizeCustomInstructions,
     nextWeeklyOccurrence: nextWeeklyOccurrence,
     normalizeCadence: normalizeCadence,
     notificationRecipients: notificationRecipients,

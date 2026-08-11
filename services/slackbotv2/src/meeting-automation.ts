@@ -11,6 +11,7 @@ import { isJsonObject, stringValue } from './utils'
 
 export type MeetingAutomationCommand = {
   cadenceQuery: string
+  customInstructions?: string
 }
 
 export type MeetingAutomationDispatchResult = {
@@ -19,6 +20,7 @@ export type MeetingAutomationDispatchResult = {
 }
 
 const MEETING_AUTOMATION_COMMAND = /^(?:run\s+cadence|run\s+meeting\s+automation|meeting\s+ops)\s+(.+)$/is
+export const MAX_CUSTOM_INSTRUCTIONS_CHARS = 4000
 
 export function parseMeetingAutomationCommand(
   text: string,
@@ -26,8 +28,16 @@ export function parseMeetingAutomationCommand(
 ): MeetingAutomationCommand | null {
   const commandText = stripLeadingBotMention(text, botUserId).trim()
   const match = MEETING_AUTOMATION_COMMAND.exec(commandText)
-  const cadenceQuery = unquoteCadenceQuery(stripTrailingChatGptAttribution(match?.[1]))
-  return cadenceQuery ? { cadenceQuery } : null
+  const commandBody = stripTrailingChatGptAttribution(match?.[1])
+  const { cadenceQuery, customInstructions } = splitCustomInstructions(commandBody)
+  if (!cadenceQuery) return null
+  if (customInstructions !== undefined && !isValidCustomInstructions(customInstructions)) {
+    return null
+  }
+  return {
+    cadenceQuery,
+    ...(customInstructions ? { customInstructions } : {})
+  }
 }
 
 function stripTrailingChatGptAttribution(value: string | undefined): string | undefined {
@@ -41,6 +51,29 @@ function unquoteCadenceQuery(value: string | undefined): string | undefined {
   return (first === last && (first === '"' || first === "'"))
     ? value.slice(1, -1).trim()
     : value
+}
+
+function splitCustomInstructions(value: string | undefined): {
+  cadenceQuery?: string
+  customInstructions?: string
+} {
+  if (!value) return {}
+  const suffix = value.match(/(?:\s+with\s+instructions\s*:|\r?\n\s*instructions\s*:)([\s\S]*)$/i)
+  if (!suffix || suffix.index === undefined) {
+    return { cadenceQuery: unquoteCadenceQuery(value) }
+  }
+  const cadenceQuery = unquoteCadenceQuery(value.slice(0, suffix.index).trim())
+  const customInstructions = suffix[1]?.trim() ?? ''
+  return { cadenceQuery, customInstructions }
+}
+
+function isValidCustomInstructions(value: string): boolean {
+  return (
+    Array.from(value).length <= MAX_CUSTOM_INSTRUCTIONS_CHARS
+    && !Array.from(value).some(character =>
+      /\p{Cc}/u.test(character) && !['\n', '\r', '\t'].includes(character)
+    )
+  )
 }
 
 export function isWorldFoundationSlackDm(message: Message): boolean {
@@ -72,6 +105,9 @@ export async function dispatchMeetingAutomationCommand(
     requester_slack_user_id: requester.slackUserId,
     slack_channel_id: requester.slackChannelId,
     request_message_id: message.id,
+    ...(command.customInstructions
+      ? { custom_instructions: command.customInstructions }
+      : {}),
     ...(requester.slackEmail ? { requester_slack_email: requester.slackEmail } : {})
   }
   const response = await postSlackMeetingAutomationRun(options, request)

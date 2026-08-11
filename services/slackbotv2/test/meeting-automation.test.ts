@@ -61,6 +61,32 @@ describe('meeting automation command parsing', () => {
     expect(parseMeetingAutomationCommand(text, BOT_USER_ID)).toEqual({ cadenceQuery })
   })
 
+  test.each([
+    [
+      'run cadence weekly team sync with instructions: focus on decisions',
+      { cadenceQuery: 'weekly team sync', customInstructions: 'focus on decisions' }
+    ],
+    [
+      'run cadence "Leadership 1:1"\nInstructions: include action items',
+      { cadenceQuery: 'Leadership 1:1', customInstructions: 'include action items' }
+    ],
+    [
+      'run cadence Piotr Meeting Ops Demo with instructions: keep the title\n\nSent using @ChatGPT',
+      { cadenceQuery: 'Piotr Meeting Ops Demo', customInstructions: 'keep the title' }
+    ]
+  ])('extracts optional custom instructions from %s', (text, command) => {
+    expect(parseMeetingAutomationCommand(text, BOT_USER_ID)).toEqual(command)
+  })
+
+  test('rejects oversized and control-character custom instructions', () => {
+    expect(
+      parseMeetingAutomationCommand(`run cadence weekly with instructions: ${'x'.repeat(4001)}`)
+    ).toBeNull()
+    expect(
+      parseMeetingAutomationCommand('run cadence weekly with instructions: focus\u0007')
+    ).toBeNull()
+  })
+
   test('requires a non-empty query and strips only the configured bot mention', () => {
     expect(parseMeetingAutomationCommand(`<@${BOT_USER_ID}> run cadence`, BOT_USER_ID)).toBeNull()
     expect(parseMeetingAutomationCommand('<@UOTHER> run cadence weekly', BOT_USER_ID)).toBeNull()
@@ -126,6 +152,34 @@ describe('meeting automation dispatch', () => {
       requester_slack_user_id: USER_ID,
       slack_channel_id: DM_CHANNEL_ID,
       request_message_id: '1710000000.000100'
+    })
+  })
+
+  test('forwards custom instructions without changing trusted caller fields', async () => {
+    const requests: Array<{ body: unknown }> = []
+    const options: SlackbotV2Options = {
+      apiKey: 'broker-key',
+      apiUrl: 'https://api.example.test',
+      botToken: 'xoxb-test',
+      fetch: async (_input, init) => {
+        requests.push({ body: init?.body ? JSON.parse(String(init.body)) : undefined })
+        return Response.json({ created: true, ok: true, run_id: 'run-123', status: 'queued' })
+      },
+      signingSecret: 'secret'
+    }
+
+    await dispatchMeetingAutomationCommand(
+      options,
+      slackMessage(`<@${BOT_USER_ID}> run cadence weekly`),
+      { cadenceQuery: 'weekly', customInstructions: 'focus on decisions' }
+    )
+
+    expect(requests[0]?.body).toMatchObject({
+      cadence_query: 'weekly',
+      custom_instructions: 'focus on decisions',
+      requester_slack_team_id: WORLD_FOUNDATION_SLACK_TEAM_ID,
+      requester_slack_user_id: USER_ID,
+      slack_channel_id: DM_CHANNEL_ID
     })
   })
 

@@ -36,6 +36,13 @@ test('notes notification waits for the configured delay', () => {
   expect(pure.shouldPost(new Date('2026-08-05T13:00:00Z'), occurrence, 60)).toBe(true)
 })
 
+test('custom instructions are normalized and bounded', () => {
+  expect(pure.normalizeCustomInstructions('  First\r\nSecond\u0000  '))
+    .toBe('First\nSecond')
+  expect(pure.normalizeCustomInstructions('x'.repeat(4500))).toHaveLength(4000)
+  expect(pure.normalizeCustomInstructions({ text: 'not instructions' })).toBe('')
+})
+
 test('normalizes a public Notion cadence for Orbie delivery', () => {
   expect(pure.normalizeCadence({
     id: 'cadence-1',

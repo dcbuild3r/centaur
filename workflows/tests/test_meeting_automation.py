@@ -167,6 +167,31 @@ def test_tool_client_preserves_unwrapped_tool_results():
     assert observed == result
 
 
+def test_tool_client_forwards_custom_instructions_only_when_present():
+    context = RecordingToolContext({"meetingId": "private-ai"})
+    client = meeting_automation.MeetingOpsToolClient(context)
+
+    asyncio.run(client.run_cadence(
+        "private-ai",
+        requester_slack_user_id="U123",
+        requester_slack_team_id="TL1HM8UUU",
+        custom_instructions="focus on decisions",
+    ))
+
+    assert context.calls == [
+        (
+            "meeting-ops",
+            "run_cadence",
+            {
+                "cadence_id": "private-ai",
+                "custom_instructions": "focus on decisions",
+                "requester_slack_user_id": "U123",
+                "requester_slack_team_id": "TL1HM8UUU",
+            },
+        )
+    ]
+
+
 def test_private_cadence_delivers_and_acknowledges_only_callers_item(monkeypatch):
     client = FakeClient(
         [{"id": "private-ai", "title": "AI Workstream", "visibility": "private"}],
@@ -210,6 +235,31 @@ def test_private_cadence_delivers_and_acknowledges_only_callers_item(monkeypatch
     ]
     assert all("1700000000.000001" in name for name in context.step_names)
     assert context.step_names.index(next(name for name in context.step_names if name.startswith("deliver_private"))) < context.step_names.index(next(name for name in context.step_names if name.startswith("ack_private")))
+
+
+def test_private_cadence_propagates_custom_instructions(monkeypatch):
+    client = FakeClient(
+        [{"id": "private-ai", "title": "AI Workstream", "visibility": "private"}],
+        run_result={"meetingId": "private-ai", "docUrl": "https://docs/doc-1"},
+    )
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+
+    asyncio.run(
+        meeting_automation.handler(
+            _input("private-ai", custom_instructions="focus on decisions"),
+            FakeContext(),
+        )
+    )
+
+    assert client.calls[1] == (
+        "run_cadence",
+        "private-ai",
+        {
+            "custom_instructions": "focus on decisions",
+            "requester_slack_team_id": "TL1HM8UUU",
+            "requester_slack_user_id": "U123",
+        },
+    )
 
 
 def test_public_cadence_reports_doc_to_dm_without_reading_or_acknowledging_outbox(monkeypatch):
@@ -271,7 +321,7 @@ def test_private_cadence_without_due_notification_reports_noop(monkeypatch):
     assert context.posts == [
         (
             "D123456",
-            "Meeting automation ran for *AI Workstream*, but no document was created in the current window.",
+            "Meeting automation ran for *AI Workstream*, but no document was created.",
         )
     ]
 
@@ -281,3 +331,12 @@ def test_input_requires_world_team_and_dm_channel():
         meeting_automation._validate_input(_input(requester_slack_team_id="TOTHER"))
     with pytest.raises(ValueError, match="DM channel"):
         meeting_automation._validate_input(_input(slack_channel_id="C123456"))
+
+
+def test_input_rejects_oversized_or_control_character_instructions():
+    with pytest.raises(ValueError, match="custom_instructions"):
+        meeting_automation._validate_input(
+            _input(custom_instructions="x" * (meeting_automation.MAX_CUSTOM_INSTRUCTIONS_CHARS + 1))
+        )
+    with pytest.raises(ValueError, match="custom_instructions"):
+        meeting_automation._validate_input(_input(custom_instructions="focus\x07"))

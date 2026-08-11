@@ -115,6 +115,7 @@ class FakeFile {
     this.id = id
     this.name = name
     this.trashed = false
+    this.folderId = null
   }
 
   getId() {
@@ -125,11 +126,21 @@ class FakeFile {
     return `https://docs.example/${this.id}`
   }
 
-  makeCopy(name) {
-    const copyId = `${this.id}-copy`
+  makeCopy(name, folder) {
+    const copyId = `${this.id}-copy-${files.size}`
     documents.set(copyId, documents.get(this.id).clone())
-    files.set(copyId, new FakeFile(copyId, name))
+    const copy = new FakeFile(copyId, name)
+    copy.folderId = folder && folder.id
+    files.set(copyId, copy)
     return files.get(copyId)
+  }
+
+  getMimeType() {
+    return 'application/vnd.google-apps.document'
+  }
+
+  isTrashed() {
+    return this.trashed
   }
 
   setTrashed(trashed) {
@@ -162,7 +173,23 @@ global.DriveApp = {
     return files.get(id)
   },
   getFolderById(id) {
-    return { id }
+    return {
+      id,
+      getFilesByName(name) {
+        const matches = [...files.values()].filter((file) => (
+          file.folderId === id && file.name === name && !file.trashed
+        ))
+        let index = 0
+        return {
+          hasNext() {
+            return index < matches.length
+          },
+          next() {
+            return matches[index++]
+          },
+        }
+      },
+    }
   },
 }
 
@@ -184,13 +211,51 @@ global.MeetingOpsPure = {
     return now >= new Date(occurrence.getTime() - leadMin * 60_000) &&
       now <= new Date(occurrence.getTime() + staleWindowMin * 60_000)
   },
+  normalizeCustomInstructions(value) {
+    if (typeof value !== 'string') return ''
+    return value
+      .replace(/\r\n?/g, '\n')
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+      .trim()
+      .slice(0, 2000)
+      .trim()
+  },
+  resolveDocName(template, date, timeZone) {
+    return String(template).replace('{YYYY-MM-DD}', this.dateKey(date, timeZone))
+  },
+  nextWeeklyOccurrence(occurrence) {
+    return new Date(occurrence.getTime() + 7 * 24 * 60 * 60 * 1000)
+  },
+  shouldPost(now, occurrence, delayMin) {
+    return now >= new Date(occurrence.getTime() + delayMin * 60_000)
+  },
+  isCadenceAuthorized(cadenceValue, requesterSlackUserId) {
+    return cadenceValue.visibility === 'private' &&
+      cadenceValue.ownerSlackUserId === requesterSlackUserId
+  },
+  notificationRecipients(cadenceValue, requesterSlackUserId) {
+    return cadenceValue.visibility === 'private' ? [requesterSlackUserId] : [null]
+  },
+  notificationKey(cadenceId, occurrence, timeZone, kind, recipientSlackUserId) {
+    const key = `${kind}:${cadenceId}:${this.dateKey(occurrence, timeZone)}`
+    return recipientSlackUserId ? `${key}:${recipientSlackUserId}` : key
+  },
+  wasNotificationDelivered(record, kind, requesterSlackUserId) {
+    return (record[`${kind}NotifiedRecipients`] || []).includes(requesterSlackUserId)
+  },
+  markNotificationDelivered(record, kind, requesterSlackUserId) {
+    record[`${kind}NotifiedRecipients`] = [requesterSlackUserId]
+    return record
+  },
 }
 
 const {
   assertTemplateCopyReady_,
   createDocumentFromTemplate_,
   findCurrentAgendaOccurrence_,
+  processAgenda_,
   prepareTemplateCopy_,
+  runCadenceJob,
   setMeetingDate_,
 } = require('../src/meeting_ops.js')
 
@@ -215,6 +280,82 @@ function cadence(overrides = {}) {
     timeZone: 'Europe/Prague',
     attendees: [],
     ...overrides,
+  }
+}
+
+let executionProperties
+
+function installExecutionFakes() {
+  executionProperties = new Map()
+  const properties = {
+    getProperty(key) {
+      return executionProperties.has(key) ? executionProperties.get(key) : null
+    },
+    setProperty(key, value) {
+      executionProperties.set(key, String(value))
+    },
+    deleteProperty(key) {
+      executionProperties.delete(key)
+    },
+    getProperties() {
+      return Object.fromEntries(executionProperties.entries())
+    },
+  }
+  global.PropertiesService = {
+    getScriptProperties() {
+      return properties
+    },
+  }
+  global.LockService = {
+    getScriptLock() {
+      return {
+        waitLock() {},
+        releaseLock() {},
+      }
+    },
+  }
+  global.MimeType = { GOOGLE_DOCS: 'application/vnd.google-apps.document' }
+  global.getMeetingConfig_ = () => [manualCadence()]
+  global.formatAttendees_ = (attendees) => attendees.join(', ')
+}
+
+function executionProperty(key) {
+  return executionProperties.get(key) || null
+}
+
+function manualCadence(overrides = {}) {
+  return cadence({
+    id: 'manual-cadence',
+    title: 'Manual Meeting',
+    sourceDocId: 'manual-template',
+    visibility: 'private',
+    ownerSlackUserId: 'U1',
+    notificationRecipients: ['U1'],
+    notificationMode: 'orbie',
+    cadence: 'weekly',
+    nextOccurrenceAt: '2026-08-17T12:00:00Z',
+    docNameTemplate: 'Manual Meeting — {YYYY-MM-DD}',
+    notifyLeadMin: 60,
+    staleWindowMin: 12 * 60,
+    ...overrides,
+  })
+}
+
+function prepareManualTemplate() {
+  documents.clear()
+  files.clear()
+  documents.set('manual-template', weeklyTemplate())
+  files.set('manual-template', new FakeFile('manual-template'))
+  installExecutionFakes()
+}
+
+function manualRequest(now, customInstructions) {
+  return {
+    cadenceId: 'manual-cadence',
+    requesterSlackUserId: 'U1',
+    requesterSlackTeamId: 'TL1HM8UUU',
+    now,
+    ...(customInstructions === undefined ? {} : { customInstructions }),
   }
 }
 
@@ -375,4 +516,65 @@ test('a public cadence can reuse the current occurrence for repair retries', () 
     720,
     null,
   ).toISOString()).toBe('2026-08-10T14:00:00.000Z')
+})
+
+test('manual runs use the request date when the scheduled occurrence is outside the window', () => {
+  prepareManualTemplate()
+
+  const result = runCadenceJob(manualRequest('2026-08-10T14:00:00Z'))
+
+  expect(result.occurrenceAt).toBe('2026-08-10T14:00:00.000Z')
+  expect(result.docId).toBeTruthy()
+  expect(executionProperty('NEXT_OCCURRENCE:manual-cadence')).toBeNull()
+})
+
+test('manual runs do not use a future next occurrence or advance the schedule', () => {
+  prepareManualTemplate()
+  const scheduledNext = '2026-08-17T12:00:00.000Z'
+  executionProperties.set('NEXT_OCCURRENCE:manual-cadence', scheduledNext)
+
+  const result = runCadenceJob(manualRequest('2026-08-10T14:00:00Z'))
+
+  expect(result.occurrenceAt).toBe('2026-08-10T14:00:00.000Z')
+  expect(executionProperty('NEXT_OCCURRENCE:manual-cadence')).toBe(scheduledNext)
+})
+
+test('direct scheduled processing still rejects a future occurrence', () => {
+  prepareManualTemplate()
+
+  expect(processAgenda_(
+    manualCadence(),
+    new Date('2026-08-10T14:00:00Z'),
+    'U1',
+  )).toBeUndefined()
+  expect([...documents.keys()]).toEqual(['manual-template'])
+})
+
+test('manual retries reuse the same document and notification and insert instructions once', () => {
+  prepareManualTemplate()
+  const first = runCadenceJob(manualRequest(
+    '2026-08-10T14:00:00Z',
+    '  Bring the decision log.\u0000\r\nKeep it short.  ',
+  ))
+  const second = runCadenceJob(manualRequest(
+    '2026-08-10T14:00:00Z',
+    '  Bring the decision log.\u0000\r\nKeep it short.  ',
+  ))
+
+  expect(second.docId).toBe(first.docId)
+  expect(second.customInstructions).toBe('Bring the decision log.\nKeep it short.')
+  expect(Object.keys(Object.fromEntries(executionProperties.entries())).filter((key) => (
+    key.startsWith('ORBIE_OUTBOX:')
+  ))).toHaveLength(1)
+
+  const copy = documents.get(first.docId)
+  expect(copy.tabs[0].body.children.map((child) => child.getText())).toEqual([
+    'Aug 10, 2026',
+    'Bring the decision log.\nKeep it short.',
+    'Question TBC',
+    'Progress table',
+    'Feedback table',
+  ])
+  expect(documents.get('manual-template').tabs[0].body.children.map((child) => child.getText()))
+    .toEqual(['Jul 20, 2026', 'Question TBC', 'Progress table', 'Feedback table'])
 })

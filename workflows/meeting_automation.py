@@ -12,6 +12,7 @@ WORKFLOW_NAME = "meeting_automation"
 WORKFLOW_PRINCIPAL = True
 WORLD_SLACK_TEAM_ID = "TL1HM8UUU"
 MEETING_OPS_TOOL = "meeting-ops"
+MAX_CUSTOM_INSTRUCTIONS_CHARS = 4000
 
 
 def _tool_output(result: Any) -> Any:
@@ -61,6 +62,7 @@ class Input:
     slack_channel_id: str
     request_message_id: str
     requester_slack_email: str | None = None
+    custom_instructions: str | None = None
 
 
 class MeetingOpsClient(Protocol):
@@ -76,6 +78,7 @@ class MeetingOpsClient(Protocol):
         *,
         requester_slack_user_id: str,
         requester_slack_team_id: str,
+        custom_instructions: str | None = None,
     ) -> dict[str, Any] | None: ...
 
     async def pending_notifications_for_caller(
@@ -117,15 +120,19 @@ class MeetingOpsToolClient:
         *,
         requester_slack_user_id: str,
         requester_slack_team_id: str,
+        custom_instructions: str | None = None,
     ) -> dict[str, Any] | None:
+        arguments: dict[str, str] = {
+            "cadence_id": cadence_id,
+            "requester_slack_user_id": requester_slack_user_id,
+            "requester_slack_team_id": requester_slack_team_id,
+        }
+        if custom_instructions:
+            arguments["custom_instructions"] = custom_instructions
         result = await self._ctx.call_tool(
             MEETING_OPS_TOOL,
             "run_cadence",
-            {
-                "cadence_id": cadence_id,
-                "requester_slack_user_id": requester_slack_user_id,
-                "requester_slack_team_id": requester_slack_team_id,
-            },
+            arguments,
         )
         output = _tool_output(result)
         return output if isinstance(output, dict) else None
@@ -183,6 +190,19 @@ def _validate_input(inp: Input) -> None:
     ):
         if not getattr(inp, field).strip():
             raise ValueError(f"{field} is required")
+    if inp.custom_instructions is not None:
+        if (
+            len(inp.custom_instructions) > MAX_CUSTOM_INSTRUCTIONS_CHARS
+            or any(
+                (ord(character) < 32 and character not in "\n\r\t")
+                or 127 <= ord(character) <= 159
+                for character in inp.custom_instructions
+            )
+        ):
+            raise ValueError(
+                "custom_instructions must contain at most 4000 printable characters"
+            )
+        inp.custom_instructions = inp.custom_instructions.strip() or None
 
 
 def _resolve_cadence(cadences: list[dict[str, Any]], query: str) -> dict[str, Any]:
@@ -222,7 +242,7 @@ def _public_result_message(cadence: dict[str, Any], result: dict[str, Any] | Non
     title = str(cadence.get("title") or cadence.get("id") or "cadence")
     if result and result.get("docUrl"):
         return f"Meeting automation complete for *{title}*.\nDocument: {result['docUrl']}"
-    return f"Meeting automation ran for *{title}*, but no document was created in the current window."
+    return f"Meeting automation ran for *{title}*, but no document was created."
 
 
 async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
@@ -255,12 +275,18 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     if not cadence_id:
         raise ValueError("authorized cadence has no id")
 
+    run_arguments: dict[str, Any] = {
+        "requester_slack_user_id": user_id,
+        "requester_slack_team_id": team_id,
+    }
+    if inp.custom_instructions:
+        run_arguments["custom_instructions"] = inp.custom_instructions
+
     run_result = await ctx.step(
         _step_name("run_cadence", inp.request_message_id, cadence_id),
         lambda: client.run_cadence(
             cadence_id,
-            requester_slack_user_id=user_id,
-            requester_slack_team_id=team_id,
+            **run_arguments,
         ),
     )
 

@@ -92,6 +92,7 @@ def run_cadence(
     now: str | None = None,
     requester_slack_user_id: str | None = None,
     requester_slack_team_id: str | None = None,
+    custom_instructions: str | None = None,
 ) -> dict[str, Any] | None:
     """Create the agenda for one approved cadence occurrence."""
 
@@ -102,6 +103,8 @@ def run_cadence(
         request["requesterSlackUserId"] = requester_slack_user_id
     if requester_slack_team_id:
         request["requesterSlackTeamId"] = requester_slack_team_id
+    if custom_instructions:
+        request["customInstructions"] = custom_instructions
     result = _run_function("runCadenceJob", [request])
     if result is not None and not isinstance(result, dict):
         raise MeetingOpsError("runCadenceJob returned an unexpected result")

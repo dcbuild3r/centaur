@@ -772,6 +772,7 @@ export type SlackMeetingAutomationRequester = {
 
 export type SlackMeetingAutomationRunRequest = {
   cadence_query: string
+  custom_instructions?: string
   requester_slack_user_id: string
   requester_slack_team_id: string
   requester_slack_email?: string
