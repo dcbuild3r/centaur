@@ -44,7 +44,7 @@ ironProxy:
   secretSource: env
   secretSourceRefs:
     NOTION_API_KEY: op://Centaur/Centaur.run - NOTION_API_KEY/password
-    DUNE_API_KEY: op://Centaur/Centaur.run - DUNE_API_KEY/password
+    DUNE_API_KEY: op://Centaur/DUNE_API_KEY/credential
     GOOGLE_TOKEN_JSON: op://Centaur/GOOGLE_TOKEN_JSON/credential
     MEETING_OPS_SCRIPT_ID: op://Centaur/MEETING_OPS_SCRIPT_ID/credential
 

@@ -342,7 +342,7 @@ jobs:
             --tools-dir /app/tools \
             --source-policy onepassword \
             --op-vault Centaur \
-            --source-refs '{"DUNE_API_KEY":"op://Centaur/Centaur.run - DUNE_API_KEY/password"}' \
+            --source-refs '{"DUNE_API_KEY":"op://Centaur/DUNE_API_KEY/credential"}' \
             principals grant warm-pool-bootstrap --tool dune
 
           kubectl --namespace "$HELM_NAMESPACE" exec \
