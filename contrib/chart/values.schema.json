@@ -74,6 +74,37 @@
             "resources": { "type": "object" }
           }
         },
+        "sqlExporter": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "image": {
+              "type": "object",
+              "properties": {
+                "repository": { "type": "string" },
+                "tag": { "type": "string" },
+                "pullPolicy": { "type": "string" }
+              }
+            },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "databaseUrlSecretKey": { "type": "string", "minLength": 1 },
+            "databasePort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "minInterval": { "type": "string", "minLength": 1 },
+            "scrapeTimeout": { "type": "string", "minLength": 1 },
+            "metrics": {
+              "type": "object",
+              "properties": {
+                "scrapeAnnotations": { "type": "boolean" },
+                "path": { "type": "string" },
+                "annotations": {
+                  "type": "object",
+                  "additionalProperties": { "type": "string" }
+                }
+              }
+            },
+            "resources": { "type": "object" }
+          }
+        },
         "resources": { "type": "object" }
       }
     }
@@ -126,7 +157,8 @@
         "upstreamDenyCidrs": {
           "type": "array",
           "items": { "type": "string" }
-        }
+        },
+        "resources": { "type": "object" }
       }
     },
     "toolServer": {
@@ -193,6 +225,8 @@
     "sandbox": {
       "type": "object",
       "properties": {
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
         "runtimeClassName": { "type": "string" },
         "reposPath": { "type": "string" },
         "resources": { "type": "object" }
@@ -297,6 +331,7 @@
         "sandboxRunningLimit": { "type": "integer", "minimum": 0 },
         "sandboxHotIdleGraceSecs": { "type": "integer", "minimum": 0 },
         "workflowHostSandbox": { "type": "boolean" },
+        "workflowHostResources": { "type": "object" },
         "etl": {
           "type": "object",
           "properties": {
@@ -364,6 +399,15 @@
                 "intervalSeconds": { "type": "integer" },
                 "maxWindowSeconds": { "type": "integer" },
                 "batchSize": { "type": "integer", "minimum": 1 }
+              }
+            },
+            "companyContextEmbeddings": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "intervalSeconds": { "type": "integer", "minimum": 1 },
+                "batchSize": { "type": "integer", "minimum": 1 },
+                "model": { "type": "string", "minLength": 1 }
               }
             }
           }
@@ -450,6 +494,10 @@
           "items": { "type": "string" }
         },
         "apiIngressSourceNamespaces": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "metricsIngressSourceNamespaces": {
           "type": "array",
           "items": { "type": "string" }
         },
