@@ -30,6 +30,14 @@ class CentaurSession < CentaurSessionRecord
     ActiveModel::Type::Boolean.new.cast(ConsoleEnv.fetch("PUBLIC_SLACK_THREADS_ENABLED", false))
   end
 
+  # Trusted operator consoles may opt admins into read-only visibility of every
+  # Slack-originated session, including private channels and DMs. This is kept
+  # separate from the public-channel setting so ordinary operators still see
+  # only their own Slack chats (plus explicitly shared/public chats).
+  def self.admin_slack_threads_enabled?
+    ActiveModel::Type::Boolean.new.cast(ConsoleEnv.fetch("ADMIN_SLACK_THREADS_ENABLED", false))
+  end
+
   # Slack channel ID prefixes do not encode privacy: modern private channels
   # can also start with C. Treat the synchronized channel catalog as a positive
   # public allowlist, and fail closed until that catalog is available.

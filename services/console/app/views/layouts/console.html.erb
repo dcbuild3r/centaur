@@ -1915,15 +1915,13 @@
 
                 The current thread selection rides along on the frame src so the
                 initial out-of-band render can surface and highlight the open
-                thread(s). The wrapper div (not the frame itself — a permanent
-                turbo-frame trips Turbo's frame lifecycle and can wedge the
-                visit progress bar) is turbo-permanent: Turbo Drive carries the
-                loaded list across page visits instead of refetching it, so
-                thread navigation does not repaint the sidebar; the active
-                highlight is re-synced client-side from the page URL. %>
+                thread(s). The wrapper div deliberately is not
+                turbo-permanent: Turbo Drive must replace the loaded list on
+                each page visit so newly available chats appear in the
+                sidebar. The active highlight is still re-synced client-side
+                from the page URL. %>
             <div id="console_sidebar_thread_list"
-                 class="console-thread-list"
-                 data-turbo-permanent>
+                 class="console-thread-list">
               <%= turbo_frame_tag "console_sidebar_threads",
                                   src: console_sidebar_threads_path(
                                     thread: (params[:thread].to_s.presence if threads_view)
@@ -2216,10 +2214,9 @@
       })();
 
       (() => {
-        // The sidebar thread list is turbo-permanent, so it is not re-rendered
-        // when navigating between threads. Re-derive the active highlight from
-        // the page URL after every Turbo visit and after the frame's initial
-        // lazy load, un-hiding an open thread that sits in the collapsed tail.
+        // Re-derive the active highlight from the page URL after every Turbo
+        // visit and after the frame's lazy load, un-hiding an open thread that
+        // sits in the collapsed tail.
         const THREADS_PATH = "<%= console_threads_path %>";
 
         const syncSidebarActiveThreads = () => {
@@ -2364,8 +2361,8 @@
             next.searchParams.set("new", "1");
           }
 
-          // Turbo visit keeps the turbo-permanent sidebar list mounted; a
-          // plain location.assign would full-load and repaint it.
+          // Keep navigation inside Turbo so the surrounding console shell
+          // remains responsive while the sidebar frame refreshes.
           if (window.Turbo) {
             window.Turbo.visit(next.toString());
           } else {

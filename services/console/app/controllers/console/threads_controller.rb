@@ -116,6 +116,9 @@ class Console::ThreadsController < ApplicationController
     ComposerAgent.new(value: "gpt-5.6-sol", label: "GPT-5.6 Sol",
                       harness: "codex", model: "gpt-5.6-sol",
                       efforts: CODEX_EFFORTS + [ %w[max Max] ]),
+    ComposerAgent.new(value: "gpt-5.6-luna", label: "GPT-5.6 Luna",
+                      harness: "codex", model: "gpt-5.6-luna",
+                      efforts: CODEX_EFFORTS + [ %w[max Max] ]),
     ComposerAgent.new(value: "nanocodex", label: "Nanocodex (GPT-5.6 Sol)",
                       harness: "nanocodex", model: nil, efforts: []),
     ComposerAgent.new(value: "gpt-5.5", label: "GPT-5.5",
@@ -294,8 +297,20 @@ class Console::ThreadsController < ApplicationController
   def thread_writable?(session)
     @thread_writable ||= {}
     @thread_writable.fetch(session.thread_key) do |thread_key|
-      @thread_writable[thread_key] = readable_thread(thread_key).present?
+      @thread_writable[thread_key] = if admin_slack_thread_read_only?(session)
+        thread_owned?(session)
+      else
+        readable_thread(thread_key).present?
+      end
     end
+  end
+
+  def admin_slack_thread_read_only?(session)
+    return false unless acting_admin? && CentaurSession.admin_slack_threads_enabled?
+
+    session.thread_key.to_s.start_with?("slack:") ||
+      %w[slack slackbotv2].include?(session.metadata_hash["platform"].to_s) ||
+      session.metadata_hash["source"].to_s == "slackbotv2"
   end
 
   # Selector options as [label, value] pairs, the deploy's default model
@@ -375,6 +390,9 @@ class Console::ThreadsController < ApplicationController
     # continue deployment-public and explicitly shared chats while still
     # rejecting a crafted key for a private, inaccessible thread.
     session = readable_thread(thread_key)
+    if session && admin_slack_thread_read_only?(session) && !thread_owned?(session)
+      session = nil
+    end
     if session.nil?
       redirect_to console_threads_path, alert: "Chat not found."
       return
@@ -706,6 +724,8 @@ class Console::ThreadsController < ApplicationController
       public_slack_sql = CentaurSession.public_slack_channel_sql
       conditions << public_slack_sql if public_slack_sql
     end
+    conditions << CentaurSession::SLACK_SOURCE_SQL if
+      include_public_slack && acting_admin? && CentaurSession.admin_slack_threads_enabled?
 
     return CentaurSession.where("1=0") if conditions.empty?
 

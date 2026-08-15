@@ -107,6 +107,25 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_select "body", text: /Chat not found/
   end
 
+  test "an admin can open a Slack thread directly when admin Slack visibility is enabled" do
+    skip_unless_session_table
+
+    thread_key = "slack:C0DIRECT:#{SecureRandom.hex(6)}"
+    insert_slack_session(
+      thread_key,
+      slack_user_id: "U_OTHER",
+      slack_user_name: "someone-else"
+    )
+
+    with_env("CENTAUR_CONSOLE_ADMIN_SLACK_THREADS_ENABLED" => "true") do
+      get console_threads_url(thread: thread_key)
+    end
+
+    assert_response :ok
+    assert_select ".console-thread-detail-header", count: 1
+    assert_select "textarea[name=prompt]", count: 0
+  end
+
   test "public Slack channel threads are readable by every console user only when enabled" do
     skip_unless_session_table
     skip_unless_slack_channel_table
@@ -1337,6 +1356,14 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     end
   end
 
+  test "console pages allow the sidebar thread list to refresh on navigation" do
+    get console_principals_url
+
+    assert_response :ok
+    assert_select "#console_sidebar_thread_list[data-turbo-permanent]", count: 0
+    assert_select "turbo-frame#console_sidebar_threads[src=?]", console_sidebar_threads_path
+  end
+
   test "sidebar action renders the empty thread list when the session DB is unavailable" do
     with_recent_first_error do
       get console_sidebar_threads_url
@@ -1981,6 +2008,7 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
   def threads_controller_for(user)
     Console::ThreadsController.new.tap do |controller|
       controller.define_singleton_method(:current_user) { user }
+      controller.define_singleton_method(:descoped?) { false }
     end
   end
 

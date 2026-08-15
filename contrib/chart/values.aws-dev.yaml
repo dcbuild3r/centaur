@@ -36,6 +36,8 @@ sandbox:
     pullPolicy: IfNotPresent
   extraEnv:
     TOOL_DIRS: /opt/centaur/tools
+    CODEX_MODEL: gpt-5.6-luna
+    CODEX_MODEL_REASONING_EFFORT: xhigh
 
 ironProxy:
   # Keep the production harness credential on the AWS-backed Kubernetes
@@ -57,6 +59,7 @@ tokenBroker:
 console:
   enabled: true
   publicUrl: https://centaur-dev.theworldnetwork.org
+  adminSlackThreadsEnabled: true
   ssoEmailDomains:
     - world.org
   bootstrapAdmins:

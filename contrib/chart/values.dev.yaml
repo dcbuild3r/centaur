@@ -35,6 +35,7 @@ apiRs:
 console:
   image:
     pullPolicy: IfNotPresent
+  adminSlackThreadsEnabled: true
 
 ironProxy:
   image:

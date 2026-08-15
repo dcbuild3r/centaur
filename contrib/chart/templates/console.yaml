@@ -194,6 +194,8 @@ spec:
               value: {{ $console.passwordLoginEnabled | quote }}
             - name: CENTAUR_CONSOLE_PUBLIC_SLACK_THREADS_ENABLED
               value: {{ $console.publicSlackThreadsEnabled | quote }}
+            - name: CENTAUR_CONSOLE_ADMIN_SLACK_THREADS_ENABLED
+              value: {{ $console.adminSlackThreadsEnabled | quote }}
 {{- with $console.ssoEmailDomains }}
             - name: CENTAUR_CONSOLE_SSO_EMAIL_DOMAINS
               value: {{ join "," . | quote }}
