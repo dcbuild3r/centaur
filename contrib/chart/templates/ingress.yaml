@@ -27,10 +27,28 @@ spec:
       {{- end }}
       http:
         paths:
+{{- if .Values.apiRs.enabled }}
+          # Expose the API's liveness and readiness probes on the shared
+          # hostname so external monitors can check the control plane.
+          - path: /healthz
+            pathType: Exact
+            backend:
+              service:
+                name: {{ include "centaur.componentName" (dict "root" . "component" "api-rs") }}
+                port:
+                  number: {{ .Values.apiRs.port }}
+          - path: /readyz
+            pathType: Exact
+            backend:
+              service:
+                name: {{ include "centaur.componentName" (dict "root" . "component" "api-rs") }}
+                port:
+                  number: {{ .Values.apiRs.port }}
+{{- end }}
 {{- if $console.publicUrl }}
           # Console UI, authentication, OAuth, PWA, and static-asset paths must
           # precede Slackbot's catch-all path on the shared public origin.
-{{- range list "/console" "/login" "/logout" "/pending" "/auth" "/oauth" "/mcp/oauth" "/.well-known" "/assets" "/manifest" "/service-worker" "/launch" }}
+{{- range list "/console" "/login" "/logout" "/pending" "/auth" "/oauth" "/mcp/oauth" "/.well-known" "/assets" "/manifest" "/service-worker" "/launch" "/up" }}
           - path: {{ . }}
             pathType: Prefix
             backend:
