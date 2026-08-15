@@ -1356,6 +1356,14 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     end
   end
 
+  test "console pages allow the sidebar thread list to refresh on navigation" do
+    get console_principals_url
+
+    assert_response :ok
+    assert_select "#console_sidebar_thread_list[data-turbo-permanent]", count: 0
+    assert_select "turbo-frame#console_sidebar_threads[src=?]", console_sidebar_threads_path
+  end
+
   test "sidebar action renders the empty thread list when the session DB is unavailable" do
     with_recent_first_error do
       get console_sidebar_threads_url
