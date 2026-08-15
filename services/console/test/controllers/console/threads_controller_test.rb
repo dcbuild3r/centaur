@@ -2008,6 +2008,7 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
   def threads_controller_for(user)
     Console::ThreadsController.new.tap do |controller|
       controller.define_singleton_method(:current_user) { user }
+      controller.define_singleton_method(:descoped?) { false }
     end
   end
 
