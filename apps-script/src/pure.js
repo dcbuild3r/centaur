@@ -25,6 +25,78 @@ var MeetingOpsPure = (function () {
     return new Date(occurrence.getTime() + WEEK_MS);
   }
 
+  function offsetMilliseconds_(date, timeZone) {
+    var offset = Utilities.formatDate(date, timeZone, 'Z');
+    var match = String(offset).match(/^([+-])(\d{2})(\d{2})$/);
+    if (!match) throw new Error('Could not read timezone offset ' + offset);
+    var milliseconds = (
+      Number(match[2]) * 60 * 60 * 1000 +
+      Number(match[3]) * 60 * 1000
+    );
+    return match[1] === '-' ? -milliseconds : milliseconds;
+  }
+
+  function localDateToUtc_(parts, timeZone) {
+    var localMillis = Date.UTC(
+      parts.year,
+      parts.month - 1,
+      parts.day,
+      parts.hour,
+      parts.minute,
+      parts.second,
+      parts.millisecond
+    );
+    var offset = offsetMilliseconds_(new Date(localMillis), timeZone);
+    var result = new Date(localMillis - offset);
+    // Re-read the offset after applying it so a DST boundary uses the target
+    // date's offset rather than the offset at the UTC guess.
+    var adjustedOffset = offsetMilliseconds_(result, timeZone);
+    if (adjustedOffset !== offset) result = new Date(localMillis - adjustedOffset);
+    return result;
+  }
+
+  function localDateTime_(date, timeZone) {
+    var dateParts = Utilities.formatDate(date, timeZone, 'yyyy-MM-dd')
+      .split('-').map(Number);
+    var timeParts = Utilities.formatDate(date, timeZone, 'HH:mm:ss')
+      .split(':').map(Number);
+    return {
+      year: dateParts[0],
+      month: dateParts[1],
+      day: dateParts[2],
+      hour: timeParts[0],
+      minute: timeParts[1],
+      second: timeParts[2],
+      millisecond: date.getMilliseconds()
+    };
+  }
+
+  function nextOccurrence(occurrence, cadenceType, timeZone) {
+    var zone = timeZone || 'UTC';
+    var parts = localDateTime_(occurrence, zone);
+    var dayDelta = cadenceType === 'weekly' ? 7 :
+      cadenceType === 'bi-weekly' ? 14 : 0;
+    if (dayDelta) {
+      var nextDay = new Date(Date.UTC(
+        parts.year, parts.month - 1, parts.day + dayDelta
+      ));
+      parts.year = nextDay.getUTCFullYear();
+      parts.month = nextDay.getUTCMonth() + 1;
+      parts.day = nextDay.getUTCDate();
+      return localDateToUtc_(parts, zone);
+    }
+    var months = cadenceType === 'quarterly' ? 3 : 1;
+    var day = parts.day;
+    var sourceLastDay = new Date(Date.UTC(parts.year, parts.month, 0)).getUTCDate();
+    var monthEndAnchor = day === sourceLastDay;
+    var monthIndex = parts.month - 1 + months;
+    parts.year += Math.floor(monthIndex / 12);
+    parts.month = monthIndex % 12 + 1;
+    var lastDay = new Date(Date.UTC(parts.year, parts.month, 0)).getUTCDate();
+    parts.day = monthEndAnchor ? lastDay : Math.min(day, lastDay);
+    return localDateToUtc_(parts, zone);
+  }
+
   function shouldPost(now, occurrence, delayMin) {
     return now.getTime() >= occurrence.getTime() + delayMin * MINUTE_MS;
   }
@@ -52,8 +124,8 @@ var MeetingOpsPure = (function () {
     if (notificationMode !== 'orbie') {
       throw new Error('notificationMode must be orbie');
     }
-    if (cadenceType !== 'weekly') {
-      throw new Error('Only weekly cadence is supported by the current worker');
+    if (['weekly', 'bi-weekly', 'monthly', 'quarterly'].indexOf(cadenceType) === -1) {
+      throw new Error('cadence must be weekly, bi-weekly, monthly, or quarterly');
     }
     if (!Array.isArray(recipients)) {
       throw new Error('notificationRecipients must be an array');
@@ -86,6 +158,7 @@ var MeetingOpsPure = (function () {
       templateTabName: cadence.templateTabName || 'Template',
       notesTabName: cadence.notesTabName || 'Meeting Notes',
       attendees: cadence.attendees || [],
+      documentEditorEmails: uniqueStrings(cadence.documentEditorEmails || []),
       previousMeetingLink: cadence.previousMeetingLink || '',
       timeZone: cadence.timeZone || null,
       status: cadence.status || 'active'
@@ -118,8 +191,16 @@ var MeetingOpsPure = (function () {
     });
   }
 
-  function notificationRecipients(cadence, requesterSlackUserId) {
+  function notificationRecipients(cadence, requesterSlackUserId, scheduled) {
     if (cadence.visibility !== 'private') return [null];
+    if (cadence.notifyChannel) return [null];
+    if (scheduled) {
+      var scheduledRecipients = uniqueStrings(cadence.notificationRecipients || []);
+      if (!scheduledRecipients.length) {
+        throw new Error('scheduled private cadences require notificationRecipients');
+      }
+      return scheduledRecipients;
+    }
     if (!requesterSlackUserId) {
       throw new Error('private notification delivery requires a requester');
     }
@@ -157,6 +238,7 @@ var MeetingOpsPure = (function () {
     isCadenceAuthorized: isCadenceAuthorized,
     markNotificationDelivered: markNotificationDelivered,
     normalizeCustomInstructions: normalizeCustomInstructions,
+    nextOccurrence: nextOccurrence,
     nextWeeklyOccurrence: nextWeeklyOccurrence,
     normalizeCadence: normalizeCadence,
     notificationRecipients: notificationRecipients,

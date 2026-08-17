@@ -116,7 +116,10 @@
 {{- end -}}
 {{- end -}}
 {{- end -}}
+{{- $meetingSchedulerPassthroughNames := list "MEETING_SCHEDULER_ENABLED" "MEETING_ORGANIZER_CALENDARS" "MEETING_ZOOM_HOST_USER_ID" -}}
+{{- $meetingOrganizerCalendars := .Values.apiRs.meetingScheduler.organizerCalendars -}}
 {{- $apiRsEtlPassthroughNames = uniq $apiRsEtlPassthroughNames -}}
+{{- $apiRsEtlPassthroughNames = concat $apiRsEtlPassthroughNames $meetingSchedulerPassthroughNames | uniq -}}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -318,6 +321,18 @@ spec:
 {{- if and .Values.apiRs.workflowHostResources (not (hasKey .Values.apiRs.extraEnv "WORKFLOW_HOST_RESOURCES")) }}
             - name: WORKFLOW_HOST_RESOURCES
               value: {{ toJson .Values.apiRs.workflowHostResources | quote }}
+{{- end }}
+{{- if not (hasKey .Values.apiRs.extraEnv "MEETING_SCHEDULER_ENABLED") }}
+            - name: MEETING_SCHEDULER_ENABLED
+              value: {{ .Values.apiRs.meetingScheduler.enabled | quote }}
+{{- end }}
+{{- if not (hasKey .Values.apiRs.extraEnv "MEETING_ORGANIZER_CALENDARS") }}
+            - name: MEETING_ORGANIZER_CALENDARS
+              value: {{ if kindIs "map" $meetingOrganizerCalendars }}{{ toJson $meetingOrganizerCalendars | quote }}{{ else }}{{ $meetingOrganizerCalendars | quote }}{{ end }}
+{{- end }}
+{{- if not (hasKey .Values.apiRs.extraEnv "MEETING_ZOOM_HOST_USER_ID") }}
+            - name: MEETING_ZOOM_HOST_USER_ID
+              value: {{ .Values.apiRs.meetingScheduler.zoomHostUserId | quote }}
 {{- end }}
 {{- range $env := $apiRsEtlEnv }}
 {{- if not (hasKey $.Values.apiRs.extraEnv $env.name) }}
@@ -560,6 +575,10 @@ spec:
             - name: {{ $name }}
               value: {{ $value | quote }}
 {{- end }}
+{{- end }}
+{{- if .Values.slackbotv2.meetingAutomationAllowedChannelIds }}
+            - name: MEETING_AUTOMATION_ALLOWED_SLACK_CHANNEL_IDS
+              value: {{ .Values.slackbotv2.meetingAutomationAllowedChannelIds | quote }}
 {{- end }}
           envFrom:
             - secretRef:

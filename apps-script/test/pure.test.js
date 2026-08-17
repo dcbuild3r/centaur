@@ -4,9 +4,29 @@ const path = require('node:path')
 const pure = require('../src/pure.js')
 
 global.Utilities = {
-  formatDate(date, _timeZone, format) {
-    if (format !== 'yyyy-MM-dd') throw new Error(`unexpected format: ${format}`)
-    return date.toISOString().slice(0, 10)
+  formatDate(date, timeZone, format) {
+    const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      hour12: false,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    }).formatToParts(date).map(({ type, value }) => [type, value]))
+    if (format === 'yyyy-MM-dd') return `${parts.year}-${parts.month}-${parts.day}`
+    if (format === 'HH:mm:ss') return `${parts.hour === '24' ? '00' : parts.hour}:${parts.minute}:${parts.second}`
+    if (format === 'Z') {
+      const offset = new Intl.DateTimeFormat('en-US', {
+        timeZone,
+        timeZoneName: 'longOffset',
+      }).formatToParts(date).find(({ type }) => type === 'timeZoneName')?.value || 'GMT'
+      const match = offset.match(/^GMT([+-])(\d{2}):(\d{2})$/)
+      if (!match) return '+0000'
+      return `${match[1]}${match[2]}${match[3]}`
+    }
+    throw new Error(`unexpected format: ${format}`)
   },
 }
 
@@ -28,6 +48,32 @@ test('agenda window includes the lead boundary and bounded late retry', () => {
 test('weekly cadence advances exactly one week', () => {
   expect(pure.nextWeeklyOccurrence(new Date('2026-08-05T12:00:00Z')).toISOString())
     .toBe('2026-08-12T12:00:00.000Z')
+})
+
+test('scheduled cadence recurrence supports bi-weekly, monthly, and quarterly periods', () => {
+  const occurrence = new Date('2026-01-31T09:15:00Z')
+  expect(pure.nextOccurrence(occurrence, 'bi-weekly', 'UTC').toISOString())
+    .toBe('2026-02-14T09:15:00.000Z')
+  expect(pure.nextOccurrence(occurrence, 'monthly', 'UTC').toISOString())
+    .toBe('2026-02-28T09:15:00.000Z')
+  expect(pure.nextOccurrence(
+    pure.nextOccurrence(occurrence, 'monthly', 'UTC'),
+    'monthly',
+    'UTC',
+  ).toISOString()).toBe('2026-03-31T09:15:00.000Z')
+  expect(pure.nextOccurrence(occurrence, 'quarterly', 'UTC').toISOString())
+    .toBe('2026-04-30T09:15:00.000Z')
+  expect(pure.nextOccurrence(
+    pure.nextOccurrence(occurrence, 'quarterly', 'UTC'),
+    'quarterly',
+    'UTC',
+  ).toISOString()).toBe('2026-07-31T09:15:00.000Z')
+})
+
+test('scheduled recurrence preserves local meeting time across DST', () => {
+  const occurrence = new Date('2026-03-22T09:00:00Z')
+  const next = pure.nextOccurrence(occurrence, 'weekly', 'Europe/Prague')
+  expect(next.toISOString()).toBe('2026-03-29T08:00:00.000Z')
 })
 
 test('notes notification waits for the configured delay', () => {
@@ -121,6 +167,21 @@ test('private runs queue only the authenticated requester', () => {
   )
 })
 
+test('private channel cadences queue one channel notification', () => {
+  expect(pure.notificationRecipients({
+    visibility: 'private',
+    notifyChannel: 'G123',
+    notificationRecipients: ['UOWNER', 'UMANDY'],
+  }, null, true)).toEqual([null])
+})
+
+test('scheduled private notifications use all resolved recipients', () => {
+  expect(pure.notificationRecipients({
+    visibility: 'private',
+    notificationRecipients: ['UOWNER', 'UMANDY'],
+  }, null, true)).toEqual(['UOWNER', 'UMANDY'])
+})
+
 test('private delivery is idempotent per requester', () => {
   const record = { agendaNotified: false }
 
@@ -166,6 +227,8 @@ test('only the approved Execution API entrypoints are public', () => {
     'getPendingOrbieNotifications',
     'getPendingOrbieNotificationsForCaller',
     'runCadenceJob',
+    'runScheduledCadenceJob',
+    'runScheduledNotificationsJob',
   ])
 })
 

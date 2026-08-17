@@ -95,6 +95,21 @@ def test_run_cadence_forwards_custom_instructions_to_apps_script(monkeypatch):
     }]
 
 
+def test_run_scheduled_notifications_uses_the_workflow_entrypoint(monkeypatch):
+    service = _Service({"done": True, "response": {"result": {"status": "notifications-processed"}}})
+    monkeypatch.setattr(client, "get_script_service", lambda: service)
+    monkeypatch.setattr(client, "secret", lambda name: "script-123")
+
+    result = client.run_scheduled_notifications(
+        {"id": "weekly-sync", "visibility": "public"},
+        now="2026-08-17T07:15:00Z",
+        requester_slack_team_id="TL1HM8UUU",
+    )
+
+    assert result == {"status": "notifications-processed"}
+    assert service.scripts_api.calls[0]["body"]["function"] == "runScheduledNotificationsJob"
+
+
 def test_execution_error_surfaces_apps_script_message(monkeypatch):
     service = _Service(
         {

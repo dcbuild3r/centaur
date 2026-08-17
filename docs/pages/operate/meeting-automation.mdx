@@ -1,13 +1,14 @@
 ---
 title: Meeting Automation
-description: Run owner-scoped Google Docs meeting cadences from an Orbie Slack DM.
+description: Run owner-scoped Google Docs cadences and governed Calendar/Zoom booking from approved Orbie surfaces.
 ---
 
 # Meeting Automation
 
 World Foundation Slack users can run an authorized meeting cadence by sending
-Orbie a direct message. No per-user Google identity, Centaur Console role, or
-infrastructure grant is required.
+Orbie a direct message or mentioning Orbie in a deployment-allowlisted channel.
+No per-user Google identity, Centaur Console role, or infrastructure grant is
+required.
 
 Use one of these forms:
 
@@ -18,8 +19,9 @@ meeting ops <cadence id or title>
 ```
 
 Orbie acknowledges the durable run, creates or reuses the agenda document, and
-posts the result back to the same DM. Replaying the same Slack message reuses
-the workflow run and does not create another document or message.
+posts the result back to the same DM or originating channel thread. Replaying
+the same Slack message reuses the workflow run and does not create another
+document or message.
 
 The generated Google Doc is a full native copy of the configured template. For
 the Weekly Sync cadence, `Meeting Notes` keeps the template's update prompts,
@@ -27,47 +29,127 @@ progress sections, decisions, and feedback table, with the occurrence date at
 the top; `Format` remains a separate tab. Retries reuse and validate that copy
 without overwriting notes attendees have entered.
 
+## Calendar and Zoom booking
+
+The public `orbie-meeting-scheduling` skill submits every operation to the
+durable `meeting_automation` workflow broker, which alone can call the narrow
+`meeting-scheduler` capability. It supports free/busy-only slot search,
+confirmed ad-hoc booking/rescheduling, and published Notion cadences with
+`Calendar booking = Auto-book`. Existing rows remain unaffected while the
+feature flag is off or the row remains `Off`.
+
+Auto-book rows must specify a managed organizer-calendar alias, a positive
+booking window, a positive duration, and participants that resolve to exact
+World identities. The workflow creates one stable occurrence state, one
+World Foundation Zoom meeting, and one Calendar event. Calendar events carry
+the occurrence key in `extendedProperties.private`, include the Zoom join URL,
+and use `sendUpdates=all`.
+
+The scheduler reads participant free/busy only. It never returns private event
+titles or descriptions. All writes are gated by the scheduler feature flag,
+an allowlisted organizer alias, stable occurrence identity, and the workflow
+principal's provider grants. Ad-hoc writes also require an explicit
+confirmation in the current conversation.
+
+If any provider, Docs, or Slack delivery step fails, the workflow leaves
+`Next date` unchanged and retries the same occurrence. Rescheduling updates
+the existing Calendar/Zoom pair and the occurrence's actual time; the cadence
+anchor is not moved.
+
 ## Access model
 
-The Slack ingress supplies the caller identity and existing DM channel. The
-broker accepts requests only from the World Foundation Slack workspace and
-does not accept a caller, recipient, channel, document, or folder override from
-the user or agent.
+The Slack ingress supplies the caller identity and existing conversation. The
+Console scheduling route accepts only an authenticated Console caller; the
+Slack scheduling ingress accepts only the World Foundation Slack workspace.
+Both routes create the durable workflow run rather than exposing provider
+tools. DMs are
+enabled by default; channel requests require the channel ID in
+`MEETING_AUTOMATION_ALLOWED_SLACK_CHANNEL_IDS`. The broker does not accept a
+caller, recipient, channel, document, or folder override from the user or agent.
 
 Public cadences are available to World Foundation Slack users. A private
-cadence is visible only to its owner, `accessSlackUserIds`, and explicit
-notification recipients. Unknown and unauthorized cadences return the same
-user-facing outcome so private cadence names are not disclosed.
+cadence lives in a copy of the **Orbie Private Cadence Template** that the
+owner keeps in a private World Foundation page and shares with
+`orbie-automation@world.org`. Orbie discovers only cadence databases visible
+to that service account. For Notion-backed private rows, the cadence is
+visible only to its owner and explicit notification recipients; the normalized
+worker contract also leaves room for future `accessSlackUserIds` team
+membership. Delivery is to private Slack `G...` channels, DMs, or group DMs.
+Unknown and unauthorized cadences return the
+same user-facing outcome so private cadence names are not disclosed.
 
 The durable `workflow-meeting-automation` principal is the only principal with
-the `meeting_ops` role and Google OAuth grant. Individual Slack principals do
-not receive the raw Google tool or shared outbox. Apps Script stores one private
+the `meeting_ops` and `meeting-scheduler` roles and their provider grants.
+Individual Slack principals do not receive the raw Google/Zoom tools or shared
+outbox. Apps Script stores one private
 notification per recipient; the workflow reads and acknowledges only the
 requester's item, and only after Slack confirms delivery.
+
+Cadence-bound reschedule, cancel, and reconciliation requests are checked
+against the cadence owner and explicitly configured recipients before any
+provider mutation. Console service requests retain their authenticated caller
+identity for audit/idempotency but cannot impersonate a Slack owner; those
+cadence mutations fail closed unless a verified Slack identity is present.
 
 ## Cadence source
 
 Orbie normalizes public entries from the Notion **Cadences** database and
-owner-scoped private definitions into `CADENCE_CONFIG_JSON` in Apps Script.
-Apps Script remains a Google Docs worker: it does not receive Notion or Slack
-credentials and does not decide who the Slack caller is.
+owner-scoped entries from each Orbie-marked private Cadences database into
+`CADENCE_CONFIG_JSON` in Apps Script. Apps Script remains a Google Docs worker:
+it does not receive Notion or Slack credentials and does not decide who the
+Slack caller is.
 
 ## Deployment checks
 
 After deployment, verify all of the following:
 
-1. `meeting_automation` appears in workflow discovery and its workflow
+1. `MEETING_OPS_SCRIPT_ID` resolves to the executable Apps Script deployment
+   ID, not the project ID or the literal placeholder name. Reconcile the
+   managed `GOOGLE_TOKEN_JSON` and `MEETING_OPS_SCRIPT_ID` references together
+   with the durable `workflow-meeting-automation` principal.
+2. Publish new Apps Script versions by updating the existing executable
+   deployment. Do not create an unmanaged replacement deployment: Centaur
+   stores the stable deployment ID.
+3. `meeting_automation` appears in workflow discovery and its workflow
    principal is registered.
-2. Only `workflow-meeting-automation` resolves the `meeting_ops` role.
-3. A World Slack DM can queue an authorized cadence.
-4. An unrelated user cannot resolve a private cadence.
-5. Slack delivery succeeds before acknowledgement.
-6. The linked Doc preserves the source template's full tab tree and native
+4. Only `workflow-meeting-automation` resolves the `meeting_ops` role.
+5. A read-only `meeting-ops cadences` lookup succeeds through a newly claimed
+   or refreshed workflow sandbox before running a cadence. A Google HTTP 401
+   must stop the workflow before any source template or Notion state changes.
+6. A World Slack DM and each configured allowlisted channel can queue an
+   authorized cadence; an unlisted channel cannot.
+7. An unrelated user cannot resolve a private cadence.
+8. A private cadence database is discovered only after the service account has
+   been invited, and an unshared private database is not returned by lookup.
+9. Slack delivery succeeds before acknowledgement.
+10. The linked Doc preserves the source template's full tab tree and native
    structures; for Weekly Sync this is `Meeting Notes` followed by `Format`.
-7. `Meeting Notes` contains the template's notes layout with the occurrence
+11. `Meeting Notes` contains the template's notes layout with the occurrence
    date at the top, while `Format` remains separate.
-8. Replaying the same Slack message produces no duplicate document or Slack
+12. Replaying the same Slack message produces no duplicate document or Slack
    message and does not overwrite attendee-entered notes.
+13. In Dev, a real Auto-book cadence produces one Calendar invite with the
+   World Foundation Zoom URL, a matching Notion booking status, and a joinable
+   Zoom meeting. A retry reuses both provider IDs; a reschedule changes the
+   same pair and leaves the original cadence anchor intact.
+
+## Provider activation checklist
+
+Before enabling `MEETING_SCHEDULER_ENABLED` in Dev:
+
+1. Share each participant calendar with `orbie-automation@world.org` at
+   free/busy level only.
+2. Grant write access only to explicitly designated organizer calendars and
+   map their IDs through `MEETING_ORGANIZER_CALENDARS`; never map `primary` or
+   accept a raw calendar ID from a caller.
+3. Create the World Foundation Zoom Server-to-Server OAuth app with a licensed
+   designated host. Store its account/client credentials and the managed
+   short-lived `ZOOM_ACCESS_TOKEN` rotation in the secret system. Do not put
+   them in Apps Script or a skill.
+4. Grant `meeting-scheduler` only to `workflow-meeting-automation`. Keep
+   generic `gsuite` Calendar write methods unavailable to Slack principals.
+5. Run the focused tests and a user-visible Slack, Calendar, Zoom, retry, and
+   reschedule smoke before making the public Console skill discoverable.
 
 Do not grant `meeting_ops` directly to Slack user, channel, or warm-pool
 principals.

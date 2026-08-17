@@ -599,21 +599,14 @@ impl AgentSandboxBackend {
         if let Some(proxy_id) = proxy_id
             && self.has_usable_iron_proxy_resources(id).await?
         {
-            let sandbox = self
-                .sandboxes()
-                .get(id.as_str())
-                .await
-                .map_err(|err| map_kube_error("get sandbox for proxy principal check", err))?;
-            if proxy_binding_matches(
-                sandbox.metadata.annotations.as_ref(),
-                principal_id,
-                requester_principal_id,
-                labels,
-            ) {
-                return Ok(());
-            }
-
             let iron_control = &self.config.iron_control;
+            // Reassign on every reuse. The sandbox annotations only record the
+            // selected principal/requester, not the effective secret source or
+            // path rules. A deployment or grant change can therefore leave a
+            // warm proxy serving stale configuration even when those values are
+            // unchanged. The assignment refreshes iron-control's config hash,
+            // and the barrier below waits until the proxy has applied it before
+            // the caller sends its first request.
             let proxy = iron_control
                 .client
                 .assign_proxy_principal(&proxy_id, principal_id, requester_principal_id, labels)
@@ -992,9 +985,8 @@ impl AgentSandboxBackend {
         principal_id: &str,
         requester_principal_id: Option<&str>,
     ) -> SandboxResult<()> {
-        // A merge-patch null removes the requester annotation, so "no
-        // requester" and "absent annotation" stay indistinguishable for the
-        // binding comparison.
+        // A merge-patch null removes a stale requester annotation when the
+        // current turn has no requester.
         let patch = Patch::Merge(json!({
             "metadata": {
                 "annotations": {
@@ -2142,26 +2134,6 @@ fn iron_proxy_labels(
     labels
 }
 
-/// Whether a sandbox's annotations already record the requested proxy binding,
-/// so the ensure path can skip a redundant reassignment. An absent requester
-/// annotation means "no requester" and compares equal to `None`, keeping
-/// label-less sessions (tool-host, non-Slack) on the skip path. Any label
-/// refresh always reassigns, mirroring the pre-requester behavior.
-fn proxy_binding_matches(
-    annotations: Option<&BTreeMap<String, String>>,
-    principal_id: &str,
-    requester_principal_id: Option<&str>,
-    labels: &BTreeMap<String, String>,
-) -> bool {
-    let assigned_principal = annotations
-        .and_then(|annotations| annotations.get(crate::IRON_CONTROL_PRINCIPAL_ANNOTATION));
-    let assigned_requester = annotations
-        .and_then(|annotations| annotations.get(crate::IRON_CONTROL_REQUESTER_ANNOTATION));
-    assigned_principal.map(String::as_str) == Some(principal_id)
-        && assigned_requester.map(String::as_str) == requester_principal_id
-        && labels.is_empty()
-}
-
 fn unique_suffix() -> String {
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2200,84 +2172,6 @@ mod tests {
             api_server_enabled,
             ..resolved()
         }
-    }
-
-    fn binding_annotations(
-        principal: Option<&str>,
-        requester: Option<&str>,
-    ) -> BTreeMap<String, String> {
-        let mut annotations = BTreeMap::new();
-        if let Some(principal) = principal {
-            annotations.insert(
-                crate::IRON_CONTROL_PRINCIPAL_ANNOTATION.to_owned(),
-                principal.to_owned(),
-            );
-        }
-        if let Some(requester) = requester {
-            annotations.insert(
-                crate::IRON_CONTROL_REQUESTER_ANNOTATION.to_owned(),
-                requester.to_owned(),
-            );
-        }
-        annotations
-    }
-
-    #[test]
-    fn proxy_binding_matches_compares_principal_requester_and_labels() {
-        let no_labels = BTreeMap::new();
-        let labels = BTreeMap::from([("centaur.slack_channel_id".to_owned(), "C1".to_owned())]);
-
-        let both = binding_annotations(Some("prn_conv"), Some("prn_req"));
-        assert!(proxy_binding_matches(
-            Some(&both),
-            "prn_conv",
-            Some("prn_req"),
-            &no_labels
-        ));
-
-        let no_requester = binding_annotations(Some("prn_conv"), None);
-        assert!(proxy_binding_matches(
-            Some(&no_requester),
-            "prn_conv",
-            None,
-            &no_labels
-        ));
-
-        // A requester swap, a requester-to-none clear, and a none-to-requester
-        // bind must all fall through to reassignment.
-        assert!(!proxy_binding_matches(
-            Some(&both),
-            "prn_conv",
-            Some("prn_other"),
-            &no_labels
-        ));
-        assert!(!proxy_binding_matches(
-            Some(&both),
-            "prn_conv",
-            None,
-            &no_labels
-        ));
-        assert!(!proxy_binding_matches(
-            Some(&no_requester),
-            "prn_conv",
-            Some("prn_req"),
-            &no_labels
-        ));
-
-        // Principal mismatch and non-empty labels always reassign.
-        assert!(!proxy_binding_matches(
-            Some(&both),
-            "prn_else",
-            Some("prn_req"),
-            &no_labels
-        ));
-        assert!(!proxy_binding_matches(
-            Some(&both),
-            "prn_conv",
-            Some("prn_req"),
-            &labels
-        ));
-        assert!(!proxy_binding_matches(None, "prn_conv", None, &no_labels));
     }
 
     fn control_target() -> ControlPlaneEgressTarget {

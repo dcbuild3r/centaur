@@ -77,7 +77,7 @@ import {
 import { isSlackStopCommand } from './stop-command'
 import {
   dispatchMeetingAutomationCommand,
-  isWorldFoundationSlackDm,
+  isWorldFoundationMeetingAutomationSurface,
   parseMeetingAutomationCommand
 } from './meeting-automation'
 import type {
@@ -536,7 +536,13 @@ async function handleSlackMessageHandoff(
       input.mode === 'execute'
         ? parseMeetingAutomationCommand(message.text, input.options.botUserId)
         : null
-    if (meetingAutomationCommand && isWorldFoundationSlackDm(message)) {
+    if (
+      meetingAutomationCommand &&
+      isWorldFoundationMeetingAutomationSurface(
+        message,
+        input.options.meetingAutomationAllowedChannelIds
+      )
+    ) {
       if (
         await handleMeetingAutomationCommand(
           thread,
@@ -614,7 +620,11 @@ async function handleMeetingAutomationCommand(
     const dispatched = await dispatchMeetingAutomationCommand(options, message, command)
     if (!dispatched) {
       await state.delete(dedupeKey)
-      return false
+      await thread.post(
+        "I couldn't verify your World Slack identity, so no meeting automation was run."
+      )
+      traceWarn(options, 'slackbotv2_meeting_automation_requester_unverified', trace)
+      return true
     }
 
     const latest = (await thread.state) ?? {}
@@ -2081,12 +2091,41 @@ async function recoverRenderObligations(
         if (activeLeaseToken === leaseToken) await state.delete(renderRecoveryLeaseKey(threadId))
       }
 
+      // A recovery render can legitimately wait for a long-running execution
+      // to reach its terminal event. If the per-thread deadline fires first,
+      // keep the lease alive until that detached render settles. Otherwise the
+      // lease expires while the old render is still consuming the stream and a
+      // later sweep can start a duplicate Slack reply.
+      let leaseSettled = false
+      const refreshLease = setInterval(() => {
+        void state
+          .get<string>(renderRecoveryLeaseKey(threadId))
+          .then(current => {
+            if (current === leaseToken) {
+              return state.set(
+                renderRecoveryLeaseKey(threadId),
+                leaseToken,
+                RENDER_RECOVERY_LEASE_TTL_MS
+              )
+            }
+            return undefined
+          })
+          .catch(() => undefined)
+      }, RENDER_LEASE_REFRESH_INTERVAL_MS)
+      const settleLease = async (): Promise<void> => {
+        if (leaseSettled) return
+        leaseSettled = true
+        clearInterval(refreshLease)
+        await releaseLease().catch(() => undefined)
+      }
+
       // A single hung recovery (for example an event stream that never
       // produces a chunk) must not block every obligation queued behind it.
       // Race a deadline; on timeout move on and leave the attempt running
       // detached - it may still finish and clear the obligation, which is why
       // the lease is kept so a later pass does not start a duplicate render.
       const recovery = recoverRenderObligation(chat, state, options, threadId, obligation)
+      void recovery.then(settleLease, settleLease).catch(() => undefined)
       let outcome: { timedOut: true } | { timedOut: false; deferred: boolean }
       try {
         outcome = await Promise.race([
@@ -2094,18 +2133,17 @@ async function recoverRenderObligations(
           sleep(timeoutMs).then(() => ({ timedOut: true as const }))
         ])
       } catch (error) {
-        await releaseLease()
+        await settleLease()
         throw error
       }
       if (outcome.timedOut) {
         void recovery.catch(() => undefined)
         deferredCount += 1
         timedOutCount += 1
-        // Count timeouts toward the abandonment budget: an obligation whose
-        // recovery hangs on every claim (for example an event stream that
-        // never yields) would otherwise keep the sweep loop spinning forever,
-        // racing every live render in the process.
-        failureCounts.set(threadId, (failureCounts.get(threadId) ?? 0) + 1)
+        // A timeout only means the execution has not reached a terminal event
+        // within this sweep's rendering budget. It is not evidence that the
+        // execution failed. Keep the obligation retryable; the detached
+        // render remains the single owner until the event stream terminates.
         recordRecoveryThreadEvent('timeout')
         traceLog(
           options,
@@ -2113,7 +2151,6 @@ async function recoverRenderObligations(
           undefined,
           {
             ...renderObligationFields(obligation),
-            failure_count: failureCounts.get(threadId),
             thread_id: threadId,
             timeout_ms: timeoutMs
           },
@@ -2121,7 +2158,7 @@ async function recoverRenderObligations(
         )
         continue
       }
-      await releaseLease()
+      await settleLease()
       if (outcome.deferred) {
         deferredCount += 1
         retryableDeferredCount += 1

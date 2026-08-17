@@ -1,5 +1,6 @@
 import type { RustSessionStreamEvent } from '@centaur/harness-events'
 import type { Attachment, LinkPreview, Message } from 'chat'
+import { createHmac } from 'node:crypto'
 import { renderSlackDisplayText, slackMessagePromptText } from './slack-display-text'
 import type {
   ForwardSessionInput,
@@ -587,7 +588,43 @@ export async function postSlackMeetingAutomationRun(
         new URL('/api/slack/meeting-automation/runs', ensureTrailingSlash(options.apiUrl)),
         {
           body: JSON.stringify(request),
-          headers: apiHeaders(options),
+          headers: {
+            ...apiHeaders(options),
+            ...slackIdentityHeader(options, request)
+          },
+          method: 'POST'
+        },
+        sessionApiTimeoutMs(options),
+        action
+      ),
+    sessionApiTimeoutMs(options),
+    action
+  )
+  await ensureApiOk(response, action)
+  const payload: unknown = await response.json()
+  if (!isJsonObject(payload)) {
+    throw new Error(`${action} returned a non-object response`)
+  }
+  return payload
+}
+
+export async function postSlackMeetingSchedulingRun(
+  options: SlackbotV2Options,
+  request: SlackMeetingSchedulingRunRequest
+): Promise<JsonObject> {
+  const action = 'create Slack meeting scheduling run'
+  const response = await recordSessionApiOperation(
+    'create_meeting_scheduling_run',
+    () =>
+      fetchWithTimeout(
+        options.fetch ?? globalThis.fetch,
+        new URL('/api/slack/meeting-scheduling/runs', ensureTrailingSlash(options.apiUrl)),
+        {
+          body: JSON.stringify(request),
+          headers: {
+            ...apiHeaders(options),
+            ...slackIdentityHeader(options, request)
+          },
           method: 'POST'
         },
         sessionApiTimeoutMs(options),
@@ -777,7 +814,45 @@ export type SlackMeetingAutomationRunRequest = {
   requester_slack_team_id: string
   requester_slack_email?: string
   slack_channel_id: string
+  slack_thread_ts?: string
   request_message_id: string
+}
+
+export type SlackMeetingSchedulingRunRequest = {
+  operation: string
+  args: JsonObject
+  requester_slack_user_id?: string
+  requester_slack_team_id?: string
+  requester_slack_email?: string
+  slack_channel_id?: string
+  slack_thread_ts?: string
+  request_message_id: string
+}
+
+type SlackIdentityRequest = {
+  requester_slack_user_id?: string
+  requester_slack_team_id?: string
+  slack_channel_id?: string
+  slack_thread_ts?: string
+  request_message_id: string
+}
+
+function slackIdentityHeader(
+  options: SlackbotV2Options,
+  request: SlackIdentityRequest
+): Record<string, string> {
+  const apiKey = options.apiKey ?? process.env.SLACKBOT_API_KEY
+  if (!apiKey) return {}
+  const payload = [
+    request.requester_slack_team_id ?? '',
+    request.requester_slack_user_id ?? '',
+    request.slack_channel_id ?? '',
+    request.slack_thread_ts ?? '',
+    request.request_message_id
+  ].join('\n')
+  return {
+    'x-centaur-slack-identity': createHmac('sha256', apiKey).update(payload).digest('base64')
+  }
 }
 
 type RequesterIdentityCacheEntry = {
@@ -1057,7 +1132,7 @@ async function resolveRequesterIdentity(
 }
 
 /**
- * Resolve the authenticated Slack requester and the existing DM destination
+ * Resolve the authenticated Slack requester and existing allowed destination
  * for the meeting-automation broker. The caller never supplies these values
  * in command text; they come from the verified Slack message and profile.
  */
@@ -1067,10 +1142,13 @@ export async function resolveSlackMeetingAutomationRequester(
 ): Promise<SlackMeetingAutomationRequester | null> {
   const channelId = slackConversationId(message)
   const teamId = messageSlackTeamId(message)
+  const channelAllowed = channelId
+    ? options.meetingAutomationAllowedChannelIds?.includes(channelId) === true
+    : false
   if (
     teamId !== WORLD_FOUNDATION_SLACK_TEAM_ID
     || !channelId
-    || slackConversationKind(channelId) !== 'dm'
+    || (slackConversationKind(channelId) !== 'dm' && !channelAllowed)
   ) {
     return null
   }

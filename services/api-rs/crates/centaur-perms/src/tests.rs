@@ -957,6 +957,27 @@ fn real_gsuite_tool_parses_oauth() {
 }
 
 #[test]
+fn real_notion_tool_replaces_the_placeholder_authorization_header() {
+    let Some(tools_dir) = repo_tools_dir() else {
+        return;
+    };
+    let manifest = tools::find_tool(&[tools_dir], "notion").unwrap();
+    let secret = manifest
+        .secrets
+        .iter()
+        .find_map(|secret| match secret {
+            ParsedSecret::Http(secret) if secret.name == "NOTION_API_KEY" => Some(secret),
+            _ => None,
+        })
+        .expect("expected the NOTION_API_KEY HTTP secret");
+
+    assert_eq!(secret.mode, SecretMode::Replace);
+    assert_eq!(secret.hosts, vec!["api.notion.com"]);
+    assert_eq!(secret.match_headers, vec!["Authorization"]);
+    assert_eq!(secret.replacer, "NOTION_API_KEY");
+}
+
+#[test]
 fn real_meeting_ops_tool_is_limited_to_the_fixed_apps_script() {
     let Some(tools_dir) = repo_tools_dir() else {
         return;

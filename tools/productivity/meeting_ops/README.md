@@ -12,7 +12,8 @@ handoff:
   `Format` tab and other native structures, and re-checks private access in
   Apps Script.
 - `pending_notifications_for_caller(user_id, team_id)` reads only that user's
-  private notifications.
+  private notifications, or a private-channel notification initiated by that
+  caller.
 - `acknowledge_notification(notification_id, requester_slack_user_id=...,
   requester_slack_team_id=...)` removes only that user's item after Orbie has
   confirmed Slack delivery.
@@ -24,6 +25,11 @@ resource. It is not a method argument, so a caller cannot execute another Apps
 Script deployment.
 `GOOGLE_TOKEN_JSON` remains behind iron-proxy; the sandbox receives only a
 path placeholder and proxy-injected short-lived OAuth access token.
+
+Calendar and Zoom booking do not belong to this tool. Apps Script remains a
+Docs-only worker with its existing scopes; the durable `meeting_automation`
+workflow calls the separately governed `meeting-scheduler` capability before
+invoking `run_scheduled_cadence`.
 
 ## CLI
 
@@ -40,8 +46,9 @@ meeting-ops acknowledge agenda:private-weekly:2026-08-07:U123 \
 
 Slack delivery remains Orbie's responsibility. An outbox item must not be
 acknowledged until the Slack API confirms the corresponding message.
-Private outbox entries are created once per recipient. Production grants must
-remain exclusive to the Meeting Automation workflow principal rather than
+Private DM outbox entries are created once per recipient; a private `G...`
+channel notification is created once per channel request. Production grants
+must remain exclusive to the Meeting Automation workflow principal rather than
 individual end users. Public-channel notifications remain in the public
 outbox and are intentionally not consumed by the caller-scoped worker.
 An immediate retry must reuse the same Doc and must not duplicate the

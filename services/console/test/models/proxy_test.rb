@@ -165,11 +165,6 @@ class ProxyTest < ActiveSupport::TestCase
     Grant.create!(principal: proxy.principal, pg_dsn_secret: pg_dsn_secrets(:acme_analytics_pg),
                   created_by: users(:globex_admin))
 
-    assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ proxy.principal.id ]) do
-      assert_equal before, proxy.reload.config_hash
-    end
-
-    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob)
     refute_equal before, proxy.reload.config_hash
   end
 
@@ -179,11 +174,6 @@ class ProxyTest < ActiveSupport::TestCase
     Grant.create!(principal: proxy.principal, gcp_auth_secret: gcp_auth_secrets(:acme_bigquery),
                   created_by: users(:globex_admin))
 
-    assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ proxy.principal.id ]) do
-      assert_equal before, proxy.reload.config_hash
-    end
-
-    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob)
     refute_equal before, proxy.reload.config_hash
   end
 
@@ -195,11 +185,6 @@ class ProxyTest < ActiveSupport::TestCase
                   created_by: users(:acme_admin))
     principals(:acme_channel).principal_roles.create!(role: role)
 
-    assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ proxy.principal.id ]) do
-      assert_equal before, proxy.reload.config_hash
-    end
-
-    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob)
     refute_equal before, proxy.reload.config_hash
   end
 

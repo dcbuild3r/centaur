@@ -208,6 +208,13 @@ impl AppState {
 const MAX_WEBHOOK_BODY_BYTES: usize = 1024 * 1024;
 const WORLD_FOUNDATION_SLACK_TEAM_ID: &str = "TL1HM8UUU";
 const MEETING_AUTOMATION_WORKFLOW: &str = "meeting_automation";
+const MEETING_SCHEDULING_OPERATIONS: &[&str] = &[
+    "find_availability",
+    "book_meeting",
+    "reschedule_meeting",
+    "cancel_meeting",
+    "get_or_reconcile_meeting",
+];
 const MAX_CUSTOM_INSTRUCTIONS_CHARS: usize = 4000;
 const REDACTED_WEBHOOK_HEADERS: &[&str] = &[
     "authorization",
@@ -283,6 +290,14 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         .route(
             "/api/slack/meeting-automation/runs",
             post(create_slack_meeting_automation_run),
+        )
+        .route(
+            "/api/slack/meeting-scheduling/runs",
+            post(create_slack_meeting_scheduling_run),
+        )
+        .route(
+            "/api/meeting-scheduling/runs",
+            post(create_console_meeting_scheduling_run),
         )
         .route(
             "/api/admin/slack/archive-imports",
@@ -494,10 +509,7 @@ async fn authorize_api_request(
 
     let allowed = match access {
         RouteAccess::Capability(capability) => caller.has_capability(capability),
-        RouteAccess::PrincipalSlackProxy => {
-            caller.class() == CallerClass::Principal
-                && caller.has_capability(Capability::SlackProxy)
-        }
+        RouteAccess::PrincipalSlackProxy => caller_can_use_slack_proxy(&caller),
         RouteAccess::ArchiveDownload => {
             caller.has_capability(Capability::AdminArchive)
                 || caller
@@ -547,6 +559,14 @@ async fn authorize_api_request(
     next.run(request).await
 }
 
+/// Slackbot is a trusted ingress for the Slack broker endpoints. Other
+/// ingress callers must not inherit that authority; principal JWTs continue
+/// to use the scoped SlackProxy capability.
+fn caller_can_use_slack_proxy(caller: &AuthenticatedCaller) -> bool {
+    (caller.class() == CallerClass::Principal && caller.has_capability(Capability::SlackProxy))
+        || (caller.class() == CallerClass::Ingress && caller.identity() == "slackbot")
+}
+
 fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
     let capability = |capability| Some(RouteAccess::Capability(capability));
     match (method, route) {
@@ -569,6 +589,7 @@ fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
             capability(Capability::WorkflowsWrite)
         }
         (&Method::POST, "/api/workflows/events") => capability(Capability::WorkflowsEvents),
+        (&Method::POST, "/api/meeting-scheduling/runs") => capability(Capability::WorkflowsWrite),
         (&Method::POST, "/api/admin/slack/archive-imports/{import_id}/download-url") => {
             Some(RouteAccess::ArchiveDownload)
         }
@@ -2791,12 +2812,261 @@ async fn create_workflow_run(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     if request.workflow_name == MEETING_AUTOMATION_WORKFLOW {
         return Err(ApiError::Forbidden(
-            "meeting automation runs must be created from an authenticated Slack DM".to_owned(),
+            "meeting automation runs must be created from an authenticated Slack surface"
+                .to_owned(),
         ));
     }
     let workflows = workflow_runtime(&state)?;
     let run = workflows.create_run(request).await?;
     Ok(Json(serde_json::to_value(run)?))
+}
+
+#[derive(Debug, Deserialize)]
+struct MeetingSchedulingRunRequest {
+    operation: String,
+    #[serde(default = "empty_json_object")]
+    args: Value,
+    requester_identity: Option<String>,
+    requester_slack_user_id: Option<String>,
+    requester_slack_team_id: Option<String>,
+    requester_slack_email: Option<String>,
+    slack_channel_id: Option<String>,
+    slack_thread_ts: Option<String>,
+    request_message_id: String,
+}
+
+fn empty_json_object() -> Value {
+    json!({})
+}
+
+async fn create_slack_meeting_scheduling_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<MeetingSchedulingRunRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    verify_slackbot_api_key(&headers)?;
+    let request = validate_meeting_scheduling_request(request, true)?;
+    verify_slack_request_identity(
+        &headers,
+        request.requester_slack_user_id.as_deref().unwrap_or(""),
+        request.requester_slack_team_id.as_deref().unwrap_or(""),
+        request.slack_channel_id.as_deref().unwrap_or(""),
+        request.slack_thread_ts.as_deref().unwrap_or(""),
+        &request.request_message_id,
+    )?;
+    let mut request = request;
+    request.requester_identity = request.requester_slack_user_id.clone();
+    let workflow_request = meeting_scheduling_workflow_request(&request);
+    let workflows = workflow_runtime(&state)?;
+    let run = workflows.create_run(workflow_request).await?;
+    Ok(Json(serde_json::to_value(run)?))
+}
+
+async fn create_console_meeting_scheduling_run(
+    State(state): State<AppState>,
+    Extension(caller): Extension<AuthenticatedCaller>,
+    Json(mut request): Json<MeetingSchedulingRunRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !matches!(caller.class(), CallerClass::Console | CallerClass::Admin) {
+        return Err(ApiError::Forbidden(
+            "meeting scheduling Console runs require an authenticated Console caller".to_owned(),
+        ));
+    }
+    request = console_meeting_scheduling_request(request);
+    request.requester_identity = Some(caller.identity().to_owned());
+    let request = validate_meeting_scheduling_request(request, false)?;
+    let workflow_request = meeting_scheduling_workflow_request(&request);
+    let workflows = workflow_runtime(&state)?;
+    let run = workflows.create_run(workflow_request).await?;
+    Ok(Json(serde_json::to_value(run)?))
+}
+
+fn console_meeting_scheduling_request(
+    mut request: MeetingSchedulingRunRequest,
+) -> MeetingSchedulingRunRequest {
+    // Console authentication is the caller identity. Do not let a Console
+    // payload impersonate a Slack user or direct workflow output to an
+    // arbitrary Slack conversation.
+    request.requester_slack_user_id = None;
+    request.requester_slack_team_id = None;
+    request.requester_slack_email = None;
+    request.slack_channel_id = None;
+    request.slack_thread_ts = None;
+    request
+}
+
+fn meeting_scheduling_workflow_request(
+    request: &MeetingSchedulingRunRequest,
+) -> CreateWorkflowRunRequest {
+    let requester = request
+        .requester_identity
+        .as_deref()
+        .or(request.requester_slack_user_id.as_deref())
+        .unwrap_or("unknown")
+        .trim();
+    let team_id = request
+        .requester_slack_team_id
+        .as_deref()
+        .unwrap_or("")
+        .trim();
+    let mut input = json!({
+        "scheduling_operation": request.operation,
+        "scheduling_args": request.args,
+        "requester_identity": requester,
+        "requester_slack_user_id": request
+            .requester_slack_user_id
+            .as_deref()
+            .unwrap_or(""),
+        "requester_slack_team_id": team_id,
+        "requester_slack_email": request.requester_slack_email,
+        "slack_channel_id": request.slack_channel_id,
+        "slack_thread_ts": request.slack_thread_ts,
+        "request_message_id": request.request_message_id,
+    });
+    if request.slack_channel_id.is_none() {
+        input["slack_channel_id"] = Value::String(String::new());
+    }
+    CreateWorkflowRunRequest {
+        workflow_name: MEETING_AUTOMATION_WORKFLOW.to_owned(),
+        input,
+        idempotency_key: Some(format!(
+            "meeting-scheduling:{}:{}",
+            requester, request.request_message_id
+        )),
+        harness_type: None,
+        max_attempts: Some(3),
+    }
+}
+
+fn validate_meeting_scheduling_request(
+    mut request: MeetingSchedulingRunRequest,
+    slack_surface: bool,
+) -> Result<MeetingSchedulingRunRequest, ApiError> {
+    request.operation = request.operation.trim().to_owned();
+    request.request_message_id = request.request_message_id.trim().to_owned();
+    request.slack_thread_ts = request
+        .slack_thread_ts
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if !MEETING_SCHEDULING_OPERATIONS.contains(&request.operation.as_str()) {
+        return Err(ApiError::BadRequest(
+            "unsupported meeting scheduling operation".to_owned(),
+        ));
+    }
+    if request.request_message_id.is_empty()
+        || request.request_message_id.len() > 128
+        || request.request_message_id.chars().any(char::is_control)
+    {
+        return Err(ApiError::BadRequest(
+            "request_message_id is invalid".to_owned(),
+        ));
+    }
+    if !request.args.is_object() {
+        return Err(ApiError::BadRequest(
+            "meeting scheduling args must be a JSON object".to_owned(),
+        ));
+    }
+    if serde_json::to_vec(&request.args)
+        .map(|bytes| bytes.len() > 32 * 1024)
+        .unwrap_or(true)
+    {
+        return Err(ApiError::BadRequest(
+            "meeting scheduling args are too large".to_owned(),
+        ));
+    }
+    if request.args.as_object().is_some_and(|args| {
+        args.keys().any(|key| {
+            matches!(
+                key.to_ascii_lowercase().as_str(),
+                "access_token"
+                    | "refresh_token"
+                    | "client_secret"
+                    | "client_id"
+                    | "password"
+                    | "zoom_access_token"
+                    | "google_token_json"
+            )
+        })
+    }) {
+        return Err(ApiError::BadRequest(
+            "provider credentials are not accepted by the scheduling broker".to_owned(),
+        ));
+    }
+
+    if slack_surface {
+        let team_id = request
+            .requester_slack_team_id
+            .as_deref()
+            .unwrap_or("")
+            .trim();
+        if team_id != WORLD_FOUNDATION_SLACK_TEAM_ID {
+            return Err(ApiError::Forbidden(
+                "meeting scheduling is limited to the World Slack workspace".to_owned(),
+            ));
+        }
+        let user_id = request
+            .requester_slack_user_id
+            .as_deref()
+            .unwrap_or("")
+            .trim();
+        if !valid_slack_user_id(user_id) {
+            return Err(ApiError::BadRequest(
+                "requester_slack_user_id is invalid".to_owned(),
+            ));
+        }
+        let channel_id = request.slack_channel_id.as_deref().unwrap_or("").trim();
+        let is_dm = valid_slack_identifier(channel_id, 'D');
+        let is_allowlisted_channel = ['C', 'G']
+            .iter()
+            .any(|prefix| valid_slack_identifier(channel_id, *prefix))
+            && meeting_automation_allowed_slack_channels()
+                .iter()
+                .any(|allowed| allowed == channel_id);
+        if !is_dm && !is_allowlisted_channel {
+            return Err(ApiError::BadRequest(
+                "meeting scheduling must be requested from a Slack DM or an allowlisted channel"
+                    .to_owned(),
+            ));
+        }
+        if !is_dm
+            && request
+                .slack_thread_ts
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .is_empty()
+        {
+            return Err(ApiError::BadRequest(
+                "slack_thread_ts is required for a channel scheduling request".to_owned(),
+            ));
+        }
+    }
+    request.requester_slack_email = request
+        .requester_slack_email
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    request.slack_channel_id = request
+        .slack_channel_id
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    request.requester_slack_team_id = request
+        .requester_slack_team_id
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    request.requester_slack_user_id = request
+        .requester_slack_user_id
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if request
+        .slack_thread_ts
+        .as_ref()
+        .is_some_and(|thread_ts| thread_ts.len() > 128 || thread_ts.chars().any(char::is_control))
+    {
+        return Err(ApiError::BadRequest(
+            "slack_thread_ts is invalid".to_owned(),
+        ));
+    }
+    Ok(request)
 }
 
 #[derive(Debug, Deserialize)]
@@ -2809,6 +3079,8 @@ struct SlackMeetingAutomationRunRequest {
     #[serde(default)]
     requester_slack_email: Option<String>,
     slack_channel_id: String,
+    #[serde(default)]
+    slack_thread_ts: Option<String>,
     request_message_id: String,
 }
 
@@ -2819,6 +3091,14 @@ async fn create_slack_meeting_automation_run(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     verify_slackbot_api_key(&headers)?;
     let request = validate_slack_meeting_automation_request(request)?;
+    verify_slack_request_identity(
+        &headers,
+        &request.requester_slack_user_id,
+        &request.requester_slack_team_id,
+        &request.slack_channel_id,
+        request.slack_thread_ts.as_deref().unwrap_or(""),
+        &request.request_message_id,
+    )?;
     let workflow_request = slack_meeting_automation_workflow_request(&request);
     let workflows = workflow_runtime(&state)?;
     let run = workflows.create_run(workflow_request).await?;
@@ -2838,6 +3118,7 @@ fn slack_meeting_automation_workflow_request(
         "requester_slack_team_id": request.requester_slack_team_id,
         "requester_slack_email": request.requester_slack_email,
         "slack_channel_id": request.slack_channel_id,
+        "slack_thread_ts": request.slack_thread_ts,
         "request_message_id": request.request_message_id,
     });
     if let Some(custom_instructions) = &request.custom_instructions {
@@ -2872,13 +3153,51 @@ fn verify_slackbot_api_key(headers: &HeaderMap) -> Result<(), ApiError> {
     Ok(())
 }
 
+fn verify_slack_request_identity(
+    headers: &HeaderMap,
+    user_id: &str,
+    team_id: &str,
+    channel_id: &str,
+    thread_ts: &str,
+    request_message_id: &str,
+) -> Result<(), ApiError> {
+    let expected_secret = env::var("SLACKBOT_API_KEY").map_err(|_| {
+        ApiError::Internal("SLACKBOT_API_KEY is not configured for the Slack broker".to_owned())
+    })?;
+    let presented = header_value(headers, "x-centaur-slack-identity")
+        .ok_or_else(|| ApiError::Unauthorized("missing Slack identity signature".to_owned()))?;
+    let payload = format!("{team_id}\n{user_id}\n{channel_id}\n{thread_ts}\n{request_message_id}");
+    let mut mac = Hmac::<Sha256>::new_from_slice(expected_secret.trim().as_bytes())
+        .map_err(|_| ApiError::Internal("invalid Slack broker signing key".to_owned()))?;
+    mac.update(payload.as_bytes());
+    let expected = general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+    if !constant_time_eq(presented.trim().as_bytes(), expected.as_bytes()) {
+        return Err(ApiError::Unauthorized(
+            "invalid Slack identity signature".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_slack_meeting_automation_request(
+    request: SlackMeetingAutomationRunRequest,
+) -> Result<SlackMeetingAutomationRunRequest, ApiError> {
+    let allowed_channels = meeting_automation_allowed_slack_channels();
+    validate_slack_meeting_automation_request_for_channels(request, &allowed_channels)
+}
+
+fn validate_slack_meeting_automation_request_for_channels(
     mut request: SlackMeetingAutomationRunRequest,
+    allowed_channels: &[String],
 ) -> Result<SlackMeetingAutomationRunRequest, ApiError> {
     request.cadence_query = request.cadence_query.trim().to_owned();
     request.requester_slack_user_id = request.requester_slack_user_id.trim().to_owned();
     request.requester_slack_team_id = request.requester_slack_team_id.trim().to_owned();
     request.slack_channel_id = request.slack_channel_id.trim().to_owned();
+    request.slack_thread_ts = request
+        .slack_thread_ts
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
     request.request_message_id = request.request_message_id.trim().to_owned();
     request.requester_slack_email = request
         .requester_slack_email
@@ -2895,9 +3214,20 @@ fn validate_slack_meeting_automation_request(
             "requester_slack_user_id must be a Slack user ID".to_owned(),
         ));
     }
-    if !valid_slack_identifier(&request.slack_channel_id, 'D') {
+    let is_dm = valid_slack_identifier(&request.slack_channel_id, 'D');
+    let is_allowed_channel = ['C', 'G']
+        .iter()
+        .any(|prefix| valid_slack_identifier(&request.slack_channel_id, *prefix))
+        && allowed_channels.contains(&request.slack_channel_id);
+    if !is_dm && !is_allowed_channel {
         return Err(ApiError::BadRequest(
-            "meeting automation must be requested from an existing Slack DM".to_owned(),
+            "meeting automation must be requested from a Slack DM or an allowlisted channel"
+                .to_owned(),
+        ));
+    }
+    if !is_dm && request.slack_thread_ts.is_none() {
+        return Err(ApiError::BadRequest(
+            "slack_thread_ts is required for a channel meeting automation request".to_owned(),
         ));
     }
     if let Some(custom_instructions) = request.custom_instructions.as_ref()
@@ -2930,7 +3260,26 @@ fn validate_slack_meeting_automation_request(
             "request_message_id is invalid".to_owned(),
         ));
     }
+    if request
+        .slack_thread_ts
+        .as_ref()
+        .is_some_and(|thread_ts| thread_ts.len() > 128 || thread_ts.chars().any(char::is_control))
+    {
+        return Err(ApiError::BadRequest(
+            "slack_thread_ts is invalid".to_owned(),
+        ));
+    }
     Ok(request)
+}
+
+fn meeting_automation_allowed_slack_channels() -> Vec<String> {
+    env::var("MEETING_AUTOMATION_ALLOWED_SLACK_CHANNEL_IDS")
+        .unwrap_or_default()
+        .split(|character: char| character == ',' || character.is_whitespace())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn valid_slack_identifier(value: &str, prefix: char) -> bool {
@@ -2946,7 +3295,10 @@ fn valid_slack_user_id(value: &str) -> bool {
 #[cfg(test)]
 mod slack_meeting_automation_request_tests {
     use super::*;
-    use axum::{body::Body, http::Request};
+    use axum::{
+        body::Body,
+        http::{HeaderMap, Request, header},
+    };
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
     use tower::ServiceExt;
 
@@ -2958,6 +3310,7 @@ mod slack_meeting_automation_request_tests {
             requester_slack_team_id: WORLD_FOUNDATION_SLACK_TEAM_ID.to_owned(),
             requester_slack_email: Some("  person@world.org ".to_owned()),
             slack_channel_id: "D123ABC".to_owned(),
+            slack_thread_ts: None,
             request_message_id: "1786000000.123456".to_owned(),
         }
     }
@@ -2970,6 +3323,16 @@ mod slack_meeting_automation_request_tests {
             request.requester_slack_email.as_deref(),
             Some("person@world.org")
         );
+    }
+
+    #[test]
+    fn trusted_slackbot_ingress_can_use_slack_proxy_routes() {
+        let auth = ApiAuthConfig::testing_with_slack_ingress("slack-key", "jwt-secret");
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer slack-key".parse().unwrap());
+        let caller = auth.authenticate(&headers).unwrap();
+
+        assert!(caller_can_use_slack_proxy(&caller));
     }
 
     #[test]
@@ -3011,13 +3374,25 @@ mod slack_meeting_automation_request_tests {
     }
 
     #[test]
-    fn rejects_channels_and_invalid_identity_fields() {
+    fn accepts_allowlisted_channels_and_rejects_other_channels() {
         let mut channel_request = request();
         channel_request.slack_channel_id = "C123ABC".to_owned();
         assert!(matches!(
             validate_slack_meeting_automation_request(channel_request),
             Err(ApiError::BadRequest(_))
         ));
+
+        let mut allowed_channel_request = request();
+        allowed_channel_request.slack_channel_id = "C123ABC".to_owned();
+        allowed_channel_request.slack_thread_ts = Some("1786000000.123456".to_owned());
+        let allowed = vec!["C123ABC".to_owned()];
+        assert!(
+            validate_slack_meeting_automation_request_for_channels(
+                allowed_channel_request,
+                &allowed
+            )
+            .is_ok()
+        );
 
         let mut user_request = request();
         user_request.requester_slack_user_id = "not-a-user".to_owned();
@@ -3094,6 +3469,173 @@ mod slack_meeting_automation_request_tests {
                 .await
                 .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+}
+
+#[cfg(test)]
+mod meeting_scheduling_request_tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    fn request() -> MeetingSchedulingRunRequest {
+        MeetingSchedulingRunRequest {
+            operation: "  find_availability  ".to_owned(),
+            args: json!({"organizer_calendar_key": "wf-main"}),
+            requester_identity: None,
+            requester_slack_user_id: Some(" U123ABC ".to_owned()),
+            requester_slack_team_id: Some(format!(" {WORLD_FOUNDATION_SLACK_TEAM_ID} ")),
+            requester_slack_email: Some(" person@world.org ".to_owned()),
+            slack_channel_id: Some(" D123ABC ".to_owned()),
+            slack_thread_ts: Some(" 1786000000.123456 ".to_owned()),
+            request_message_id: " 1786000000.123456 ".to_owned(),
+        }
+    }
+
+    #[test]
+    fn accepts_and_normalizes_a_slack_scheduling_request() {
+        let request = validate_meeting_scheduling_request(request(), true).unwrap();
+
+        assert_eq!(request.operation, "find_availability");
+        assert_eq!(request.request_message_id, "1786000000.123456");
+        assert_eq!(request.slack_channel_id.as_deref(), Some("D123ABC"));
+        assert_eq!(
+            request.slack_thread_ts.as_deref(),
+            Some("1786000000.123456")
+        );
+
+        let workflow = meeting_scheduling_workflow_request(&request);
+        assert_eq!(workflow.workflow_name, MEETING_AUTOMATION_WORKFLOW);
+        assert_eq!(
+            workflow.idempotency_key.as_deref(),
+            Some("meeting-scheduling:U123ABC:1786000000.123456")
+        );
+        assert_eq!(
+            workflow.input.get("scheduling_operation"),
+            Some(&json!("find_availability"))
+        );
+    }
+
+    #[test]
+    fn rejects_unallowlisted_public_channel_and_provider_credentials() {
+        let mut public_request = request();
+        public_request.slack_channel_id = Some("C123ABC".to_owned());
+        assert!(matches!(
+            validate_meeting_scheduling_request(public_request, true),
+            Err(ApiError::BadRequest(_))
+        ));
+
+        let mut credential_request = request();
+        credential_request.args = json!({"access_token": "must-not-cross-broker"});
+        assert!(matches!(
+            validate_meeting_scheduling_request(credential_request, true),
+            Err(ApiError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_non_object_args_and_invalid_slack_identity() {
+        let mut args_request = request();
+        args_request.args = json!(["not-an-object"]);
+        assert!(matches!(
+            validate_meeting_scheduling_request(args_request, true),
+            Err(ApiError::BadRequest(_))
+        ));
+
+        let mut identity_request = request();
+        identity_request.requester_slack_user_id = Some("not-a-user".to_owned());
+        assert!(matches!(
+            validate_meeting_scheduling_request(identity_request, true),
+            Err(ApiError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn console_request_cannot_impersonate_slack_or_redirect_delivery() {
+        let mut request = console_meeting_scheduling_request(request());
+        request.requester_identity = Some("console".to_owned());
+        let request = validate_meeting_scheduling_request(request, false).unwrap();
+        let workflow = meeting_scheduling_workflow_request(&request);
+
+        assert_eq!(
+            workflow.input.get("requester_identity"),
+            Some(&json!("console"))
+        );
+        assert_eq!(
+            workflow.input.get("requester_slack_user_id"),
+            Some(&json!(""))
+        );
+        assert_eq!(
+            workflow.input.get("requester_slack_team_id"),
+            Some(&json!(""))
+        );
+        assert_eq!(workflow.input.get("slack_channel_id"), Some(&json!("")));
+        assert!(
+            workflow
+                .input
+                .get("slack_thread_ts")
+                .is_some_and(Value::is_null)
+        );
+        assert_eq!(
+            workflow.idempotency_key.as_deref(),
+            Some("meeting-scheduling:console:1786000000.123456")
+        );
+    }
+
+    #[test]
+    fn scheduling_routes_use_workflow_write_authorization() {
+        assert!(matches!(
+            route_access(&Method::POST, "/api/meeting-scheduling/runs"),
+            Some(RouteAccess::Capability(Capability::WorkflowsWrite))
+        ));
+        assert!(matches!(
+            route_access(&Method::POST, "/api/slack/meeting-scheduling/runs"),
+            Some(RouteAccess::PrincipalSlackProxy)
+        ));
+    }
+
+    #[test]
+    fn slack_identity_signature_is_bound_to_the_request_fields() {
+        unsafe {
+            env::set_var("SLACKBOT_API_KEY", "test-slack-broker-key");
+        }
+        let team_id = WORLD_FOUNDATION_SLACK_TEAM_ID;
+        let user_id = "U123ABC";
+        let channel_id = "D123ABC";
+        let thread_ts = "1786000000.123456";
+        let request_message_id = "1786000000.123456";
+        let payload =
+            format!("{team_id}\n{user_id}\n{channel_id}\n{thread_ts}\n{request_message_id}");
+        let mut mac = Hmac::<Sha256>::new_from_slice(b"test-slack-broker-key").unwrap();
+        mac.update(payload.as_bytes());
+        let signature = general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-centaur-slack-identity",
+            HeaderValue::from_str(&signature).unwrap(),
+        );
+
+        assert!(
+            verify_slack_request_identity(
+                &headers,
+                user_id,
+                team_id,
+                channel_id,
+                thread_ts,
+                request_message_id,
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            verify_slack_request_identity(
+                &headers,
+                "UOTHER",
+                team_id,
+                channel_id,
+                thread_ts,
+                request_message_id,
+            ),
+            Err(ApiError::Unauthorized(_))
+        ));
     }
 }
 

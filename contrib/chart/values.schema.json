@@ -333,6 +333,19 @@
         "sandboxHotIdleGraceSecs": { "type": "integer", "minimum": 0 },
         "workflowHostSandbox": { "type": "boolean" },
         "workflowHostResources": { "type": "object" },
+        "meetingScheduler": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "organizerCalendars": {
+              "anyOf": [
+                { "type": "string" },
+                { "type": "object", "additionalProperties": { "type": "string" } }
+              ]
+            },
+            "zoomHostUserId": { "type": "string" }
+          }
+        },
         "etl": {
           "type": "object",
           "properties": {

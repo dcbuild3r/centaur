@@ -650,6 +650,17 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     end
   end
 
+  test "fetch_current_for builds the current-version snapshot after a cache version bump" do
+    old = PrincipalSyncConfigSnapshot.fetch_for(@principal)
+    Principal.bump_sync_config_cache_versions(@principal.id)
+
+    assert_difference -> { PrincipalSyncConfigSnapshot.count }, 1 do
+      current = PrincipalSyncConfigSnapshot.fetch_current_for(@principal.reload)
+      assert_equal @principal.sync_config_cache_version, current.principal_cache_version
+      refute_equal old.id, current.id
+    end
+  end
+
   test "warm job builds a new snapshot after a cache version bump" do
     old = PrincipalSyncConfigSnapshot.fetch_for(@principal)
     Principal.bump_sync_config_cache_versions(@principal.id)

@@ -113,6 +113,20 @@ class PrincipalSyncConfigSnapshot < ApplicationRecord
     build_for(principal)
   end
 
+  # Proxy sync is a readiness boundary, not a best-effort permission read.
+  # Returning a previous-version snapshot here lets a newly assigned proxy
+  # acknowledge and serve an old config while the asynchronous warm job is
+  # still pending. Build the current version before returning so a proxy can
+  # never claim readiness against stale credentials or transforms.
+  def self.fetch_current_for(principal)
+    principal = principal.reload
+    version = principal.sync_config_cache_version
+    snapshot = find_by(principal: principal, principal_cache_version: version)
+    return snapshot if snapshot&.fresh_for?(principal)
+
+    build_for(principal)
+  end
+
   def self.prune_expired!
     where("updated_at < ?", RETENTION.ago).delete_all
   end
@@ -203,7 +217,7 @@ class PrincipalSyncConfigSnapshot < ApplicationRecord
     principal = proxy.principal
     return Principal::EMPTY_CONFIG.deep_dup unless principal
 
-    snapshot = fetch_for(principal)
+    snapshot = fetch_current_for(principal)
     copy = snapshot.config.deep_dup
     templates = snapshot.postgres_setting_templates
     copy["postgres"] = proxy_specific_postgres(proxy, copy["postgres"], templates) if templates.any?

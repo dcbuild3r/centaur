@@ -441,6 +441,12 @@ apiRs:
   workflowAllowedNames: ""
   # Requests/limits for the workflow-host sandbox pod (k8s resources map).
   workflowHostResources: {}
+  # Governed Calendar + Zoom booking remains disabled until provider shares,
+  # organizer aliases, and the workflow principal grants are verified.
+  meetingScheduler:
+    enabled: false
+    organizerCalendars: "{}"
+    zoomHostUserId: ""
   # Scheduled ETL workflow configuration. The chart renders these into api-rs
   # env so workflow discovery sees the right schedules, then derives the
   # workflow-host passthrough list from the same non-secret config.
@@ -568,6 +574,9 @@ slackbotv2:
   deleteAllowedUsers: ""
   deleteAllowedTeamIds: ""
   deleteAllowedChannels: ""
+  # World Slack channel IDs where an @Orbie cadence command may use the durable
+  # Meeting Ops path. DMs remain enabled; channels are denied unless listed.
+  meetingAutomationAllowedChannelIds: ""
   # Per-channel default harness / model / provider / reasoning, keyed by Slack
   # conversation id (the C…/G…/D… id). Each value is an object of optional
   # harness / model / provider / reasoning fields, using the same vocabulary as

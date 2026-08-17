@@ -21,6 +21,10 @@ apiRs:
   opVault: Centaur
   sandboxReadyTimeoutSecs: 240
   sandboxWarmPoolSize: 3
+  extraEnv:
+    MEETING_OPS_SCHEDULER_ENABLED: "true"
+    MEETING_OPS_SCHEDULER_CRON: "*/15 * * * *"
+    SESSION_SANDBOX_PASSTHROUGH_ENV: "MEETING_OPS_SCHEDULER_ENABLED,MEETING_OPS_SCHEDULER_CRON"
 
 # The Foundation fork is private, while this environment does not provision a
 # long-lived GitHub token for repo-cache. Use the immutable tool trees baked
@@ -49,6 +53,7 @@ ironProxy:
     DUNE_API_KEY: op://Centaur/DUNE_API_KEY/credential
     GOOGLE_TOKEN_JSON: op://Centaur/GOOGLE_TOKEN_JSON/credential
     MEETING_OPS_SCRIPT_ID: op://Centaur/MEETING_OPS_SCRIPT_ID/credential
+    ZOOM_ACCESS_TOKEN: op://Centaur/ZOOM_ACCESS_TOKEN/credential
 
 secrets:
   bootstrapSecretName: centaur-onepassword-bootstrap
@@ -69,6 +74,7 @@ console:
 
 slackbotv2:
   enabled: true
+  meetingAutomationAllowedChannelIds: "C0BM12ZNSTT,C0B5Y44QRED"
   # Allow World Foundation members to request deletion of Orbie-authored
   # messages with the configured wastebasket reaction.
   deleteAllowedTeamIds: "TL1HM8UUU"

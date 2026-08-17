@@ -285,6 +285,7 @@ fn slack_permission(channel_id: String) -> SlackChannelPermissionInput {
 }
 
 const WORLD_FOUNDATION_SLACK_TEAM_ID: &str = "TL1HM8UUU";
+const WF_TOOL_CHANNEL_IDS: [&str; 2] = ["C0BM12ZNSTT", "C0B5Y44QRED"];
 
 fn wf_tool_access_allowed(
     thread_key: &str,
@@ -298,6 +299,12 @@ fn wf_tool_access_allowed(
         return false;
     }
     if is_direct_message(Some(conversation_id)) {
+        return true;
+    }
+    // Slack ingress can legitimately omit the conversation name. Keep the
+    // governed internal channels usable by matching their stable IDs before
+    // falling back to the existing name policy.
+    if WF_TOOL_CHANNEL_IDS.contains(&conversation_id) {
         return true;
     }
     let Some(name) = conversation_name
@@ -411,6 +418,19 @@ mod tests {
 
     #[test]
     fn wf_tool_access_matches_wf_dms_and_internal_channels() {
+        for channel_id in WF_TOOL_CHANNEL_IDS {
+            assert!(wf_tool_access_allowed(
+                &format!("slack:TL1HM8UUU:{channel_id}:1773364194.179929"),
+                Some("TL1HM8UUU"),
+                None,
+            ));
+            assert!(!wf_tool_access_allowed(
+                &format!("slack:TOTHER:{channel_id}:1773364194.179929"),
+                Some("TOTHER"),
+                None,
+            ));
+        }
+
         for name in ["wf-legal-ask", "#wf-infrastructure", "ai-agents"] {
             assert!(wf_tool_access_allowed(
                 "slack:TL1HM8UUU:C123:1773364194.179929",

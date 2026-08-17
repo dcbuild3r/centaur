@@ -736,6 +736,31 @@ describe('CodexAppServerRendererEventMapper', () => {
     })
   })
 
+  it('includes the failure reason after a partial final answer', () => {
+    const mapper = new CodexAppServerRendererEventMapper()
+    mapper.process({
+      type: 'item.started',
+      item: { id: 'answer-1', type: 'agentMessage', phase: 'final_answer' }
+    })
+    mapper.process({
+      type: 'item.agentMessage.delta',
+      itemId: 'answer-1',
+      delta: 'Partial answer before the sandbox stopped.'
+    })
+
+    const events = mapper.process({
+      eventKind: 'session.execution_failed',
+      data: { error: 'sandbox exited' }
+    })
+
+    expect(events.at(-1)).toMatchObject({
+      type: 'renderer.done',
+      answerMarkdown:
+        'Partial answer before the sandbox stopped.\n\nExecution failed: sandbox exited',
+      error: 'sandbox exited'
+    })
+  })
+
   it('emits interrupted final text for cancelled Rust sessions', async () => {
     const chunks = await collect(
       codexAppServerToChatSdkStream(

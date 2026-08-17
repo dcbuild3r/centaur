@@ -300,6 +300,7 @@ jobs:
           helm upgrade --install "$HELM_RELEASE" contrib/chart \
             --namespace "$HELM_NAMESPACE" \
             --take-ownership \
+            --force-conflicts \
             --values contrib/chart/values.aws-dev.yaml \
             --set "apiRs.image.repository=$ECR_REGISTRY/centaur-api-rs" \
             --set "apiRs.image.tag=$GITHUB_SHA" \
@@ -445,6 +446,44 @@ jobs:
             --op-vault Centaur \
             --source-refs '{"NOTION_API_KEY":"op://Centaur/Centaur.run - NOTION_API_KEY/password"}' \
             principals grant prn_3hpCsrtk --tool notion
+
+      - name: Verify Meeting Ops credential wiring
+        run: |
+          set -euo pipefail
+
+          principal_state="$(kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            principals show workflow-meeting-automation)"
+          grep -Fq 'tool-meeting-ops (' <<<"$principal_state"
+          grep -Fq 'oauth_token OAuth refresh_token' <<<"$principal_state"
+          grep -Fq 'static MEETING_OPS_SCRIPT_ID' <<<"$principal_state"
+          grep -Fq '  MEETING_OPS_SCRIPT_ID' <<<"$principal_state"
+
+          role_state="$(kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            roles show tool-meeting-ops)"
+          grep -Fq 'MEETING_OPS_SCRIPT_ID' <<<"$role_state"
+          grep -Fq 'OAuth refresh_token' <<<"$role_state"
+
+          script_state="$(kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            secrets show tool-meeting-ops-meeting-ops-script-id)"
+          grep -Fq '"secret_ref": "op://Centaur/MEETING_OPS_SCRIPT_ID/credential"' <<<"$script_state"
+
+          oauth_state="$(kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            secrets show tool-meeting-ops-oauth-https-oauth2-googleapis-com-token)"
+          grep -Fq '"secret_ref": "op://Centaur/GOOGLE_TOKEN_JSON/credential"' <<<"$oauth_state"
+
+          echo "Meeting Ops role and managed secret references are present"
 
       - name: Collect deployment diagnostics
         if: failure()

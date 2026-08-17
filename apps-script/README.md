@@ -9,8 +9,13 @@ separate `Format` tab, and exposes an idempotent notification outbox for Orbie.
 Cadences have two sources:
 
 - Public cadences are published in the Notion **Cadences** page/database.
-- Private cadences are created in an owner’s Orbie DM and carry explicit
-  `ownerSlackUserId`, `accessSlackUserIds`, and `notificationRecipients`.
+- Private cadences are created in a copy of the **Orbie Private Cadence
+  Template** kept in the owner's private World Foundation pages. The owner
+  invites `orbie-automation@world.org` to that database, and Orbie normalizes
+  its Notion row into the worker contract with the explicit
+  `ownerSlackUserId` and `notificationRecipients` required for private
+  delivery. The worker contract also accepts optional `accessSlackUserIds`
+  for future private team-cadence sources.
 
 The worker never receives Notion or Slack credentials in a cadence payload.
 

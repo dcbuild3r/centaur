@@ -310,6 +310,11 @@ RUN install -d -m 0755 /etc/centaur /opt/centaur
 COPY --link centaur_sdk/ /opt/centaur/centaur_sdk/
 COPY --link --chmod=0755 services/sandbox/git-hooks/ /opt/centaur/git-hooks/
 COPY --link --chown=1001:1001 tools/ /opt/centaur/tools/
+# Notion clients send one placeholder Authorization header for iron-proxy to
+# replace. Inject mode adds a second Authorization header and Notion returns
+# 401, so reject an agent image that carries the old contract.
+RUN grep -Fq 'name = "NOTION_API_KEY", mode = "replace"' \
+      /opt/centaur/tools/productivity/notion/pyproject.toml
 COPY --link --chmod=644 services/sandbox/codex-auth.json /etc/centaur/codex-auth.default.json
 COPY --link --chmod=644 services/sandbox/claude-credentials.json /etc/centaur/claude-credentials.default.json
 COPY --link --chmod=755 services/sandbox/md2docx.py /usr/local/bin/md2docx

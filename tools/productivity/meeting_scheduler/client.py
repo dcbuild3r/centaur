@@ -1,0 +1,1825 @@
+"""Governed Calendar + Zoom scheduling operations for Orbie workflows.
+
+The tool deliberately does not expose arbitrary Calendar writes. Calendar IDs
+are resolved from a managed organizer alias, participant availability is read
+through free/busy only, and every write carries a stable Orbie occurrence key.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import datetime as dt
+import hashlib
+import json
+import os
+import re
+import secrets
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import Any
+from urllib.parse import quote, urlparse, urlunparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+import asyncpg
+import httplib2
+import httpx
+import socks
+from googleapiclient.discovery import build
+
+from centaur_sdk.tool_sdk import secret
+
+try:
+    from api.integrations.gsuite.http import build_http as _shared_build_http
+except ModuleNotFoundError:
+    _shared_build_http = None
+
+POSTGRES_DSN = "CENTAUR_POSTGRES_DSN"
+ZOOM_ACCESS_TOKEN = "ZOOM_ACCESS_TOKEN"
+SCHEDULER_ENABLED = "MEETING_SCHEDULER_ENABLED"
+ORGANIZER_CALENDARS = "MEETING_ORGANIZER_CALENDARS"
+ZOOM_HOST_USER_ID = "MEETING_ZOOM_HOST_USER_ID"
+DEFAULT_DATABASE = "ai_v2"
+DEFAULT_TIME_ZONE = "UTC"
+MAX_CANDIDATES = 32
+SCHEDULER_STATUSES = {"pending", "booked", "blocked", "completed", "cancelled"}
+EMAIL_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
+
+
+class MeetingSchedulerError(RuntimeError):
+    """Raised for fail-closed scheduling or provider errors."""
+
+
+@dataclass(frozen=True)
+class _OperationFailure:
+    error: Exception
+
+
+def _secret_value(name: str, default: str = "") -> str:
+    """Read operator config while treating server-mode placeholders as absent."""
+
+    value = secret(name, default)
+    return default if value in (None, "", name) else value
+
+
+def _config_value(name: str, default: str = "") -> str:
+    """Read non-secret deployment configuration from the sandbox environment."""
+
+    try:
+        return os.environ[name]
+    except KeyError:
+        return default
+
+
+def _enabled() -> bool:
+    value = _config_value(SCHEDULER_ENABLED, "false").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _require_enabled() -> None:
+    if not _enabled():
+        raise MeetingSchedulerError("meeting scheduling is disabled")
+
+
+def _build_http() -> httplib2.Http:
+    if _shared_build_http is not None:
+        return _shared_build_http()
+    proxy_url = _config_value("HTTPS_PROXY") or _config_value("https_proxy")
+    proxy_info = None
+    if proxy_url:
+        parts = urlparse(proxy_url)
+        proxy_info = httplib2.ProxyInfo(
+            proxy_type=socks.PROXY_TYPE_HTTP,
+            proxy_host=parts.hostname,
+            proxy_port=parts.port or 8080,
+        )
+    ca_certs = _config_value("SSL_CERT_FILE") or _config_value("REQUESTS_CA_BUNDLE")
+    return httplib2.Http(proxy_info=proxy_info, ca_certs=ca_certs)
+
+
+def get_calendar_service():
+    return build("calendar", "v3", http=_build_http())
+
+
+def _parse_rfc3339(value: str, *, field: str) -> dt.datetime:
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise MeetingSchedulerError(f"{field} must be an RFC3339 timestamp") from error
+    if parsed.tzinfo is None:
+        raise MeetingSchedulerError(f"{field} must include a timezone offset")
+    return parsed.astimezone(dt.UTC)
+
+
+def _rfc3339(value: dt.datetime) -> str:
+    return value.astimezone(dt.UTC).isoformat().replace("+00:00", "Z")
+
+
+def _rfc3339_in_zone(value: dt.datetime, time_zone: str) -> str:
+    localized = value.astimezone(_zone(time_zone))
+    if localized.utcoffset() == dt.timedelta(0):
+        return _rfc3339(localized)
+    return localized.isoformat()
+
+
+def _positive_int(value: Any, field: str) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as error:
+        raise MeetingSchedulerError(f"{field} must be a positive integer") from error
+    if number <= 0:
+        raise MeetingSchedulerError(f"{field} must be a positive integer")
+    return number
+
+
+def _email_list(values: Any) -> list[str]:
+    if isinstance(values, str):
+        values = [item.strip() for item in values.replace(";", ",").split(",")]
+    if not isinstance(values, list):
+        raise MeetingSchedulerError("attendee_emails must be a list of exact email addresses")
+    normalized: list[str] = []
+    for value in values:
+        email = str(value or "").strip().lower()
+        if not EMAIL_RE.fullmatch(email):
+            raise MeetingSchedulerError("attendee_emails must contain exact email addresses")
+        if email not in normalized:
+            normalized.append(email)
+    if not normalized:
+        raise MeetingSchedulerError("at least one attendee email is required")
+    return normalized
+
+
+def _organizer_calendar_map() -> dict[str, str]:
+    raw = _config_value(ORGANIZER_CALENDARS, "{}").strip()
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise MeetingSchedulerError(f"{ORGANIZER_CALENDARS} must be a JSON object") from error
+    if not isinstance(value, dict):
+        raise MeetingSchedulerError(f"{ORGANIZER_CALENDARS} must be a JSON object")
+    return {
+        str(key): str(calendar_id) for key, calendar_id in value.items() if str(calendar_id).strip()
+    }
+
+
+def _resolve_organizer(alias: str) -> str:
+    alias = str(alias or "").strip()
+    calendar_id = _organizer_calendar_map().get(alias)
+    if not calendar_id:
+        raise MeetingSchedulerError(f"organizer calendar {alias!r} is not allowlisted")
+    return calendar_id
+
+
+def _database_url() -> str:
+    value = _secret_value(POSTGRES_DSN)
+    value = value.strip()
+    if not value or value == POSTGRES_DSN:
+        raise MeetingSchedulerError(f"{POSTGRES_DSN} is required")
+    parsed = urlparse(value)
+    if parsed.scheme and parsed.netloc and parsed.path in ("", "/"):
+        database = _config_value("MEETING_SCHEDULER_POSTGRES_DATABASE", DEFAULT_DATABASE)
+        value = urlunparse(parsed._replace(path=f"/{database}"))
+    return value
+
+
+async def _with_connection(
+    operation: Callable[[asyncpg.Connection], Awaitable[Any]],
+) -> Any:
+    connection = await asyncpg.connect(_database_url(), command_timeout=30)
+    try:
+        return await operation(connection)
+    finally:
+        await connection.close()
+
+
+async def _with_occurrence_lock(
+    key: str,
+    operation: Callable[[asyncpg.Connection], Awaitable[Any]],
+) -> Any:
+    """Run one occurrence operation under a cross-replica transaction lock."""
+
+    connection = await asyncpg.connect(_database_url(), command_timeout=30)
+    try:
+        async with connection.transaction():
+            await connection.execute("select pg_advisory_xact_lock(hashtextextended($1, 0))", key)
+            return await operation(connection)
+    finally:
+        await connection.close()
+
+
+def _serialize_row(row: asyncpg.Record | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    result = dict(row)
+    for key, value in result.items():
+        if isinstance(value, (dt.datetime, dt.date)):
+            result[key] = value.isoformat()
+    return result
+
+
+def _require_occurrence_key(value: Any) -> str:
+    key = str(value or "").strip()
+    if not key or len(key) > 240 or any(char.isspace() for char in key):
+        raise MeetingSchedulerError("occurrence_key must be a non-empty, bounded token")
+    return key
+
+
+def _slot_confirmation_token(
+    *,
+    start: dt.datetime,
+    duration: int,
+    time_zone: str,
+    attendees: list[str],
+    organizer_calendar_key: str,
+) -> str:
+    """Bind an ad-hoc write receipt to the exact slot and attendee set."""
+
+    payload = json.dumps(
+        {
+            "attendees": sorted(set(attendees)),
+            "duration": duration,
+            "organizer": organizer_calendar_key,
+            "start": _rfc3339(start),
+            "time_zone": time_zone,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return f"slot-v1:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
+
+
+def _cancel_confirmation_token(*, occurrence_key: str, organizer_calendar_key: str) -> str:
+    payload = f"cancel-v1:{organizer_calendar_key}:{occurrence_key}"
+    return f"cancel-v1:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
+
+
+def _matches_confirmation(actual: str | None, expected: str) -> bool:
+    return bool(actual) and secrets.compare_digest(str(actual).strip(), expected)
+
+
+def _zone(value: str) -> ZoneInfo:
+    name = str(value or DEFAULT_TIME_ZONE).strip()
+    try:
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError as error:
+        raise MeetingSchedulerError(f"unknown time zone {name!r}") from error
+
+
+def _clock_minutes(value: str, *, field: str) -> int:
+    try:
+        hour, minute = (int(item) for item in str(value).split(":", 1))
+    except (TypeError, ValueError) as error:
+        raise MeetingSchedulerError(f"{field} must use HH:MM") from error
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise MeetingSchedulerError(f"{field} must use valid HH:MM values")
+    return hour * 60 + minute
+
+
+def _busy_intervals(response: dict[str, Any]) -> list[tuple[dt.datetime, dt.datetime]]:
+    intervals: list[tuple[dt.datetime, dt.datetime]] = []
+    for calendar in (response.get("calendars") or {}).values():
+        if not isinstance(calendar, dict):
+            continue
+        for busy in calendar.get("busy") or []:
+            try:
+                start = _parse_rfc3339(str(busy["start"]), field="busy.start")
+                end = _parse_rfc3339(str(busy["end"]), field="busy.end")
+            except (KeyError, MeetingSchedulerError):
+                continue
+            if end > start:
+                intervals.append((start, end))
+    return intervals
+
+
+class MeetingSchedulerClient:
+    """Narrow provider client; public methods are tool methods."""
+
+    def _calendar_ids(
+        self, organizer_calendar_key: str, attendee_emails: list[str]
+    ) -> tuple[str, list[str]]:
+        organizer_id = _resolve_organizer(organizer_calendar_key)
+        calendars = list(dict.fromkeys([organizer_id, *attendee_emails]))
+        return organizer_id, calendars
+
+    def _freebusy(
+        self,
+        *,
+        calendar_ids: list[str],
+        time_min: str,
+        time_max: str,
+    ) -> dict[str, Any]:
+        service = get_calendar_service()
+        try:
+            response = (
+                service.freebusy()
+                .query(
+                    body={
+                        "timeMin": time_min,
+                        "timeMax": time_max,
+                        "items": [{"id": calendar_id} for calendar_id in calendar_ids],
+                    }
+                )
+                .execute()
+            )
+        except Exception as error:
+            raise MeetingSchedulerError("Google Calendar free/busy query failed") from error
+        calendars = response.get("calendars") if isinstance(response, dict) else None
+        if not isinstance(calendars, dict):
+            raise MeetingSchedulerError("Google Calendar returned no free/busy calendars")
+        for calendar_id in calendar_ids:
+            calendar = calendars.get(calendar_id)
+            if not isinstance(calendar, dict) or calendar.get("errors"):
+                raise MeetingSchedulerError(
+                    "free/busy access is unavailable for an approved calendar"
+                )
+        return response
+
+    def _assert_slot_free(
+        self,
+        *,
+        organizer_id: str,
+        attendee_emails: list[str],
+        start: dt.datetime,
+        duration: int,
+    ) -> None:
+        response = self._freebusy(
+            calendar_ids=list(dict.fromkeys([organizer_id, *attendee_emails])),
+            time_min=_rfc3339(start),
+            time_max=_rfc3339(start + dt.timedelta(minutes=duration)),
+        )
+        if _busy_intervals(response):
+            raise MeetingSchedulerError("requested meeting slot is no longer free")
+
+    def find_availability(
+        self,
+        organizer_calendar_key: str,
+        attendee_emails: list[str],
+        time_min: str,
+        time_max: str,
+        duration_minutes: int,
+        response_timezone: str = DEFAULT_TIME_ZONE,
+        working_start: str = "09:00",
+        working_end: str = "17:00",
+    ) -> dict[str, Any]:
+        """Return free/busy-derived candidate slots without event details."""
+        _require_enabled()
+        attendees = _email_list(attendee_emails)
+        duration = _positive_int(duration_minutes, "duration_minutes")
+        start = _parse_rfc3339(time_min, field="time_min")
+        end = _parse_rfc3339(time_max, field="time_max")
+        if end <= start:
+            raise MeetingSchedulerError("time_max must be after time_min")
+        zone = _zone(response_timezone)
+        working_start_minutes = _clock_minutes(working_start, field="working_start")
+        working_end_minutes = _clock_minutes(working_end, field="working_end")
+        if working_end_minutes <= working_start_minutes:
+            raise MeetingSchedulerError("working_end must be after working_start")
+        _organizer_id, calendars = self._calendar_ids(organizer_calendar_key, attendees)
+        freebusy = self._freebusy(
+            calendar_ids=calendars, time_min=_rfc3339(start), time_max=_rfc3339(end)
+        )
+        busy = _busy_intervals(freebusy)
+        slot = start
+        candidates: list[dict[str, str]] = []
+        step = dt.timedelta(minutes=15)
+        length = dt.timedelta(minutes=duration)
+        while slot + length <= end and len(candidates) < MAX_CANDIDATES:
+            candidate_end = slot + length
+            local_start = slot.astimezone(zone)
+            local_end = candidate_end.astimezone(zone)
+            local_start_minutes = local_start.hour * 60 + local_start.minute
+            local_end_minutes = local_end.hour * 60 + local_end.minute
+            in_working_hours = (
+                local_start_minutes >= working_start_minutes
+                and local_end_minutes <= working_end_minutes
+                and local_start.date() == local_end.date()
+            )
+            conflict = any(
+                slot < busy_end and candidate_end > busy_start for busy_start, busy_end in busy
+            )
+            if in_working_hours and not conflict:
+                candidates.append(
+                    {
+                        "start": _rfc3339_in_zone(slot, response_timezone),
+                        "end": _rfc3339_in_zone(candidate_end, response_timezone),
+                        "timezone": response_timezone,
+                        "confirmationToken": _slot_confirmation_token(
+                            start=slot,
+                            duration=duration,
+                            time_zone=response_timezone,
+                            attendees=attendees,
+                            organizer_calendar_key=organizer_calendar_key,
+                        ),
+                    }
+                )
+            slot += step
+        return {"status": "ok", "candidates": candidates, "calendar_count": len(calendars)}
+
+    async def _get_occurrence(
+        self, connection: asyncpg.Connection, key: str
+    ) -> dict[str, Any] | None:
+        return _serialize_row(
+            await connection.fetchrow(
+                "select * from orbie_meeting_occurrences where occurrence_key = $1",
+                key,
+            )
+        )
+
+    async def _claim_occurrence_row(
+        self,
+        connection: asyncpg.Connection,
+        *,
+        key: str,
+        cadence_id: str | None,
+        request_id: str | None,
+        title: str,
+        requested_start: dt.datetime,
+        duration: int,
+        time_zone: str,
+        organizer_key: str,
+        organizer_id: str,
+        attendees: list[str],
+        allow_parameter_update: bool,
+    ) -> tuple[dict[str, Any], bool]:
+        inserted = await connection.fetchrow(
+            """
+            insert into orbie_meeting_occurrences
+                (occurrence_key, cadence_id, request_id, title, requested_start,
+                 duration_minutes, time_zone, organizer_calendar_key,
+                 organizer_calendar_id, attendee_emails)
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            on conflict (occurrence_key) do nothing
+            returning occurrence_key
+            """,
+            key,
+            cadence_id,
+            request_id,
+            title,
+            requested_start,
+            duration,
+            time_zone,
+            organizer_key,
+            organizer_id,
+            attendees,
+        )
+        row = await connection.fetchrow(
+            "select * from orbie_meeting_occurrences where occurrence_key = $1 for update",
+            key,
+        )
+        if row is None:
+            raise MeetingSchedulerError("failed to create occurrence state")
+        current = _serialize_row(row) or {}
+        if not inserted:
+            stored_organizer_key = str(current.get("organizer_calendar_key") or "").strip()
+            stored_organizer_id = str(current.get("organizer_calendar_id") or "").strip()
+            if stored_organizer_key and stored_organizer_key != organizer_key:
+                raise MeetingSchedulerError("occurrence identity does not match organizer calendar")
+            if stored_organizer_id and stored_organizer_id != organizer_id:
+                raise MeetingSchedulerError("occurrence identity does not match organizer calendar")
+        stored_attendees = [
+            str(item).strip().lower()
+            for item in (current.get("attendee_emails") or [])
+            if str(item).strip()
+        ]
+        stored_start = current.get("requested_start")
+        start_matches = False
+        if stored_start:
+            try:
+                start_matches = (
+                    _parse_rfc3339(str(stored_start), field="requested_start") == requested_start
+                )
+            except MeetingSchedulerError:
+                start_matches = False
+        parameters_match = (
+            str(current.get("title") or "") == title
+            and start_matches
+            and int(current.get("duration_minutes") or 0) == duration
+            and str(current.get("time_zone") or "") == time_zone
+            and stored_attendees == attendees
+        )
+        if not parameters_match and (
+            not allow_parameter_update
+            or current.get("status") in {"completed", "cancelled"}
+        ):
+            raise MeetingSchedulerError("occurrence parameters cannot be changed by a retry")
+        if current.get("status") not in {"booked", "completed", "cancelled"}:
+            await connection.execute(
+                """
+                update orbie_meeting_occurrences
+                set title = $2, requested_start = $3, duration_minutes = $4,
+                    time_zone = $5, attendee_emails = $6, status = 'pending',
+                    last_error = '', updated_at = now()
+                where occurrence_key = $1
+                """,
+                key,
+                title,
+                requested_start,
+                duration,
+                time_zone,
+                attendees,
+            )
+            current.update(
+                {
+                    "title": title,
+                    "requested_start": requested_start.isoformat(),
+                    "duration_minutes": duration,
+                    "time_zone": time_zone,
+                    "attendee_emails": attendees,
+                    "last_error": "",
+                }
+            )
+            current["status"] = "pending"
+        return current, inserted is not None
+
+    async def _claim_occurrence(
+        self,
+        *,
+        key: str,
+        cadence_id: str | None,
+        request_id: str | None,
+        title: str,
+        requested_start: dt.datetime,
+        duration: int,
+        time_zone: str,
+        organizer_key: str,
+        organizer_id: str,
+        attendees: list[str],
+    ) -> dict[str, Any]:
+        async def claim(connection: asyncpg.Connection) -> dict[str, Any]:
+            async with connection.transaction():
+                await connection.execute(
+                    """
+                    insert into orbie_meeting_occurrences
+                        (occurrence_key, cadence_id, request_id, title, requested_start,
+                         duration_minutes, time_zone, organizer_calendar_key,
+                         organizer_calendar_id, attendee_emails)
+                    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    on conflict (occurrence_key) do nothing
+                    """,
+                    key,
+                    cadence_id,
+                    request_id,
+                    title,
+                    requested_start,
+                    duration,
+                    time_zone,
+                    organizer_key,
+                    organizer_id,
+                    attendees,
+                )
+                row = await connection.fetchrow(
+                    "select * from orbie_meeting_occurrences where occurrence_key = $1 for update",
+                    key,
+                )
+                if row is None:
+                    raise MeetingSchedulerError("failed to create occurrence state")
+                current = _serialize_row(row) or {}
+                if current.get("status") in {"booked", "completed", "cancelled"}:
+                    return current
+                await connection.execute(
+                    "update orbie_meeting_occurrences set status = 'pending', updated_at = now() where occurrence_key = $1",
+                    key,
+                )
+                current["status"] = "pending"
+                return current
+
+        return await _with_connection(claim)
+
+    async def _update_provider_state(self, key: str, **values: str) -> dict[str, Any] | None:
+        allowed = {
+            "zoom_meeting_id": values.get("zoom_id"),
+            "zoom_join_url": values.get("join_url"),
+            "calendar_event_id": values.get("event_id"),
+            "calendar_html_link": values.get("event_link"),
+        }
+        assignments: list[str] = []
+        args: list[Any] = [key]
+        for column, value in allowed.items():
+            if value is not None:
+                args.append(value)
+                assignments.append(f"{column} = ${len(args)}")
+        if not assignments:
+            return await self._get_existing(key)
+        assignments.append("updated_at = now()")
+        return await _with_connection(
+            lambda connection: self._update_provider_row(
+                connection, key, ", ".join(assignments), args[1:]
+            )
+        )
+
+    async def _update_provider_row(
+        self,
+        connection: asyncpg.Connection,
+        key: str,
+        assignments: str,
+        values: list[Any],
+    ) -> dict[str, Any] | None:
+        row = await connection.fetchrow(
+            f"update orbie_meeting_occurrences set {assignments} where occurrence_key = $1 returning *",
+            key,
+            *values,
+        )
+        return _serialize_row(row)
+
+    def _zoom_headers(self) -> dict[str, str]:
+        # Production uses the brokered ZOOM_ACCESS_TOKEN HTTP secret. The
+        # proxy injects the bearer token; the tool never receives Zoom client
+        # credentials or exposes them to a caller. A local token may be used
+        # for an explicit standalone CLI run.
+        token = _secret_value(ZOOM_ACCESS_TOKEN).strip()
+        headers = {"Content-Type": "application/json"}
+        if token and token != ZOOM_ACCESS_TOKEN:
+            headers["Authorization"] = f"Bearer {token}"
+        return headers
+
+    def _zoom_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        payload: dict[str, Any] | None = None,
+        occurrence_key: str = "",
+    ) -> dict[str, Any]:
+        url = f"https://api.zoom.us/v2{path}"
+        headers = self._zoom_headers()
+        if occurrence_key:
+            headers["Idempotency-Key"] = occurrence_key
+        with httpx.Client(timeout=30.0) as client:
+            response = client.request(method, url, headers=headers, json=payload)
+        if response.status_code == 404 and method.upper() == "DELETE":
+            return {}
+        if response.status_code >= 400:
+            raise MeetingSchedulerError(f"Zoom request failed with HTTP {response.status_code}")
+        if not response.content:
+            return {}
+        body = response.json()
+        if not isinstance(body, dict):
+            raise MeetingSchedulerError("Zoom returned an invalid response")
+        return body
+
+    def _zoom_create(
+        self, *, title: str, start: dt.datetime, duration: int, time_zone: str, occurrence_key: str
+    ) -> dict[str, Any]:
+        host = _config_value(ZOOM_HOST_USER_ID).strip()
+        if not host:
+            raise MeetingSchedulerError(f"{ZOOM_HOST_USER_ID} is required")
+        return self._zoom_request(
+            "POST",
+            f"/users/{host}/meetings",
+            occurrence_key=occurrence_key,
+            payload={
+                "topic": title,
+                "type": 2,
+                "start_time": _rfc3339(start),
+                "duration": duration,
+                "timezone": time_zone,
+                "tracking_fields": [{"field": "orbie_occurrence_key", "value": occurrence_key}],
+                "settings": {"join_before_host": False, "waiting_room": True},
+            },
+        )
+
+    @staticmethod
+    def _calendar_event_id(key: str) -> str:
+        """Return a deterministic Google Calendar event ID for retry reuse."""
+
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        # Google Calendar event IDs are restricted to lowercase letters a-v
+        # and digits. Keep the stable identity while avoiding separators such
+        # as ``_`` that the Calendar API rejects.
+        return f"orbie{digest[:40]}"
+
+    def _calendar_event_body(
+        self,
+        *,
+        key: str,
+        title: str,
+        start: dt.datetime,
+        duration: int,
+        time_zone: str,
+        attendees: list[str],
+        join_url: str,
+    ) -> dict[str, Any]:
+        end = start + dt.timedelta(minutes=duration)
+        return {
+            "summary": title,
+            "description": f"World Foundation Zoom: {join_url}",
+            "location": join_url,
+            "start": {"dateTime": _rfc3339_in_zone(start, time_zone), "timeZone": time_zone},
+            "end": {"dateTime": _rfc3339_in_zone(end, time_zone), "timeZone": time_zone},
+            "attendees": [{"email": email} for email in attendees],
+            "extendedProperties": {"private": {"orbieOccurrenceKey": key}},
+        }
+
+    def _calendar_find_by_occurrence(self, calendar_id: str, key: str) -> dict[str, Any] | None:
+        try:
+            response = (
+                get_calendar_service()
+                .events()
+                .list(
+                    calendarId=calendar_id,
+                    privateExtendedProperty=f"orbieOccurrenceKey={key}",
+                    showDeleted=False,
+                    maxResults=1,
+                )
+                .execute()
+            )
+        except Exception:
+            return None
+        items = response.get("items") if isinstance(response, dict) else None
+        return (
+            items[0] if isinstance(items, list) and items and isinstance(items[0], dict) else None
+        )
+
+    def _zoom_find_by_occurrence(self, key: str) -> dict[str, Any] | None:
+        host = _config_value(ZOOM_HOST_USER_ID).strip()
+        if not host:
+            return None
+        next_page_token = ""
+        # The occurrence key is the retry identity. Search all bounded pages so
+        # an older occurrence cannot be missed and recreated after a partial
+        # failure when the host has more than one page of scheduled meetings.
+        for _ in range(20):
+            query = f"/users/{quote(host, safe='')}/meetings?type=scheduled&page_size=300"
+            if next_page_token:
+                query += f"&next_page_token={quote(next_page_token, safe='')}"
+            try:
+                response = self._zoom_request("GET", query)
+            except Exception:
+                return None
+            meetings = response.get("meetings") if isinstance(response, dict) else None
+            for meeting in meetings if isinstance(meetings, list) else []:
+                if not isinstance(meeting, dict):
+                    continue
+                for tracking in meeting.get("tracking_fields") or []:
+                    if isinstance(tracking, dict) and tracking.get("value") == key:
+                        return meeting
+            next_page_token = str(response.get("next_page_token") or "").strip()
+            if not next_page_token:
+                break
+        return None
+
+    def book_meeting(
+        self,
+        occurrence_key: str,
+        title: str,
+        start: str,
+        duration_minutes: int,
+        time_zone: str,
+        attendee_emails: list[str],
+        organizer_calendar_key: str,
+        cadence_id: str | None = None,
+        request_id: str | None = None,
+        mode: str = "cadence",
+        confirmation_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Create or reuse one Zoom + Calendar meeting occurrence."""
+        _require_enabled()
+        key = _require_occurrence_key(occurrence_key)
+        if mode not in {"cadence", "ad_hoc"}:
+            raise MeetingSchedulerError("mode must be cadence or ad_hoc")
+        if mode == "ad_hoc" and not str(confirmation_token or "").strip():
+            raise MeetingSchedulerError("ad-hoc booking requires explicit confirmation")
+        attendees = _email_list(attendee_emails)
+        start_at = _parse_rfc3339(start, field="start")
+        duration = _positive_int(duration_minutes, "duration_minutes")
+        organizer_id, _ = self._calendar_ids(organizer_calendar_key, attendees)
+        if start_at <= dt.datetime.now(dt.UTC):
+            raise MeetingSchedulerError("meeting start must be in the future")
+        if mode == "ad_hoc":
+            expected_confirmation = _slot_confirmation_token(
+                start=start_at,
+                duration=duration,
+                time_zone=time_zone,
+                attendees=attendees,
+                organizer_calendar_key=organizer_calendar_key,
+            )
+            if not _matches_confirmation(confirmation_token, expected_confirmation):
+                raise MeetingSchedulerError(
+                    "confirmation does not match the requested meeting slot"
+                )
+            self._assert_slot_free(
+                organizer_id=organizer_id,
+                attendee_emails=attendees,
+                start=start_at,
+                duration=duration,
+            )
+        result = asyncio.run(
+            self._book_meeting_locked(
+                key=key,
+                cadence_id=cadence_id,
+                request_id=request_id,
+                title=title,
+                start_at=start_at,
+                duration=duration,
+                time_zone=time_zone,
+                organizer_calendar_key=organizer_calendar_key,
+                organizer_id=organizer_id,
+                attendees=attendees,
+                allow_parameter_update=mode == "cadence",
+                check_slot_free=mode == "ad_hoc",
+            )
+        )
+        if isinstance(result, _OperationFailure):
+            error = result.error
+            if isinstance(error, MeetingSchedulerError):
+                raise error
+            raise MeetingSchedulerError("meeting provider booking failed") from error
+        return result
+
+    async def _book_meeting_locked(
+        self,
+        *,
+        key: str,
+        cadence_id: str | None,
+        request_id: str | None,
+        title: str,
+        start_at: dt.datetime,
+        duration: int,
+        time_zone: str,
+        organizer_calendar_key: str,
+        organizer_id: str,
+        attendees: list[str],
+        allow_parameter_update: bool,
+        check_slot_free: bool,
+    ) -> dict[str, Any] | _OperationFailure:
+        async def operation(connection: asyncpg.Connection) -> dict[str, Any] | _OperationFailure:
+            organizer_date = start_at.astimezone(_zone(time_zone)).date().isoformat()
+            await connection.execute(
+                "select pg_advisory_xact_lock(hashtextextended($1, 0))",
+                f"organizer-day:{organizer_id}:{organizer_date}",
+            )
+            state, inserted = await self._claim_occurrence_row(
+                connection,
+                key=key,
+                cadence_id=cadence_id,
+                request_id=request_id,
+                title=title,
+                requested_start=start_at,
+                duration=duration,
+                time_zone=time_zone,
+                organizer_key=organizer_calendar_key,
+                organizer_id=organizer_id,
+                attendees=attendees,
+                allow_parameter_update=allow_parameter_update,
+            )
+            if not inserted:
+                for field, value in (
+                    ("cadence_id", cadence_id),
+                    ("request_id", request_id),
+                ):
+                    stored = str(state.get(field) or "").strip()
+                    requested = str(value or "").strip()
+                    if stored and requested and stored != requested:
+                        raise MeetingSchedulerError(
+                            "occurrence identity does not match existing state"
+                        )
+                if str(state.get("organizer_calendar_key") or "") != organizer_calendar_key:
+                    raise MeetingSchedulerError("occurrence identity does not match existing state")
+            if state.get("status") in {"completed", "cancelled"}:
+                return {"status": state["status"], **state}
+            if state.get("status") == "booked":
+                if not allow_parameter_update:
+                    return {
+                        "status": "booked",
+                        **state,
+                        "actualStart": _rfc3339(
+                            _parse_rfc3339(
+                                str(
+                                    state.get("actual_start") or state.get("requested_start") or ""
+                                ),
+                                field="actual_start",
+                            )
+                        ),
+                        "zoomJoinUrl": str(state.get("zoom_join_url") or ""),
+                    }
+                return await self._reconcile_booked_locked(
+                    connection,
+                    state=state,
+                    key=key,
+                    title=title,
+                    start_at=start_at,
+                    duration=duration,
+                    time_zone=time_zone,
+                    organizer_id=organizer_id,
+                    attendees=attendees,
+                )
+
+            # Free/busy is only a snapshot. Recheck while holding the same
+            # organizer/day advisory lock that serializes competing bookings.
+            # A partial retry with an existing Calendar event is already bound
+            # to this occurrence and must not reject itself as busy.
+            if check_slot_free and not state.get("calendar_event_id"):
+                self._assert_slot_free(
+                    organizer_id=organizer_id,
+                    attendee_emails=attendees,
+                    start=start_at,
+                    duration=duration,
+                )
+
+            try:
+                zoom_id = str(state.get("zoom_meeting_id") or "").strip()
+                join_url = str(state.get("zoom_join_url") or "").strip()
+                if zoom_id:
+                    try:
+                        existing_zoom = self._zoom_request(
+                            "GET", f"/meetings/{quote(zoom_id, safe='')}"
+                        )
+                    except Exception:
+                        # A stale provider ID must not be treated as a valid
+                        # meeting. Reconcile by occurrence or create a new
+                        # Zoom meeting under the same stable key below.
+                        zoom_id = ""
+                        join_url = ""
+                    else:
+                        join_url = str(existing_zoom.get("join_url") or join_url).strip()
+                if not zoom_id:
+                    existing_zoom = self._zoom_find_by_occurrence(key)
+                    if existing_zoom:
+                        zoom = existing_zoom
+                    else:
+                        zoom = self._zoom_create(
+                            title=title,
+                            start=start_at,
+                            duration=duration,
+                            time_zone=time_zone,
+                            occurrence_key=key,
+                        )
+                    join_url = str(zoom.get("join_url") or "").strip()
+                    zoom_id = str(zoom.get("id") or "").strip()
+                if not join_url or not zoom_id:
+                    raise MeetingSchedulerError("Zoom returned no meeting ID or join URL")
+                if not state.get("zoom_meeting_id"):
+                    await self._update_provider_row(
+                        connection,
+                        key,
+                        "zoom_meeting_id = $2, zoom_join_url = $3, updated_at = now()",
+                        [zoom_id, join_url],
+                    )
+
+                service = get_calendar_service()
+                event_id = str(state.get("calendar_event_id") or "").strip()
+                event: dict[str, Any] = {}
+                if event_id:
+                    try:
+                        event = (
+                            service.events()
+                            .get(calendarId=organizer_id, eventId=event_id)
+                            .execute()
+                        )
+                    except Exception:
+                        event_id = ""
+                if not event_id:
+                    event_id = self._calendar_event_id(key)
+                    body = self._calendar_event_body(
+                        key=key,
+                        title=title,
+                        start=start_at,
+                        duration=duration,
+                        time_zone=time_zone,
+                        attendees=attendees,
+                        join_url=join_url,
+                    )
+                    try:
+                        event = (
+                            service.events()
+                            .insert(
+                                calendarId=organizer_id,
+                                id=event_id,
+                                body=body,
+                                sendUpdates="all",
+                            )
+                            .execute()
+                        )
+                    except Exception as insert_error:
+                        try:
+                            event = (
+                                service.events()
+                                .get(calendarId=organizer_id, eventId=event_id)
+                                .execute()
+                            )
+                        except Exception as get_error:
+                            raise insert_error from get_error
+                if not event_id:
+                    raise MeetingSchedulerError("Calendar returned no event ID")
+                if not state.get("calendar_event_id"):
+                    await self._update_provider_row(
+                        connection,
+                        key,
+                        "calendar_event_id = $2, calendar_html_link = $3, updated_at = now()",
+                        [event_id, str(event.get("htmlLink") or "")],
+                    )
+                result = await self._mark_booked_row(
+                    connection,
+                    key,
+                    {
+                        "actual_start": start_at,
+                        "organizer_id": organizer_id,
+                        "event_id": event_id,
+                        "event_link": str(event.get("htmlLink") or ""),
+                        "zoom_id": zoom_id,
+                        "join_url": join_url,
+                    },
+                )
+                return {
+                    "status": "booked",
+                    **(result or {}),
+                    "actualStart": _rfc3339(start_at),
+                    "zoomJoinUrl": join_url,
+                }
+            except Exception as error:
+                await connection.execute(
+                    "update orbie_meeting_occurrences set status = 'blocked', last_error = $2, updated_at = now() where occurrence_key = $1",
+                    key,
+                    str(error)[:2000],
+                )
+                return _OperationFailure(error)
+
+        return await _with_occurrence_lock(key, operation)
+
+    async def _reconcile_booked_locked(
+        self,
+        connection: asyncpg.Connection,
+        *,
+        state: dict[str, Any],
+        key: str,
+        title: str,
+        start_at: dt.datetime,
+        duration: int,
+        time_zone: str,
+        organizer_id: str,
+        attendees: list[str],
+    ) -> dict[str, Any] | _OperationFailure:
+        """Reconcile an upcoming booked occurrence without changing its key."""
+
+        actual_start_value = state.get("actual_start") or state.get("requested_start")
+        requested_start_value = state.get("requested_start")
+        if not actual_start_value or not requested_start_value:
+            raise MeetingSchedulerError("booked meeting has no occurrence start")
+        actual_start = _parse_rfc3339(str(actual_start_value), field="actual_start")
+        requested_start = _parse_rfc3339(
+            str(requested_start_value), field="requested_start"
+        )
+        if actual_start <= dt.datetime.now(dt.UTC):
+            raise MeetingSchedulerError("started meetings cannot be automatically changed")
+
+        stored_attendees = [
+            str(item).strip().lower()
+            for item in (state.get("attendee_emails") or [])
+            if str(item).strip()
+        ]
+        # Additions can affect the current event. Removals intentionally do
+        # not: the next stable occurrence will use the new cadence attendee
+        # set, while the already-booked occurrence remains safely inclusive.
+        effective_attendees = list(dict.fromkeys([*stored_attendees, *attendees]))
+        old_title = str(state.get("title") or "")
+        old_duration = int(state.get("duration_minutes") or 0)
+        title_changed = old_title != title
+        duration_changed = old_duration != duration
+        # ``requested_start`` is the cadence anchor for this stable
+        # occurrence. A manual reschedule changes only ``actual_start`` and
+        # must survive the next cadence reconciliation. A changed cadence
+        # start, by contrast, updates the same provider pair and then records
+        # the new requested anchor for future retries.
+        cadence_start_changed = requested_start != start_at
+        desired_start = start_at if cadence_start_changed else actual_start
+        start_changed = desired_start != actual_start
+        attendees_changed = effective_attendees != stored_attendees
+        if not (title_changed or duration_changed or start_changed or attendees_changed):
+            return {
+                "status": "booked",
+                **state,
+                "actualStart": _rfc3339(actual_start),
+                "zoomJoinUrl": str(state.get("zoom_join_url") or ""),
+            }
+
+        zoom_id = str(state.get("zoom_meeting_id") or "").strip()
+        join_url = str(state.get("zoom_join_url") or "").strip()
+        event_id = str(state.get("calendar_event_id") or "").strip()
+        if not zoom_id or not join_url:
+            raise MeetingSchedulerError("booked meeting has incomplete Zoom provider state")
+        if not event_id:
+            raise MeetingSchedulerError("booked meeting has no Calendar event ID")
+
+        service = None
+        original_event: dict[str, Any] = {}
+        zoom_update_attempted = False
+        calendar_update_attempted = False
+        zoom_changed = False
+        try:
+            service = get_calendar_service()
+            existing_event = (
+                service.events().get(calendarId=organizer_id, eventId=event_id).execute()
+            )
+            original_event = dict(existing_event)
+            zoom_payload: dict[str, Any] = {}
+            if title_changed:
+                zoom_payload["topic"] = title
+            if start_changed:
+                zoom_payload["start_time"] = _rfc3339(start_at)
+                zoom_payload["timezone"] = time_zone
+            if duration_changed:
+                zoom_payload["duration"] = duration
+            if zoom_payload:
+                zoom_update_attempted = True
+                self._zoom_request(
+                    "PATCH",
+                    f"/meetings/{zoom_id}",
+                    occurrence_key=key,
+                    payload=zoom_payload,
+                )
+                zoom_changed = True
+
+            event = self._calendar_event_body(
+                key=key,
+                title=title,
+                start=desired_start,
+                duration=duration,
+                time_zone=time_zone,
+                attendees=effective_attendees,
+                join_url=join_url,
+            )
+            calendar_update_attempted = True
+            updated = (
+                service.events()
+                .update(
+                    calendarId=organizer_id,
+                    eventId=event_id,
+                    body=event,
+                    sendUpdates="all",
+                )
+                .execute()
+            )
+            result = await self._reconcile_booked_row(
+                connection,
+                key=key,
+                title=title,
+                requested_start=start_at if cadence_start_changed else requested_start,
+                actual_start=desired_start,
+                duration=duration,
+                attendees=effective_attendees,
+            )
+            return {
+                "status": "booked",
+                **(result or state),
+                "actualStart": _rfc3339(desired_start),
+                "zoomJoinUrl": join_url,
+                "calendarHtmlLink": str(
+                    updated.get("htmlLink") or state.get("calendar_html_link") or ""
+                ),
+                "reconciled": True,
+            }
+        except Exception as error:
+            compensation_errors: list[str] = []
+            if calendar_update_attempted and service is not None:
+                try:
+                    service.events().update(
+                        calendarId=organizer_id,
+                        eventId=event_id,
+                        body=original_event,
+                        sendUpdates="all",
+                    ).execute()
+                except Exception as compensation_error:
+                    compensation_errors.append(f"Calendar rollback failed: {compensation_error}")
+            if zoom_update_attempted or zoom_changed:
+                try:
+                    rollback_payload: dict[str, Any] = {}
+                    if title_changed:
+                        rollback_payload["topic"] = old_title
+                    if start_changed:
+                        rollback_payload["start_time"] = _rfc3339(actual_start)
+                        rollback_payload["timezone"] = str(state["time_zone"])
+                    if duration_changed:
+                        rollback_payload["duration"] = old_duration
+                    if rollback_payload:
+                        self._zoom_request(
+                            "PATCH",
+                            f"/meetings/{zoom_id}",
+                            occurrence_key=key,
+                            payload=rollback_payload,
+                        )
+                except Exception as compensation_error:
+                    compensation_errors.append(f"Zoom rollback failed: {compensation_error}")
+            if compensation_errors:
+                await connection.execute(
+                    "update orbie_meeting_occurrences set status = 'blocked', last_error = $2, updated_at = now() where occurrence_key = $1",
+                    key,
+                    (str(error) + "; " + "; ".join(compensation_errors))[:2000],
+                )
+            else:
+                await connection.execute(
+                    "update orbie_meeting_occurrences set last_error = $2, updated_at = now() where occurrence_key = $1",
+                    key,
+                    str(error)[:2000],
+                )
+            return _OperationFailure(error)
+
+    async def _get_existing(self, key: str) -> dict[str, Any] | None:
+        return await _with_connection(lambda connection: self._get_occurrence(connection, key))
+
+    async def _mark_error(self, key: str, message: str) -> None:
+        await _with_connection(
+            lambda connection: connection.execute(
+                "update orbie_meeting_occurrences set status = 'blocked', last_error = $2, updated_at = now() where occurrence_key = $1",
+                key,
+                message[:2000],
+            )
+        )
+
+    async def _mark_booked(self, key: str, **values: Any) -> dict[str, Any] | None:
+        return await _with_connection(
+            lambda connection: self._mark_booked_row(connection, key, values)
+        )
+
+    async def _mark_booked_row(
+        self, connection: asyncpg.Connection, key: str, values: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        row = await connection.fetchrow(
+            """
+            update orbie_meeting_occurrences
+            set status = 'booked', actual_start = $2, organizer_calendar_id = $3,
+                calendar_event_id = $4, calendar_html_link = $5, zoom_meeting_id = $6,
+                zoom_join_url = $7, version = version + 1, last_error = '', updated_at = now()
+            where occurrence_key = $1
+            returning *
+            """,
+            key,
+            values["actual_start"],
+            values["organizer_id"],
+            values["event_id"],
+            values["event_link"],
+            values["zoom_id"],
+            values["join_url"],
+        )
+        return _serialize_row(row)
+
+    async def _reconcile_booked_row(
+        self,
+        connection: asyncpg.Connection,
+        *,
+        key: str,
+        title: str,
+        requested_start: dt.datetime,
+        actual_start: dt.datetime,
+        duration: int,
+        attendees: list[str],
+    ) -> dict[str, Any] | None:
+        row = await connection.fetchrow(
+            """
+            update orbie_meeting_occurrences
+            set title = $2, requested_start = $3, actual_start = $4,
+                duration_minutes = $5, attendee_emails = $6,
+                version = version + 1, last_error = '', updated_at = now()
+            where occurrence_key = $1
+            returning *
+            """,
+            key,
+            title,
+            requested_start,
+            actual_start,
+            duration,
+            attendees,
+        )
+        return _serialize_row(row)
+
+    async def _reconcile_actual_start(
+        self,
+        connection: asyncpg.Connection,
+        key: str,
+        start: dt.datetime,
+        expected_version: int,
+    ) -> dict[str, Any] | None:
+        row = await connection.fetchrow(
+            """
+            update orbie_meeting_occurrences
+            set actual_start = $2, version = version + 1, updated_at = now()
+            where occurrence_key = $1 and version = $3
+            returning *
+            """,
+            key,
+            start,
+            expected_version,
+        )
+        return _serialize_row(row)
+
+    def reschedule_meeting(
+        self,
+        occurrence_key: str,
+        start: str,
+        expected_version: int,
+        organizer_calendar_key: str,
+        mode: str = "cadence",
+        confirmation_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Move the existing provider pair before the occurrence starts."""
+        _require_enabled()
+        key = _require_occurrence_key(occurrence_key)
+        if mode not in {"cadence", "ad_hoc"}:
+            raise MeetingSchedulerError("mode must be cadence or ad_hoc")
+        if mode == "ad_hoc" and not str(confirmation_token or "").strip():
+            raise MeetingSchedulerError("ad-hoc rescheduling requires explicit confirmation")
+        new_start = _parse_rfc3339(start, field="start")
+        result = asyncio.run(
+            self._reschedule_meeting_locked(
+                key=key,
+                new_start=new_start,
+                expected_version=int(expected_version),
+                organizer_calendar_key=organizer_calendar_key,
+                confirmation_token=confirmation_token if mode == "ad_hoc" else None,
+            )
+        )
+        if isinstance(result, _OperationFailure):
+            error = result.error
+            if isinstance(error, MeetingSchedulerError):
+                raise error
+            raise MeetingSchedulerError("meeting provider rescheduling failed") from error
+        return result
+
+    async def _reschedule_meeting_locked(
+        self,
+        *,
+        key: str,
+        new_start: dt.datetime,
+        expected_version: int,
+        organizer_calendar_key: str,
+        confirmation_token: str | None,
+    ) -> dict[str, Any] | _OperationFailure:
+        async def operation(connection: asyncpg.Connection) -> dict[str, Any] | _OperationFailure:
+            state = await self._get_occurrence(connection, key)
+            if not state:
+                raise MeetingSchedulerError("meeting occurrence does not exist")
+            if int(state.get("version") or 0) != expected_version:
+                raise MeetingSchedulerError("meeting occurrence version is stale")
+            if state.get("status") != "booked":
+                raise MeetingSchedulerError("only booked meetings can be rescheduled")
+            if str(state.get("organizer_calendar_key") or "") != organizer_calendar_key:
+                raise MeetingSchedulerError("organizer calendar does not match occurrence state")
+            if new_start <= dt.datetime.now(dt.UTC):
+                raise MeetingSchedulerError("started meetings cannot be automatically rescheduled")
+            duration = int(state["duration_minutes"])
+            attendees = _email_list(state.get("attendee_emails") or [])
+            if confirmation_token is not None:
+                expected_confirmation = _slot_confirmation_token(
+                    start=new_start,
+                    duration=duration,
+                    time_zone=str(state["time_zone"]),
+                    attendees=attendees,
+                    organizer_calendar_key=organizer_calendar_key,
+                )
+                if not _matches_confirmation(confirmation_token, expected_confirmation):
+                    raise MeetingSchedulerError(
+                        "confirmation does not match the requested meeting slot"
+                    )
+            current_start = _parse_rfc3339(
+                str(state.get("actual_start") or state.get("requested_start") or ""),
+                field="actual_start",
+            )
+            if new_start != current_start:
+                await connection.execute(
+                    "select pg_advisory_xact_lock(hashtextextended($1, 0))",
+                    f"organizer-day:{state['organizer_calendar_id']}:{new_start.astimezone(_zone(str(state['time_zone']))).date().isoformat()}",
+                )
+                self._assert_slot_free(
+                    organizer_id=str(state["organizer_calendar_id"]),
+                    attendee_emails=attendees,
+                    start=new_start,
+                    duration=duration,
+                )
+            zoom_id = str(state.get("zoom_meeting_id") or "")
+            if not zoom_id:
+                raise MeetingSchedulerError("booked meeting has no Zoom meeting ID")
+            event_id = str(state.get("calendar_event_id") or "")
+            if not event_id:
+                raise MeetingSchedulerError("booked meeting has no Calendar event ID")
+
+            service = None
+            original_event: dict[str, Any] = {}
+            zoom_update_attempted = False
+            calendar_update_attempted = False
+            zoom_changed = False
+            try:
+                service = get_calendar_service()
+                event = (
+                    service.events()
+                    .get(calendarId=state["organizer_calendar_id"], eventId=event_id)
+                    .execute()
+                )
+                original_event = dict(event)
+                zoom_update_attempted = True
+                self._zoom_request(
+                    "PATCH",
+                    f"/meetings/{zoom_id}",
+                    occurrence_key=key,
+                    payload={
+                        "start_time": _rfc3339(new_start),
+                        "duration": duration,
+                        "timezone": state["time_zone"],
+                    },
+                )
+                zoom_changed = True
+                event["start"] = {
+                    "dateTime": _rfc3339_in_zone(new_start, state["time_zone"]),
+                    "timeZone": state["time_zone"],
+                }
+                event["end"] = {
+                    "dateTime": _rfc3339_in_zone(
+                        new_start + dt.timedelta(minutes=duration), state["time_zone"]
+                    ),
+                    "timeZone": state["time_zone"],
+                }
+                calendar_update_attempted = True
+                updated = (
+                    service.events()
+                    .update(
+                        calendarId=state["organizer_calendar_id"],
+                        eventId=event_id,
+                        body=event,
+                        sendUpdates="all",
+                    )
+                    .execute()
+                )
+                result = await self._reschedule_row(connection, key, new_start, expected_version)
+                return {
+                    "status": "booked",
+                    **(result or {}),
+                    "actualStart": _rfc3339(new_start),
+                    "calendarHtmlLink": updated.get("htmlLink", ""),
+                }
+            except Exception as error:
+                compensation_errors: list[str] = []
+                if calendar_update_attempted and service is not None:
+                    try:
+                        service.events().update(
+                            calendarId=state["organizer_calendar_id"],
+                            eventId=event_id,
+                            body=original_event,
+                            sendUpdates="all",
+                        ).execute()
+                    except Exception as compensation_error:
+                        compensation_errors.append(
+                            f"Calendar rollback failed: {compensation_error}"
+                        )
+                if zoom_update_attempted or zoom_changed:
+                    try:
+                        self._zoom_request(
+                            "PATCH",
+                            f"/meetings/{zoom_id}",
+                            occurrence_key=key,
+                            payload={
+                                "start_time": _rfc3339(current_start),
+                                "duration": duration,
+                                "timezone": state["time_zone"],
+                            },
+                        )
+                    except Exception as compensation_error:
+                        compensation_errors.append(f"Zoom rollback failed: {compensation_error}")
+                if compensation_errors:
+                    await connection.execute(
+                        "update orbie_meeting_occurrences set status = 'blocked', last_error = $2, updated_at = now() where occurrence_key = $1",
+                        key,
+                        (str(error) + "; " + "; ".join(compensation_errors))[:2000],
+                    )
+                else:
+                    await connection.execute(
+                        "update orbie_meeting_occurrences set last_error = $2, updated_at = now() where occurrence_key = $1",
+                        key,
+                        str(error)[:2000],
+                    )
+                return _OperationFailure(error)
+
+        return await _with_occurrence_lock(key, operation)
+
+    async def _mark_rescheduled(
+        self, key: str, start: dt.datetime, version: int
+    ) -> dict[str, Any] | None:
+        return await _with_connection(
+            lambda connection: self._reschedule_row(connection, key, start, version)
+        )
+
+    async def _reschedule_row(
+        self, connection: asyncpg.Connection, key: str, start: dt.datetime, version: int
+    ) -> dict[str, Any] | None:
+        row = await connection.fetchrow(
+            "update orbie_meeting_occurrences set actual_start = $2, version = version + 1, updated_at = now() where occurrence_key = $1 and version = $3 returning *",
+            key,
+            start,
+            version,
+        )
+        if row is None:
+            raise MeetingSchedulerError("meeting occurrence changed while rescheduling")
+        return _serialize_row(row)
+
+    def cancel_meeting(
+        self,
+        occurrence_key: str,
+        organizer_calendar_key: str,
+        confirmation_token: str | None = None,
+    ) -> dict[str, Any]:
+        _require_enabled()
+        key = _require_occurrence_key(occurrence_key)
+        if not str(confirmation_token or "").strip():
+            raise MeetingSchedulerError("cancellation requires explicit confirmation")
+        expected_confirmation = _cancel_confirmation_token(
+            occurrence_key=key,
+            organizer_calendar_key=organizer_calendar_key,
+        )
+        if not _matches_confirmation(confirmation_token, expected_confirmation):
+            raise MeetingSchedulerError("confirmation does not match the requested meeting")
+        result = asyncio.run(
+            self._cancel_meeting_locked(key=key, organizer_calendar_key=organizer_calendar_key)
+        )
+        if isinstance(result, _OperationFailure):
+            error = result.error
+            if isinstance(error, MeetingSchedulerError):
+                raise error
+            raise MeetingSchedulerError("meeting provider cancellation failed") from error
+        return result
+
+    async def _cancel_meeting_locked(
+        self, *, key: str, organizer_calendar_key: str
+    ) -> dict[str, Any] | _OperationFailure:
+        async def operation(connection: asyncpg.Connection) -> dict[str, Any] | _OperationFailure:
+            state = await self._get_occurrence(connection, key)
+            if not state:
+                return {"status": "not_found", "occurrenceKey": key}
+            if str(state.get("organizer_calendar_key") or "") != organizer_calendar_key:
+                raise MeetingSchedulerError("organizer calendar does not match occurrence state")
+            if state.get("status") == "cancelled":
+                return {
+                    "status": "cancelled",
+                    "occurrenceKey": key,
+                    "cadence_id": state.get("cadence_id"),
+                }
+            try:
+                if state.get("zoom_meeting_id"):
+                    self._zoom_request(
+                        "DELETE",
+                        f"/meetings/{state['zoom_meeting_id']}",
+                        occurrence_key=key,
+                    )
+                if state.get("calendar_event_id"):
+                    try:
+                        get_calendar_service().events().delete(
+                            calendarId=state["organizer_calendar_id"],
+                            eventId=state["calendar_event_id"],
+                            sendUpdates="all",
+                        ).execute()
+                    except Exception as error:
+                        if getattr(getattr(error, "resp", None), "status", None) != 404:
+                            raise
+                await connection.execute(
+                    "update orbie_meeting_occurrences set status = 'cancelled', version = version + 1, last_error = '', updated_at = now() where occurrence_key = $1",
+                    key,
+                )
+                return {
+                    "status": "cancelled",
+                    "occurrenceKey": key,
+                    "cadence_id": state.get("cadence_id"),
+                }
+            except Exception as error:
+                await connection.execute(
+                    "update orbie_meeting_occurrences set last_error = $2, updated_at = now() where occurrence_key = $1",
+                    key,
+                    str(error)[:2000],
+                )
+                return _OperationFailure(error)
+
+        return await _with_occurrence_lock(key, operation)
+
+    def get_or_reconcile_meeting(self, occurrence_key: str) -> dict[str, Any]:
+        _require_enabled()
+        key = _require_occurrence_key(occurrence_key)
+
+        async def reconcile(connection: asyncpg.Connection) -> dict[str, Any]:
+            # The advisory lock is held for the complete reconciliation. Keep
+            # the provider-state read behind the client seam so recovery can be
+            # tested without a live asyncpg connection.
+            state = await self._get_existing(key)
+            if not state:
+                return {"status": "not_found", "occurrenceKey": key}
+            if not state.get("calendar_event_id"):
+                event = self._calendar_find_by_occurrence(state["organizer_calendar_id"], key)
+                if event and event.get("id"):
+                    state["calendar_event_id"] = str(event["id"])
+                    state["calendar_html_link"] = str(event.get("htmlLink") or "")
+                    event_start = (event.get("start") or {}).get("dateTime")
+                    if event_start:
+                        state["actual_start"] = str(event_start)
+                    await self._update_provider_state(
+                        key,
+                        event_id=state["calendar_event_id"],
+                        event_link=state["calendar_html_link"],
+                    )
+            if state.get("zoom_meeting_id") and not state.get("zoom_join_url"):
+                try:
+                    meeting = self._zoom_request("GET", f"/meetings/{state['zoom_meeting_id']}")
+                    join_url = str(meeting.get("join_url") or "").strip()
+                    if join_url:
+                        state["zoom_join_url"] = join_url
+                        await self._update_provider_state(key, join_url=join_url)
+                except Exception:
+                    pass
+            if not state.get("zoom_meeting_id"):
+                meeting = self._zoom_find_by_occurrence(key)
+                if meeting and meeting.get("id") and meeting.get("join_url"):
+                    state["zoom_meeting_id"] = str(meeting["id"])
+                    state["zoom_join_url"] = str(meeting["join_url"])
+                    await self._update_provider_state(
+                        key,
+                        zoom_id=state["zoom_meeting_id"],
+                        join_url=state["zoom_join_url"],
+                    )
+            provider_state = {"calendarPresent": None, "zoomPresent": None}
+            calendar_start: dt.datetime | None = None
+            zoom_start: dt.datetime | None = None
+            if state.get("calendar_event_id"):
+                try:
+                    calendar_event = (
+                        get_calendar_service()
+                        .events()
+                        .get(
+                            calendarId=state["organizer_calendar_id"],
+                            eventId=state["calendar_event_id"],
+                        )
+                        .execute()
+                    )
+                    provider_state["calendarPresent"] = True
+                    calendar_start_value = (calendar_event.get("start") or {}).get("dateTime")
+                    if calendar_start_value:
+                        calendar_start = _parse_rfc3339(
+                            str(calendar_start_value), field="calendar.start"
+                        )
+                except Exception:
+                    provider_state["calendarPresent"] = False
+            if state.get("zoom_meeting_id"):
+                try:
+                    zoom_meeting = self._zoom_request(
+                        "GET", f"/meetings/{state['zoom_meeting_id']}"
+                    )
+                    provider_state["zoomPresent"] = bool(state.get("zoom_join_url"))
+                    zoom_start_value = zoom_meeting.get("start_time")
+                    if zoom_start_value:
+                        zoom_start = _parse_rfc3339(str(zoom_start_value), field="zoom.start")
+                except Exception:
+                    provider_state["zoomPresent"] = False
+            provider_mismatch = (
+                calendar_start is not None
+                and zoom_start is not None
+                and calendar_start != zoom_start
+            )
+            if provider_mismatch:
+                await connection.execute(
+                    "update orbie_meeting_occurrences set status = 'blocked', last_error = $2, updated_at = now() where occurrence_key = $1",
+                    key,
+                    "Calendar and Zoom provider times disagree; reconciliation is required",
+                )
+                state["status"] = "blocked"
+            provider_start = calendar_start or zoom_start
+            if (
+                not provider_mismatch
+                and state.get("status") == "booked"
+                and provider_start is not None
+                and provider_start
+                != _parse_rfc3339(
+                    str(state.get("actual_start") or state.get("requested_start") or ""),
+                    field="actual_start",
+                )
+            ):
+                reconciled = await self._reconcile_actual_start(
+                    connection,
+                    key,
+                    provider_start,
+                    int(state.get("version") or 0),
+                )
+                if reconciled:
+                    state = reconciled
+            if (
+                state.get("status") in {"pending", "blocked"}
+                and not provider_mismatch
+                and provider_state["calendarPresent"] is True
+                and provider_state["zoomPresent"] is True
+            ):
+                reconciled_start = (
+                    provider_start or state.get("actual_start") or state["requested_start"]
+                )
+                if isinstance(reconciled_start, str):
+                    reconciled_start = _parse_rfc3339(reconciled_start, field="actual_start")
+                state = (
+                    await self._mark_booked(
+                        key,
+                        actual_start=reconciled_start,
+                        organizer_id=state["organizer_calendar_id"],
+                        event_id=state["calendar_event_id"],
+                        event_link=state.get("calendar_html_link") or "",
+                        zoom_id=state["zoom_meeting_id"],
+                        join_url=state["zoom_join_url"],
+                    )
+                    or state
+                )
+            elif state.get("status") == "booked" and (
+                provider_state["calendarPresent"] is not True
+                or provider_state["zoomPresent"] is not True
+            ):
+                # A previously booked row with a missing provider pair must be
+                # retryable. Otherwise the cadence broker would see ``booked``
+                # and the next book attempt could incorrectly return stale
+                # provider IDs without repairing Calendar or Zoom.
+                await self._mark_error(
+                    key,
+                    "provider state is incomplete and requires reconciliation",
+                )
+                state["status"] = "blocked"
+            result = {
+                "status": str(state.get("status") or "pending"),
+                **state,
+                "providerState": provider_state,
+            }
+            result["cancelConfirmationToken"] = _cancel_confirmation_token(
+                occurrence_key=key,
+                organizer_calendar_key=str(state.get("organizer_calendar_key") or ""),
+            )
+            return result
+
+        return asyncio.run(_with_occurrence_lock(key, reconcile))
+
+
+def _client() -> MeetingSchedulerClient:
+    return MeetingSchedulerClient()
+
+
+def find_availability(
+    organizer_calendar_key: str,
+    attendee_emails: list[str],
+    time_min: str,
+    time_max: str,
+    duration_minutes: int,
+    response_timezone: str = DEFAULT_TIME_ZONE,
+    working_start: str = "09:00",
+    working_end: str = "17:00",
+) -> dict[str, Any]:
+    return _client().find_availability(
+        organizer_calendar_key,
+        attendee_emails,
+        time_min,
+        time_max,
+        duration_minutes,
+        response_timezone,
+        working_start,
+        working_end,
+    )
+
+
+def book_meeting(
+    occurrence_key: str,
+    title: str,
+    start: str,
+    duration_minutes: int,
+    time_zone: str,
+    attendee_emails: list[str],
+    organizer_calendar_key: str,
+    cadence_id: str | None = None,
+    request_id: str | None = None,
+    mode: str = "cadence",
+    confirmation_token: str | None = None,
+) -> dict[str, Any]:
+    return _client().book_meeting(
+        occurrence_key,
+        title,
+        start,
+        duration_minutes,
+        time_zone,
+        attendee_emails,
+        organizer_calendar_key,
+        cadence_id,
+        request_id,
+        mode,
+        confirmation_token,
+    )
+
+
+def reschedule_meeting(
+    occurrence_key: str,
+    start: str,
+    expected_version: int,
+    organizer_calendar_key: str,
+    mode: str = "cadence",
+    confirmation_token: str | None = None,
+) -> dict[str, Any]:
+    return _client().reschedule_meeting(
+        occurrence_key,
+        start,
+        expected_version,
+        organizer_calendar_key,
+        mode,
+        confirmation_token,
+    )
+
+
+def cancel_meeting(
+    occurrence_key: str,
+    organizer_calendar_key: str,
+    confirmation_token: str | None = None,
+) -> dict[str, Any]:
+    return _client().cancel_meeting(occurrence_key, organizer_calendar_key, confirmation_token)
+
+
+def get_or_reconcile_meeting(occurrence_key: str) -> dict[str, Any]:
+    return _client().get_or_reconcile_meeting(occurrence_key)

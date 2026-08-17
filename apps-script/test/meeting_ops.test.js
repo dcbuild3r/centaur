@@ -116,6 +116,7 @@ class FakeFile {
     this.name = name
     this.trashed = false
     this.folderId = null
+    this.editors = []
   }
 
   getId() {
@@ -153,6 +154,14 @@ class FakeFile {
 
   setName(name) {
     this.name = name
+  }
+
+  addEditors(emails) {
+    this.editors = [...new Set(this.editors.concat(emails))]
+  }
+
+  getEditors() {
+    return this.editors.map((email) => ({ getEmail: () => email }))
   }
 }
 
@@ -226,6 +235,16 @@ global.MeetingOpsPure = {
   nextWeeklyOccurrence(occurrence) {
     return new Date(occurrence.getTime() + 7 * 24 * 60 * 60 * 1000)
   },
+  normalizeCadence(cadenceValue) {
+    return {
+      ...cadenceValue,
+      visibility: cadenceValue.visibility || 'public',
+      notificationMode: cadenceValue.notificationMode || 'orbie',
+      cadence: cadenceValue.cadence || 'weekly',
+      notificationRecipients: cadenceValue.notificationRecipients || [],
+      accessSlackUserIds: cadenceValue.accessSlackUserIds || [],
+    }
+  },
   shouldPost(now, occurrence, delayMin) {
     return now >= new Date(occurrence.getTime() + delayMin * 60_000)
   },
@@ -233,8 +252,11 @@ global.MeetingOpsPure = {
     return cadenceValue.visibility === 'private' &&
       cadenceValue.ownerSlackUserId === requesterSlackUserId
   },
-  notificationRecipients(cadenceValue, requesterSlackUserId) {
-    return cadenceValue.visibility === 'private' ? [requesterSlackUserId] : [null]
+  notificationRecipients(cadenceValue, requesterSlackUserId, scheduled) {
+    if (cadenceValue.visibility !== 'private') return [null]
+    return scheduled
+      ? cadenceValue.notificationRecipients
+      : [requesterSlackUserId]
   },
   notificationKey(cadenceId, occurrence, timeZone, kind, recipientSlackUserId) {
     const key = `${kind}:${cadenceId}:${this.dateKey(occurrence, timeZone)}`
@@ -256,6 +278,8 @@ const {
   processAgenda_,
   prepareTemplateCopy_,
   runCadenceJob,
+  runScheduledCadenceJob,
+  runScheduledNotificationsJob,
   setMeetingDate_,
 } = require('../src/meeting_ops.js')
 
@@ -548,6 +572,61 @@ test('direct scheduled processing still rejects a future occurrence', () => {
     'U1',
   )).toBeUndefined()
   expect([...documents.keys()]).toEqual(['manual-template'])
+})
+
+test('scheduled entrypoint creates the requested occurrence and queues recipient delivery', () => {
+  prepareManualTemplate()
+
+  const result = runScheduledCadenceJob({
+    scheduledByOrbie: true,
+    requesterSlackTeamId: 'TL1HM8UUU',
+    cadence: manualCadence(),
+    occurrenceAt: '2026-08-14T12:00:00Z',
+    now: '2026-08-14T07:15:00Z',
+  })
+
+  expect(result.docUrl).toContain('https://docs.example/manual-template-copy-')
+  expect(Object.keys(Object.fromEntries(executionProperties.entries())).filter((key) => (
+    key.startsWith('ORBIE_OUTBOX:')
+  ))).toEqual(['ORBIE_OUTBOX:agenda:manual-cadence:2026-08-14:U1'])
+})
+
+test('document editors are granted on the copied document, never the source', () => {
+  prepareManualTemplate()
+  const result = runScheduledCadenceJob({
+    scheduledByOrbie: true,
+    requesterSlackTeamId: 'TL1HM8UUU',
+    cadence: { ...manualCadence(), documentEditorEmails: ['piotr.piwowarczyk@world.org'] },
+    occurrenceAt: '2026-08-14T12:00:00Z',
+    now: '2026-08-14T07:15:00Z',
+  })
+
+  expect(files.get('manual-template').editors).toEqual([])
+  expect(files.get(result.docId).editors).toEqual(['piotr.piwowarczyk@world.org'])
+})
+
+test('scheduled notifications entrypoint queues notes after the configured delay', () => {
+  prepareManualTemplate()
+  runScheduledCadenceJob({
+    scheduledByOrbie: true,
+    requesterSlackTeamId: 'TL1HM8UUU',
+    cadence: manualCadence(),
+    occurrenceAt: '2026-08-14T12:00:00Z',
+    now: '2026-08-14T07:15:00Z',
+  })
+  const result = runScheduledNotificationsJob({
+    scheduledByOrbie: true,
+    requesterSlackTeamId: 'TL1HM8UUU',
+    cadence: manualCadence(),
+    now: '2026-08-14T13:00:00Z',
+  })
+
+  expect(result).toEqual({
+    status: 'notifications-processed',
+    meetingId: 'manual-cadence',
+  })
+  expect(executionProperty('ORBIE_OUTBOX:notes:manual-cadence:2026-08-14:U1'))
+    .toBeTruthy()
 })
 
 test('manual retries reuse the same document and notification and insert instructions once', () => {

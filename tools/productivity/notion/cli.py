@@ -422,6 +422,35 @@ def create_page(
     console.print(f"URL: {result.get('url')}")
 
 
+@app.command("create-cadence")
+def create_cadence(
+    payload: str = typer.Argument(..., help="Cadence fields as a JSON object"),
+    json_output: bool = typer.Option(True, "--json/--pretty", help="Output the created page as JSON"),
+):
+    """Create an idempotent Draft cadence owned by its creator.
+
+    The Orbie cadence skill gathers and validates the interactive fields, then
+    passes the resulting JSON object here. New rows are never auto-published.
+    """
+    try:
+        values = json.loads(payload)
+    except json.JSONDecodeError as error:
+        raise typer.BadParameter("payload must be valid JSON") from error
+    if not isinstance(values, dict):
+        raise typer.BadParameter("payload must be a JSON object")
+    if "type" in values and "cadence_type" not in values:
+        values["cadence_type"] = values.pop("type")
+
+    client = get_client()
+    result = client.create_cadence(**values)
+    if json_output:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        console.print(f"[green]Cadence ready as Draft:[/] [bold]{client.extract_title(result)}[/]")
+        console.print(f"ID: {result.get('id')}")
+        console.print(f"URL: {result.get('url')}")
+
+
 @app.command("append")
 def append_content(
     page_id: str = typer.Argument(..., help="Page ID or URL"),

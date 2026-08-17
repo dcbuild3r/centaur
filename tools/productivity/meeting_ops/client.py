@@ -93,6 +93,7 @@ def run_cadence(
     requester_slack_user_id: str | None = None,
     requester_slack_team_id: str | None = None,
     custom_instructions: str | None = None,
+    document_editor_emails: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """Create the agenda for one approved cadence occurrence."""
 
@@ -105,9 +106,60 @@ def run_cadence(
         request["requesterSlackTeamId"] = requester_slack_team_id
     if custom_instructions:
         request["customInstructions"] = custom_instructions
+    if document_editor_emails:
+        request["documentEditorEmails"] = document_editor_emails
     result = _run_function("runCadenceJob", [request])
     if result is not None and not isinstance(result, dict):
         raise MeetingOpsError("runCadenceJob returned an unexpected result")
+    return result
+
+
+def run_scheduled_cadence(
+    cadence: dict[str, Any],
+    occurrence_at: str,
+    *,
+    now: str | None = None,
+    requester_slack_team_id: str,
+    custom_instructions: str | None = None,
+) -> dict[str, Any] | None:
+    """Create or reuse one Notion-configured scheduled occurrence."""
+
+    request: dict[str, Any] = {
+        "cadence": cadence,
+        "occurrenceAt": occurrence_at,
+        "requesterSlackTeamId": requester_slack_team_id,
+        "scheduledByOrbie": True,
+    }
+    if now:
+        request["now"] = now
+    if custom_instructions:
+        request["customInstructions"] = custom_instructions
+    result = _run_function("runScheduledCadenceJob", [request])
+    if result is not None and not isinstance(result, dict):
+        raise MeetingOpsError("runScheduledCadenceJob returned an unexpected result")
+    return result
+
+
+def run_scheduled_notifications(
+    cadence: dict[str, Any],
+    *,
+    now: str | None = None,
+    requester_slack_team_id: str,
+) -> dict[str, Any] | None:
+    """Flush notes notifications for existing scheduled occurrences."""
+
+    request: dict[str, Any] = {
+        "cadence": cadence,
+        "requesterSlackTeamId": requester_slack_team_id,
+        "scheduledByOrbie": True,
+    }
+    if now:
+        request["now"] = now
+    result = _run_function("runScheduledNotificationsJob", [request])
+    if result is not None and not isinstance(result, dict):
+        raise MeetingOpsError(
+            "runScheduledNotificationsJob returned an unexpected result"
+        )
     return result
 
 
@@ -173,4 +225,24 @@ def acknowledge_notification(
         raise MeetingOpsError(
             "acknowledgeOrbieNotificationForCaller returned an unexpected result"
         )
+    return result
+
+
+def pending_notifications() -> list[dict[str, Any]]:
+    """Return the workflow-owned scheduled notification outbox."""
+
+    result = _run_function("getPendingOrbieNotifications")
+    if result is None:
+        return []
+    if not isinstance(result, list) or not all(isinstance(item, dict) for item in result):
+        raise MeetingOpsError("getPendingOrbieNotifications returned an unexpected result")
+    return result
+
+
+def acknowledge_notification_unscoped(notification_id: str) -> dict[str, Any]:
+    """Acknowledge one scheduled item after Slack confirms delivery."""
+
+    result = _run_function("acknowledgeOrbieNotification", [notification_id])
+    if not isinstance(result, dict):
+        raise MeetingOpsError("acknowledgeOrbieNotification returned an unexpected result")
     return result

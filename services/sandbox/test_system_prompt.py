@@ -20,6 +20,12 @@ class SystemPromptTest(unittest.TestCase):
         self.assertIn("Distinguish direct internal views from AI-generated research", prompt)
         self.assertIn("If retrieval remains weak", prompt)
 
+    def test_command_failures_are_recoverable_or_reported(self) -> None:
+        prompt = SYSTEM_PROMPT.read_text()
+
+        self.assertIn("A nonzero exit status from a command is an input to reason about", prompt)
+        self.assertIn("Never end a turn silently after a failed command or tool", prompt)
+
     def test_mpp_fallback_discovery_guidance_is_present(self) -> None:
         prompt = SYSTEM_PROMPT.read_text()
 

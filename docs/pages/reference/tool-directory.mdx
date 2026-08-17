@@ -34,6 +34,7 @@ These are broadly useful across most deployments and are good candidates to conf
 | `slack` | Search Slack, read threads, inspect channels/users, and send or upload messages | `SLACK_BOT_TOKEN`; optional: `SLACK_SEARCH_TOKEN`, `SLACK_ETL_TOKEN` |
 | `gsuite` | Use Gmail, Calendar, Drive, Docs, Sheets, Slides, and Google Analytics | `GOOGLE_TOKEN_JSON` |
 | `meeting-ops` | Run approved Google Apps Script meeting cadences and manage the Orbie notification outbox | `GOOGLE_TOKEN_JSON`, `MEETING_OPS_SCRIPT_ID` |
+| `meeting-scheduler` | Find free/busy slots and govern one Calendar + World Foundation Zoom meeting per occurrence | `GOOGLE_TOKEN_JSON`, `ZOOM_ACCESS_TOKEN`, `CENTAUR_POSTGRES_DSN` |
 | `websearch` | Free web search via Parallel and deep research | None; `PARALLEL_API_KEY` for `deep_research`; `ANTHROPIC_API_KEY` for search synthesis |
 | `company_context` | Search indexed company history, private Slack conversations, and Google Docs | None |
 | `grafana` | Query dashboards, alerts, VictoriaMetrics, VictoriaLogs, and annotations | `GRAFANA_URL`, `GRAFANA_API_KEY` |
@@ -82,6 +83,7 @@ These are broadly useful across most deployments and are good candidates to conf
 | `granola` | Search and read Granola notes and transcripts | `GRANOLA_API_KEY` |
 | `gsuite` | Gmail, Calendar, Drive, Docs, Sheets, Slides, and Google Analytics | `GOOGLE_TOKEN_JSON` |
 | `meeting-ops` | Approved Apps Script cadence execution and Orbie notification outbox | `GOOGLE_TOKEN_JSON`, `MEETING_OPS_SCRIPT_ID` |
+| `meeting-scheduler` | Free/busy availability plus governed Calendar/Zoom booking, rescheduling, cancellation, and reconciliation | `GOOGLE_TOKEN_JSON`, `ZOOM_ACCESS_TOKEN`, `CENTAUR_POSTGRES_DSN` |
 | `linear` | Linear issues, projects, cycles, teams, workflow states, and labels | `LINEAR_API_KEY` |
 | `notion` | Notion pages, databases, blocks, comments, and users | `NOTION_API_KEY` |
 | `opentable` | Search OpenTable restaurant reservations | None |

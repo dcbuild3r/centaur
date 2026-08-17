@@ -2981,6 +2981,77 @@ describe('slackbotv2', () => {
     )
   })
 
+  it('posts a visible error when an expired stream later receives execution_failed', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({ state: sharedState })
+    codexApi.autoRespond = false
+    // The live Slack stream expires after its first append. The execution is
+    // still active at that point; its terminal failure arrives later and must
+    // be delivered as a normal fallback reply.
+    slackApi.failStreamAppendsAfter(1, 'message_not_in_streaming_state')
+
+    const parent = await postUserMessage('Context before a failed stream expiry.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> run something that fails`, parent.ts)
+    const key = threadKey(parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-stream-expired-failure-fallback',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> run something that fails`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => codexApi.streamCount === 1)
+    codexApi.emitOutputLines(
+      key,
+      sampleCodexNotifications('partial progress')
+        .slice(0, 8)
+        .map(notification => JSON.stringify(notification))
+    )
+    await waitFor(
+      () => codexApi.eventRequests.length >= 1
+        && slackApi.calls.some(call => call.method === 'chat.appendStream'),
+      3000
+    )
+
+    codexApi.emitSessionEvent(key, 'session.execution_failed', {
+      execution_id: 'exe-stream-expired-failure',
+      error: 'Lean exited with status 1',
+      status: 'failed'
+    })
+
+    await Promise.all(waits)
+    await waitFor(async () => {
+      const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
+      return threadState?.renderObligation === null
+    }, 3000)
+
+    const texts = await threadTexts(parent.ts)
+    expect(texts.some(text => text.includes('Execution failed: Lean exited with status 1'))).toBe(true)
+    expect(texts.some(text => text.includes(BROKEN_STREAM_TEXT))).toBe(false)
+    const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
+    expect(threadState).toEqual(
+      expect.objectContaining({
+        activeExecution: false,
+        renderObligation: null
+      })
+    )
+  })
+
   it('rotates Slack stream segments before they reach the streaming age limit', async () => {
     process.env.SLACK_STREAM_SEGMENT_MAX_AGE_MS = '120'
     try {

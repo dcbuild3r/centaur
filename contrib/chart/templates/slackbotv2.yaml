@@ -100,6 +100,10 @@ spec:
               value: {{ .Values.slackbotv2.responseMetadataMode | quote }}
             - name: SLACKBOTV2_RESPONSE_SERVICE_TIER_ENABLED
               value: {{ .Values.slackbotv2.responseServiceTierEnabled | quote }}
+{{- if .Values.slackbotv2.meetingAutomationAllowedChannelIds }}
+            - name: MEETING_AUTOMATION_ALLOWED_SLACK_CHANNEL_IDS
+              value: {{ .Values.slackbotv2.meetingAutomationAllowedChannelIds | quote }}
+{{- end }}
             - name: SLACKBOTV2_MESSAGE_OVERRIDES_STRATEGY
               value: {{ .Values.slackbotv2.messageOverridesStrategy.mode | quote }}
             - name: SLACKBOTV2_MESSAGE_OVERRIDES_MODEL

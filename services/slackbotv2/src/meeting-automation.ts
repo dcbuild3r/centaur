@@ -76,10 +76,14 @@ function isValidCustomInstructions(value: string): boolean {
   )
 }
 
-export function isWorldFoundationSlackDm(message: Message): boolean {
+export function isWorldFoundationMeetingAutomationSurface(
+  message: Message,
+  allowedChannelIds: readonly string[] = []
+): boolean {
   const teamId = rawSlackField(message.raw, 'team_id') ?? rawSlackField(message.raw, 'team')
   const channelId = rawSlackField(message.raw, 'channel')
-  return teamId === WORLD_FOUNDATION_SLACK_TEAM_ID && channelId?.startsWith('D') === true
+  if (teamId !== WORLD_FOUNDATION_SLACK_TEAM_ID || !channelId) return false
+  return channelId.startsWith('D') || allowedChannelIds.includes(channelId)
 }
 
 export async function dispatchMeetingAutomationCommand(
@@ -88,7 +92,10 @@ export async function dispatchMeetingAutomationCommand(
   command: MeetingAutomationCommand
 ): Promise<MeetingAutomationDispatchResult | null> {
   if (
-    !isWorldFoundationSlackDm(message)
+    !isWorldFoundationMeetingAutomationSurface(
+      message,
+      options.meetingAutomationAllowedChannelIds
+    )
     || message.author.isMe
     || message.author.isBot === true
   ) {
@@ -105,6 +112,9 @@ export async function dispatchMeetingAutomationCommand(
     requester_slack_user_id: requester.slackUserId,
     slack_channel_id: requester.slackChannelId,
     request_message_id: message.id,
+    ...(requester.slackChannelId.startsWith('D')
+      ? {}
+      : { slack_thread_ts: rawSlackField(message.raw, 'thread_ts') ?? message.id }),
     ...(command.customInstructions
       ? { custom_instructions: command.customInstructions }
       : {}),
@@ -118,7 +128,15 @@ function stripLeadingBotMention(text: string, botUserId?: string): string {
   const mention = botUserId
     ? new RegExp(`^\\s*<@${escapeRegExp(botUserId)}(?:\\|[^>]*)?>\\s*`, 'i')
     : /^\s*<@[A-Z0-9]+(?:\|[^>]*)?>\s*/i
-  return text.replace(mention, '')
+  const stripped = text.replace(mention, '')
+  if (stripped !== text) return stripped
+
+  // Slack's Chat SDK can render a leading user mention as a visible @name
+  // instead of preserving the raw <@USER> token. In a DM the command parser
+  // is already scoped to the bot's conversation, so accept that rendered form.
+  return botUserId
+    ? stripped.replace(/^\s*@[A-Z0-9_.-]+\b\s*/i, '')
+    : stripped
 }
 
 function rawSlackField(raw: unknown, key: string): string | undefined {

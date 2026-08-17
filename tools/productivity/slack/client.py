@@ -1860,6 +1860,7 @@ class SlackClient:
         blocks: list | None = None,
         unfurl_links: bool | None = None,
         unfurl_media: bool | None = None,
+        client_msg_id: str | None = None,
     ) -> dict:
         """Send a message to a channel or Slack user DM.
 
@@ -1893,6 +1894,8 @@ class SlackClient:
                 kwargs["unfurl_links"] = unfurl_links
             if unfurl_media is not None:
                 kwargs["unfurl_media"] = unfurl_media
+            if client_msg_id:
+                kwargs["client_msg_id"] = client_msg_id
             response = self._client.chat_postMessage(**kwargs)
             return {
                 "channel": channel_id,
@@ -1910,6 +1913,7 @@ class SlackClient:
         blocks: list | None = None,
         unfurl_links: bool | None = None,
         unfurl_media: bool | None = None,
+        client_msg_id: str | None = None,
     ) -> dict:
         """Send a direct message to a Slack user.
 
@@ -1931,6 +1935,7 @@ class SlackClient:
             blocks=blocks,
             unfurl_links=unfurl_links,
             unfurl_media=unfurl_media,
+            client_msg_id=client_msg_id,
         )
 
     @staticmethod

@@ -16,6 +16,9 @@ function runCadenceJob(payload) {
       return item.id === request.cadenceId;
     })[0];
     if (!cadence) throw new Error('Unknown cadence ' + request.cadenceId);
+    if (request.documentEditorEmails !== undefined) {
+      cadence.documentEditorEmails = request.documentEditorEmails;
+    }
     var caller = parseCaller_(request);
     if (!MeetingOpsPure.isCadenceAuthorized(cadence, caller.requesterSlackUserId)) {
       throw new Error('Cadence is not authorized for ' + caller.requesterSlackUserId);
@@ -30,6 +33,53 @@ function runCadenceJob(payload) {
       manual: true,
       customInstructions: customInstructions
     });
+  });
+}
+
+// Orbie supplies the normalized Notion row after resolving its recipients
+// against Slack. This keeps Notion and Slack credentials out of Apps Script,
+// while the durable workflow remains the only production caller of this
+// entrypoint.
+function runScheduledCadenceJob(payload) {
+  var request = typeof payload === 'string' ? JSON.parse(payload) : (payload || {});
+  if (request.requesterSlackTeamId !== WORLD_SLACK_TEAM_ID) {
+    throw new Error('Unsupported Slack team ' + request.requesterSlackTeamId);
+  }
+  if (request.scheduledByOrbie !== true || !request.cadence) {
+    throw new Error('scheduledByOrbie and cadence are required');
+  }
+  return withScriptLock_(function () {
+    var cadence = MeetingOpsPure.normalizeCadence(request.cadence);
+    var occurrence = new Date(request.occurrenceAt);
+    if (isNaN(occurrence.getTime())) {
+      throw new Error('occurrenceAt must be an ISO timestamp');
+    }
+    validateMeeting_(cadence);
+    processNotesNotification_(cadence, new Date(request.now || new Date()), null, true);
+    return processAgenda_(cadence, occurrence, null, {
+      scheduled: true,
+      occurrence: occurrence,
+      customInstructions: request.customInstructions
+    });
+  });
+}
+
+// Process notes for all already-created occurrences without creating the
+// next agenda early. This is called on each scheduler tick so advancing a
+// Notion Next date does not delay the previous meeting's notes notification.
+function runScheduledNotificationsJob(payload) {
+  var request = typeof payload === 'string' ? JSON.parse(payload) : (payload || {});
+  if (request.requesterSlackTeamId !== WORLD_SLACK_TEAM_ID) {
+    throw new Error('Unsupported Slack team ' + request.requesterSlackTeamId);
+  }
+  if (request.scheduledByOrbie !== true || !request.cadence) {
+    throw new Error('scheduledByOrbie and cadence are required');
+  }
+  return withScriptLock_(function () {
+    var cadence = MeetingOpsPure.normalizeCadence(request.cadence);
+    validateMeeting_(cadence);
+    processNotesNotification_(cadence, new Date(request.now || new Date()), null, true);
+    return { status: 'notifications-processed', meetingId: cadence.id };
   });
 }
 
@@ -60,7 +110,9 @@ function getPendingOrbieNotificationsForCaller(payload) {
     if (key.indexOf(ORBIE_OUTBOX_PREFIX) !== 0) return false;
     var notification = JSON.parse(properties[key]);
     return notification.visibility === 'private' &&
-      notification.recipientSlackUserId === caller.requesterSlackUserId;
+      (notification.recipientSlackUserId === caller.requesterSlackUserId ||
+        (notification.channelId &&
+          notification.requesterSlackUserId === caller.requesterSlackUserId));
   }).map(function (key) {
     return JSON.parse(properties[key]);
   });
@@ -88,8 +140,11 @@ function acknowledgeOrbieNotificationForCaller(payload) {
   var raw = properties.getProperty(key);
   if (!raw) throw new Error('Unknown notification ' + request.notificationId);
   var notification = JSON.parse(raw);
+  var isCallerRecipient = notification.recipientSlackUserId === caller.requesterSlackUserId;
+  var isCallerChannelRequest = notification.channelId &&
+    notification.requesterSlackUserId === caller.requesterSlackUserId;
   if (notification.visibility !== 'private' ||
-      notification.recipientSlackUserId !== caller.requesterSlackUserId) {
+      (!isCallerRecipient && !isCallerChannelRequest)) {
     throw new Error('Notification is not authorized for ' + caller.requesterSlackUserId);
   }
   properties.deleteProperty(key);
@@ -103,14 +158,17 @@ function processAgenda_(meeting, now, requesterSlackUserId, options) {
   var staleWindowMin = meeting.staleWindowMin == null
     ? 12 * 60
     : Number(meeting.staleWindowMin);
-  var occurrenceSelection = selectAgendaOccurrence_(
-    meeting,
-    now,
-    leadMin,
-    staleWindowMin,
-    requesterSlackUserId,
-    options.manual === true
-  );
+  var occurrenceSelection = options.occurrence ? {
+    occurrence: options.occurrence,
+    oneOffManual: false
+  } : selectAgendaOccurrence_(
+      meeting,
+      now,
+      leadMin,
+      staleWindowMin,
+      requesterSlackUserId,
+      options.manual === true
+    );
   if (!occurrenceSelection) {
     return;
   }
@@ -184,13 +242,15 @@ function processAgenda_(meeting, now, requesterSlackUserId, options) {
     }
   }
   assertTemplateCopyReady_(record.docId, meeting, false);
+  ensureDocumentEditors_(record.docId, meeting);
 
   if (!MeetingOpsPure.wasNotificationDelivered(
     record,
     'agenda',
     requesterSlackUserId
   )) {
-    var agendaText = '📋 ' + meeting.title + ' agenda is ready: ' + record.docUrl +
+    var agendaText = '📋 ' + meeting.title + ' agenda is ready: ' +
+      slackDocumentLink_(record.docUrl) +
       '\nAttendees: ' + formatAttendees_(meeting.attendees);
     deliverNotification_(
       meeting,
@@ -199,7 +259,8 @@ function processAgenda_(meeting, now, requesterSlackUserId, options) {
       agendaText,
       occurrence,
       recordKey,
-      requesterSlackUserId
+      requesterSlackUserId,
+      options.scheduled === true
     );
     MeetingOpsPure.markNotificationDelivered(
       record,
@@ -209,7 +270,7 @@ function processAgenda_(meeting, now, requesterSlackUserId, options) {
   }
 
   writeJsonProperty_(properties, recordKey, record);
-  if (!occurrenceSelection.oneOffManual) {
+  if (!occurrenceSelection.oneOffManual && !options.scheduled) {
     properties.setProperty(
       NEXT_OCCURRENCE_PREFIX + meeting.id,
       advanceOccurrence_(meeting, occurrence).toISOString()
@@ -228,7 +289,7 @@ function processAgenda_(meeting, now, requesterSlackUserId, options) {
   return result;
 }
 
-function processNotesNotification_(meeting, now, requesterSlackUserId) {
+function processNotesNotification_(meeting, now, requesterSlackUserId, scheduled) {
   validateMeeting_(meeting);
   var properties = PropertiesService.getScriptProperties();
   var prefix = AGENDA_RECORD_PREFIX + meeting.id + ':';
@@ -248,7 +309,8 @@ function processNotesNotification_(meeting, now, requesterSlackUserId) {
       : Number(meeting.notesDelayMin);
     if (!MeetingOpsPure.shouldPost(now, occurrence, delayMin)) return;
 
-    var notesText = '✅ Notes from today\'s ' + meeting.title + ': ' + record.docUrl;
+    var notesText = '✅ Notes from today\'s ' + meeting.title + ': ' +
+      slackDocumentLink_(record.docUrl);
     deliverNotification_(
       meeting,
       record,
@@ -256,7 +318,8 @@ function processNotesNotification_(meeting, now, requesterSlackUserId) {
       notesText,
       occurrence,
       key,
-      requesterSlackUserId
+      requesterSlackUserId,
+      scheduled === true
     );
     MeetingOpsPure.markNotificationDelivered(
       record,
@@ -279,8 +342,8 @@ function validateMeeting_(meeting) {
   if (!Array.isArray(meeting.attendees)) {
     throw new Error('attendees must be an array for ' + meeting.id);
   }
-  if (meeting.cadence !== 'weekly') {
-    throw new Error('Only weekly cadence is supported in Layer 0 for ' + meeting.id);
+  if (['weekly', 'bi-weekly', 'monthly', 'quarterly'].indexOf(meeting.cadence) === -1) {
+    throw new Error('Unsupported cadence ' + meeting.cadence);
   }
   if (meeting.visibility === 'public' &&
       (!meeting.notifyChannel || !meeting.notifyChannelName)) {
@@ -302,7 +365,8 @@ function deliverNotification_(
   text,
   occurrence,
   recordKey,
-  requesterSlackUserId
+  requesterSlackUserId,
+  scheduled
 ) {
   queueOrbieNotification_(
     meeting,
@@ -311,7 +375,8 @@ function deliverNotification_(
     text,
     occurrence,
     recordKey,
-    requesterSlackUserId
+    requesterSlackUserId,
+    scheduled
   );
 }
 
@@ -322,13 +387,15 @@ function queueOrbieNotification_(
   text,
   occurrence,
   recordKey,
-  requesterSlackUserId
+  requesterSlackUserId,
+  scheduled
 ) {
   if (meeting.visibility === 'public') assertAllowedChannel_(meeting);
   var timeZone = meeting.timeZone || DEFAULT_TIME_ZONE;
   var recipients = MeetingOpsPure.notificationRecipients(
     meeting,
-    requesterSlackUserId
+    requesterSlackUserId,
+    scheduled === true
   );
   recipients.forEach(function (recipientSlackUserId) {
     var notificationId = MeetingOpsPure.notificationKey(
@@ -345,6 +412,7 @@ function queueOrbieNotification_(
       visibility: meeting.visibility,
       channelId: meeting.notifyChannel || null,
       channelName: meeting.notifyChannelName || null,
+      requesterSlackUserId: requesterSlackUserId || null,
       recipientSlackUserId: recipientSlackUserId,
       recipientUserIds: recipientSlackUserId ? [recipientSlackUserId] : [],
       text: text,
@@ -482,10 +550,14 @@ function findCurrentAgendaOccurrence_(
 }
 
 function advanceOccurrence_(meeting, occurrence) {
-  if (meeting.cadence === 'weekly') {
-    return MeetingOpsPure.nextWeeklyOccurrence(occurrence);
+  if (typeof MeetingOpsPure.nextOccurrence === 'function') {
+    return MeetingOpsPure.nextOccurrence(
+      occurrence,
+      meeting.cadence,
+      meeting.timeZone || DEFAULT_TIME_ZONE
+    );
   }
-  throw new Error('Unsupported cadence ' + meeting.cadence);
+  return MeetingOpsPure.nextWeeklyOccurrence(occurrence);
 }
 
 function findDocument_(folderId, name) {
@@ -516,6 +588,38 @@ function createDocumentFromTemplate_(meeting, docName, occurrence, customInstruc
     targetFile.setTrashed(true);
     throw error;
   }
+}
+
+function slackDocumentLink_(url) {
+  return '<' + String(url) + '|Open document>';
+}
+
+function ensureDocumentEditors_(documentId, meeting) {
+  var emails = meeting.documentEditorEmails || [];
+  if (!Array.isArray(emails)) {
+    throw new Error('documentEditorEmails must be an array');
+  }
+  var normalized = uniqueStrings_(emails.map(function (email) {
+    return String(email).trim().toLowerCase();
+  }).filter(function (email) {
+    return email;
+  }));
+  normalized.forEach(function (email) {
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      throw new Error('documentEditorEmails contains an invalid email');
+    }
+  });
+  if (!normalized.length) return;
+  var file = DriveApp.getFileById(documentId);
+  var existing = {};
+  (file.getEditors ? file.getEditors() : []).forEach(function (editor) {
+    var email = String(editor.getEmail ? editor.getEmail() : '').trim().toLowerCase();
+    if (email) existing[email] = true;
+  });
+  var missing = normalized.filter(function (email) {
+    return !existing[email];
+  });
+  if (missing.length) file.addEditors(missing);
 }
 
 function supersedeMalformedDocument_(file) {
@@ -661,6 +765,8 @@ if (typeof module !== 'undefined') {
     prepareTemplateCopy_: prepareTemplateCopy_,
     processAgenda_: processAgenda_,
     runCadenceJob: runCadenceJob,
+    runScheduledCadenceJob: runScheduledCadenceJob,
+    runScheduledNotificationsJob: runScheduledNotificationsJob,
     setMeetingDate_: setMeetingDate_
   };
 }
