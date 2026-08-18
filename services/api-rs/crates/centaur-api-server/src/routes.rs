@@ -472,7 +472,8 @@ async fn metrics(State(state): State<AppState>) -> Response {
 #[derive(Clone, Copy)]
 enum RouteAccess {
     Capability(Capability),
-    PrincipalSlackProxy,
+    PrincipalOnly,
+    SlackbotIngress,
     ArchiveDownload,
 }
 
@@ -509,7 +510,10 @@ async fn authorize_api_request(
 
     let allowed = match access {
         RouteAccess::Capability(capability) => caller.has_capability(capability),
-        RouteAccess::PrincipalSlackProxy => caller_can_use_slack_proxy(&caller),
+        RouteAccess::PrincipalOnly => caller.class() == CallerClass::Principal,
+        RouteAccess::SlackbotIngress => {
+            caller.class() == CallerClass::Ingress && caller.identity() == "slackbot"
+        }
         RouteAccess::ArchiveDownload => {
             caller.has_capability(Capability::AdminArchive)
                 || caller
@@ -559,14 +563,6 @@ async fn authorize_api_request(
     next.run(request).await
 }
 
-/// Slackbot is a trusted ingress for the Slack broker endpoints. Other
-/// ingress callers must not inherit that authority; principal JWTs continue
-/// to use the scoped SlackProxy capability.
-fn caller_can_use_slack_proxy(caller: &AuthenticatedCaller) -> bool {
-    (caller.class() == CallerClass::Principal && caller.has_capability(Capability::SlackProxy))
-        || (caller.class() == CallerClass::Ingress && caller.identity() == "slackbot")
-}
-
 fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
     let capability = |capability| Some(RouteAccess::Capability(capability));
     match (method, route) {
@@ -590,10 +586,14 @@ fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
         }
         (&Method::POST, "/api/workflows/events") => capability(Capability::WorkflowsEvents),
         (&Method::POST, "/api/meeting-scheduling/runs") => capability(Capability::WorkflowsWrite),
+        (&Method::POST, "/api/slack/meeting-automation/runs")
+        | (&Method::POST, "/api/slack/meeting-scheduling/runs") => {
+            Some(RouteAccess::SlackbotIngress)
+        }
         (&Method::POST, "/api/admin/slack/archive-imports/{import_id}/download-url") => {
             Some(RouteAccess::ArchiveDownload)
         }
-        (_, route) if route.starts_with("/api/slack/") => Some(RouteAccess::PrincipalSlackProxy),
+        (_, route) if route.starts_with("/api/slack/") => Some(RouteAccess::PrincipalOnly),
         (_, route) if route.starts_with("/api/admin/slack/archive-imports") => {
             capability(Capability::AdminArchive)
         }
@@ -3326,13 +3326,18 @@ mod slack_meeting_automation_request_tests {
     }
 
     #[test]
-    fn trusted_slackbot_ingress_can_use_slack_proxy_routes() {
+    fn trusted_slackbot_ingress_can_use_slack_broker_routes() {
         let auth = ApiAuthConfig::testing_with_slack_ingress("slack-key", "jwt-secret");
         let mut headers = HeaderMap::new();
         headers.insert(header::AUTHORIZATION, "Bearer slack-key".parse().unwrap());
         let caller = auth.authenticate(&headers).unwrap();
 
-        assert!(caller_can_use_slack_proxy(&caller));
+        assert!(matches!(
+            route_access(&Method::POST, "/api/slack/meeting-automation/runs"),
+            Some(RouteAccess::SlackbotIngress)
+        ));
+        assert_eq!(caller.class(), CallerClass::Ingress);
+        assert_eq!(caller.identity(), "slackbot");
     }
 
     #[test]
@@ -3589,7 +3594,7 @@ mod meeting_scheduling_request_tests {
         ));
         assert!(matches!(
             route_access(&Method::POST, "/api/slack/meeting-scheduling/runs"),
-            Some(RouteAccess::PrincipalSlackProxy)
+            Some(RouteAccess::SlackbotIngress)
         ));
     }
 
