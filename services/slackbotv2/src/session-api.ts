@@ -2271,7 +2271,6 @@ function isTerminalCodexOutputLine(line: string): boolean {
     return false
   }
   if (!isJsonObject(payload)) return false
-
   return (
     payload.type === 'turn.completed' ||
     payload.type === 'turn.failed' ||

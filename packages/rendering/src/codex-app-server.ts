@@ -773,6 +773,15 @@ function errorMessage(event: any): string {
   )
 }
 
+/** Identifies retryable Codex reconnect notifications for ingress adapters. */
+export function isRetryableCodexErrorNotification(source: unknown): boolean {
+  if (!isRecord(source)) return false
+  const event = normalizeServerNotification(source)
+  if (!event) return false
+  if (String(event.type ?? '') !== 'error') return false
+  return event.willRetry === true
+}
+
 function isFailedTurn(event: any): boolean {
   const status = String(event?.turn?.status ?? event?.status ?? '').toLowerCase()
   return status === 'failed' || status === 'error' || status === 'cancelled' || status === 'canceled'
