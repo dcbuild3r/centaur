@@ -1,0 +1,438 @@
+---
+title: AI Ops Operating Model
+description: A practical operating model for governing, releasing, and verifying agentic tools and workflows.
+---
+
+# AI Ops Operating Model
+
+AI Ops is the discipline of operating agents as production software. It covers
+the agent's identity, data boundary, tools, workflows, credentials, prompts,
+durable state, release process, and user-visible outcome. A good prompt can
+improve a turn; it cannot make an unauthorized tool call safe or turn a healthy
+pod into a successful delivery.
+
+This page is the operating hub. Use the [architecture](/architecture) page for
+the runtime model, [security](/security) for the threat model, and
+[advanced permissioning](/secrets/advanced-permissioning) for principal and
+credential configuration.
+
+## Operating principles
+
+1. **Bound the request before retrieving data.** Name the audience, source,
+   time range, action mode, and retention expectation.
+2. **Prefer durable state over process state.** Sessions, messages, executions,
+   events, workflow checkpoints, and idempotency records are the evidence that
+   a run can be recovered and safely understood.
+3. **Use least privilege at every layer.** A user-visible reply permission is
+   not a tool grant. A tool grant is not a workflow grant. A credential source
+   is not proof that the caller is authorized to use it.
+4. **Separate read, draft, write, send, delete, and execute.** Destructive or
+   externally visible actions need a narrower policy and a stronger acceptance
+   test than a read-only answer.
+5. **Make side effects replay-safe.** Retries are normal in a durable system;
+   every external write needs a stable idempotency key or a state check.
+6. **Treat citations as part of correctness.** Important answers should carry
+   source links, timestamps, query identifiers, or commit references.
+7. **Verify the user-visible surface.** Code, CI, a rollout, an HTTP 200, or a
+   ready pod is useful evidence, but none is sufficient proof of the final
+   Slack, API, document, or workflow behavior.
+
+:::warning[Do not widen scope silently]
+
+If the requested audience, source, action, or retention changes during a run,
+stop and restate the new boundary. Do not use a broad role, a wider channel, or
+an operator's browser session as a shortcut.
+
+:::
+
+## Ownership and change boundaries
+
+Keep the generic control plane small and place organization-specific behavior in
+an overlay, tool, workflow, prompt, or deployment configuration. The owner of a
+change should be clear before implementation begins.
+
+| Surface | Primary responsibility | Review question |
+| --- | --- | --- |
+| `services/api-rs/` | Durable sessions, execution, recovery, workflow state, and persistence | Does the change preserve ordering, recovery, cancellation, and authorization? |
+| Ingress services | Event validation, principal derivation, session forwarding, and rendering | Is the event accepted for the right audience and delivered to the right surface? |
+| `services/sandbox/` and harness adapters | Isolation, prompt composition, tool installation, and runtime behavior | Can the sandbox reach only the intended control plane and proxy? |
+| `services/iron-proxy/` and secret sources | Credential resolution and request matching | Does the agent see only a placeholder, and is the real credential bound to the right host/path? |
+| `tools/` | Typed upstream clients and thin CLIs | Are inputs bounded, secrets declared, outputs redacted, and destructive methods explicit? |
+| `workflows/` | Durable automation and side-effect orchestration | Are checkpoints, schedules, principals, retries, and idempotency defined? |
+| `contrib/chart/` and infrastructure | Runtime configuration, policies, persistence, and rollout | Does desired configuration match the live release and its data assumptions? |
+| Console and operator procedures | Grants, revocation, secret-source refresh, and incident response | Can an operator prove what changed and undo or contain it? |
+
+Before implementation, classify the change as one or more of: tool,
+workflow, overlay, ingress, control plane, sandbox, chart/infrastructure, or
+documentation. Assign reviewers from the affected ownership boundary. Do not
+let a documentation page imply that a pending working-tree change is deployed.
+
+## Source of truth and evidence
+
+Different surfaces answer different questions. Record the source and its
+freshness rather than collapsing them into a single status label.
+
+| Question | Best evidence | What it does not prove |
+| --- | --- | --- |
+| What should the system do? | Code, tests, RFCs, and reviewed documentation | That the behavior is deployed or authorized |
+| What is intended to be deployed? | Helm values, chart templates, image references, and infrastructure configuration | That the live cluster accepted the configuration |
+| What happened in a run? | Postgres session/message/execution/event rows and workflow state | That the final platform message was visible |
+| What is live now? | Image digest, Helm revision, deployment state, pod readiness, and runtime configuration | That a caller can use every configured capability |
+| Why did it fail? | Structured logs, metrics, traces, checkpoints, and API responses | That a retry is safe or idempotent |
+| Did the user receive the result? | Fresh Slack/API/document readback with source links | That the action was appropriate for the audience |
+
+For an incident or release, record these separately:
+
+- **Durable state:** the session, message, execution, event, workflow, and
+  idempotency records.
+- **Runtime state:** pods, proxy connections, readiness, database connectivity,
+  and tool discovery.
+- **Deployed state:** commit, image digest, chart version, Helm revision, and
+  migrations.
+- **Authorization state:** principal, roles, direct grants, secret source, and
+  request-matching policy.
+- **User outcome:** the exact final message, document, API response, or other
+  external side effect.
+- **Confidence:** verified facts, inferences, and still-pending checks.
+
+## Tools, workflows, and agent behavior
+
+### Tools
+
+Tools are typed integrations exposed through thin local CLIs. A tool's directory
+or metadata proves only that it exists in source. A live capability requires all
+of the following:
+
+1. The tool is installed and visible in the target sandbox.
+2. Its declared secret is backed by an active source.
+3. The current principal has the required role or direct grant.
+4. The proxy permits the intended upstream host and request location.
+5. The caller's requested method is allowed: read, draft, write, send, or
+   delete.
+6. A real, bounded invocation succeeds and returns the expected redacted shape.
+
+Use `centaur-tools list` and `<tool> --help` during a preflight. Test an
+authorized principal and an unauthorized principal when access is part of the
+change. Keep raw secrets, raw exports, personal data, and unbounded result sets
+out of shared channels.
+
+### Workflows
+
+Use a durable workflow when work must sleep, wait for an event, survive a
+restart, coordinate multiple turns, or produce an external side effect. In
+Workflows v2:
+
+- export a stable `WORKFLOW_NAME`;
+- put external calls, tool calls, writes, and notifications behind
+  `ctx.step(...)` or the equivalent durable boundary;
+- declare schedules and webhooks in metadata;
+- declare `WORKFLOW_PRINCIPAL = True` when the workflow host calls tools;
+- grant the generated workflow principal only the roles and secrets it needs;
+- use a stable occurrence key or idempotency key;
+- verify checkpoint, run, delivery, and acknowledgement state after execution.
+
+For a document-and-notification workflow, the safe order is:
+
+1. Resolve the caller, source record, audience, and destination.
+2. Create or reuse the source-derived output using a stable occurrence key.
+3. Read the pending notification or side-effect record.
+4. Deliver it to the approved destination.
+5. Acknowledge it only after delivery succeeds.
+6. Advance the source record only after all required side effects succeed.
+
+This ordering makes a retry converge on one output and one delivery instead of
+creating duplicates. Private outputs should be DM-only or explicitly shared;
+public outputs should use an allowlist and fail closed.
+
+### Agent behavior
+
+Prompt guidance should make the control boundary easy to follow:
+
+```text
+Audience: named people or exact channel
+Data boundary: source page, repository, channel, or time range
+Action mode: read-only, draft, write, send, delete, or execute
+Evidence: source links and timestamps required
+Retention: transient answer or durable record
+```
+
+For high-impact requests, ask for a draft or read-only analysis first. For
+engineering work, state the repository and branch, preserve unrelated dirty
+work, request a narrow diff, and separate local, CI, deployment, and live
+acceptance evidence.
+
+## Meeting knowledge and AI automation
+
+The meeting-knowledge project is a useful reference design for AI Ops because
+it makes the human, data, and automation boundaries explicit. Its proof of
+concept established a standardized repository and output shape; the remaining
+work is technical validation, governance, permissions, retention, and reliable
+automation. See [Meeting Automation](/operate/meeting-automation) for the
+runtime-specific contract.
+
+The intended pipeline is:
+
+```text
+approved meeting
+  -> recording/transcript source
+  -> calendar and meeting metadata
+  -> repository record and template
+  -> AI summary, decisions, actions, and open questions
+  -> meeting-owner review
+  -> permissioned publication
+  -> separate transcript and summary retention lifecycles
+```
+
+| Stage | Required control |
+| --- | --- |
+| Capture | Exclude legally sensitive, privileged, restricted, or prohibited meetings |
+| Matching | Associate the transcript with the correct calendar event and repository record |
+| Processing | Use a standardized template and preserve the source link and freshness |
+| Review | Require the meeting owner or named reviewer to approve before publication |
+| Publication | Apply attendee/group permissions and prevent unauthorized discovery |
+| Retention | Expire source transcripts separately from approved summaries; verify deletion |
+| Failure | Keep incomplete or improperly permissioned records unpublished and route them for review |
+
+The direct Google file capability and the meeting workflow are different
+boundaries. Direct file work is an explicit tool grant constrained by the
+Workspace ACL. Meeting automation is a dedicated workflow and worker contract
+that owns template-derived output, notification delivery, acknowledgement, and
+retry behavior. Do not grant a broad infrastructure role just because a user
+needs one document operation.
+
+The project notes also expose the decisions that must not be hidden inside an
+implementation: which capture source is approved, how meeting records are
+matched, how access inherits from attendees or approved groups, how owners are
+notified, who owns production support, and how legal holds interact with the
+retention schedule. A successful manual demonstration proves the workflow
+shape; it does not prove organization-wide authorization or automated deletion.
+
+The planning record is useful context but is not release evidence. In the
+20 August 2026 snapshot, the Projects database lists **AI automations** as
+Company Ops, priority P1, status In progress, with a 30 September 2026 due
+date. Its linked resources include the scoping spreadsheet, the Meeting
+Repository Plan, and Technical Validation. Use those records to establish
+intent and ownership; use repository, deployment, authorization, and
+user-visible checks to establish what is actually ready.
+
+## Access and data boundaries
+
+The access path is:
+
+```text
+ingress event -> principal -> roles/direct grants -> secret source
+-> proxy request rules -> upstream capability -> bounded result
+```
+
+The following boundaries are independent and must be checked independently:
+
+- ingress signature and service authentication;
+- user, channel, issue, conversation, or workflow principal;
+- role and direct-grant assignment;
+- tool or workflow visibility;
+- credential source and rotation status;
+- proxy host, method, path, header, query, or database routing;
+- source-system ACLs such as a document or repository share;
+- output audience and retention policy.
+
+Credentials should be injected at the egress boundary. The sandbox receives a
+placeholder or local proxy endpoint, not a long-lived token or raw database
+DSN. A failed secret read may be an authorization boundary; it is not evidence
+that the secret is absent. After rotation, re-sync or restart the dependent
+proxy path and run a fresh user-visible smoke test.
+
+Treat live messages, projected context, attachments, transcripts, documents,
+wallet-level analytics, browser artifacts, logs, and generated summaries as
+separate data classes. Approve source inventory and retention before enabling
+ETL or projection. A retention value of zero may disable deletion; it is not by
+itself an implemented retention policy.
+
+## Release and verification gates
+
+Use the narrowest gate that proves the changed boundary, then add cross-service
+proof when the change crosses a service boundary.
+
+| Change | Required local proof | Required runtime proof |
+| --- | --- | --- |
+| Tool | Format/type/lint/tests, discovery, `--help`, redaction fixtures | Bounded sandbox invocation with an authorized and denied principal |
+| Workflow | Handler tests, replay/idempotency tests, metadata validation | Real run, checkpoint/readback, delivery, acknowledgement, and same-input retry |
+| Overlay or skill | Source/ref inspection, prompt and mount tests | Fresh sandbox discovery and behavior on the intended image |
+| Ingress or control plane | Focused unit/integration tests and protocol checks | Durable session trace from receipt through final delivery |
+| Chart or runtime | `helm lint`, rendered templates, migration/order checks, image build | Rollout, readiness, proxy/secret state, and a fresh user-visible result |
+| Production release | Exact commit, digest, and reviewed change set | Helm revision, expected deployments, `/healthz`, `/readyz`, and audience-correct smoke tests |
+
+Never use a broad deploy as a substitute for a focused test. Never use a
+passing CI check as proof of live authorization. Keep three statuses in release
+notes: **code complete**, **deployed**, and **live accepted**.
+
+## Observability and incident response
+
+For a missing or incorrect response, trace the whole path in order:
+
+```text
+platform receipt
+  -> session registration
+  -> durable user message
+  -> execution claim and sandbox assignment
+  -> persisted event stream
+  -> render obligation
+  -> final platform message
+```
+
+Check `/healthz` and `/readyz`, but also inspect the API/session rows, sandbox
+assignment, workflow run state, proxy synchronization, tool discovery, and the
+actual destination. Component health is a prerequisite, not a user outcome.
+
+For a workflow incident, inspect the last completed checkpoint and the
+idempotency record before retrying. For an access incident, compare the exact
+principal and role snapshot before and after reconciliation. For a data incident,
+contain the destination first, preserve a bounded evidence snapshot, then
+review source rows, projected documents, attachments, and retention jobs.
+
+An incident brief should include:
+
+- impact and affected audience;
+- first observed and last known-good times;
+- exact commit, image, chart, and revision;
+- durable-state evidence;
+- runtime, authorization, and telemetry evidence;
+- user-visible evidence;
+- verified facts versus inferences;
+- containment, recovery, and rollback steps;
+- owner, follow-up, and a re-verification date.
+
+## Lessons learned
+
+The following lessons are reusable across agentic operations:
+
+- **Durable event state beats an attached stream.** A reconnect or renderer
+  failure must not erase the execution or cause an unsafe blind retry.
+- **Presence is not authorization.** A tool directory, secret name, role, HTTP
+  200, or healthy pod says little about whether this caller can perform this
+  action.
+- **Side effects need a lifecycle.** Create/reuse, deliver, acknowledge, and
+  advance are separate transitions; combine them only behind explicit durable
+  state.
+- **Source provenance matters.** Pin overlay and repo-cache inputs where
+  reproducibility matters, record the exact source revision, and verify the
+  fresh sandbox rather than trusting a stale running pod.
+- **Auth changes are operational changes.** Profile scopes, principal identity,
+  secret-source references, token rotation, network-policy ports, and database
+  routing can all look like application bugs. Check the auth and egress path
+  early.
+- **An index is not a corpus contract.** Shared-drive synchronization only
+  covers documents visible to the credential unless the drive corpus and
+  drive ID are explicitly selected. Database names and routes must likewise be
+  tested end to end; a configured DSN can still fail when the proxy has no
+  upstream for the requested database.
+- **Control-plane upgrades need reconnect acceptance.** API authentication,
+  database migrations, or API-rs rollouts can disconnect Slackbot and other
+  gateways even when the deployment is healthy. Include reconnect, durable
+  session recovery, and final-message checks in the rollout gate.
+- **Small release batches improve review.** Community PR history shows the
+  fastest path is a narrow change, explicit deployment evidence, focused
+  review, rebase/chart refresh when needed, and a recorded merge or rollback
+  outcome.
+- **Capability configuration needs a precedence model.** When model, harness,
+  workflow, channel, and deployment defaults coexist, document which level wins
+  and validate model/harness pairs together.
+- **Memory should be curated, not dumped.** Company context, meeting notes,
+  Slack history, and documents become useful when retrieval is scoped to the
+  prompt, audience, and purpose. Broad context without a source boundary creates
+  disclosure and freshness risk.
+- **Human review remains a feature.** AI-generated summaries, external messages,
+  destructive operations, and durable records need an owner or reviewer before
+  publication.
+
+## What the PR and community history teaches
+
+The reviewed Centaur history and external community discussions show a
+consistent operating loop: a user or operator runs a capability in a real
+deployment, reports the smallest useful change, proves it with focused tests,
+and asks maintainers to review the integration boundary. The strongest signals
+were:
+
+The examples below deliberately span the World Foundation fork's release work
+and the wider upstream/community history. A community PR is evidence of a
+use case and an integration pattern, not an automatic recommendation to copy
+the change into the fork.
+
+| Signal | Example from the history | AI Ops implication |
+| --- | --- | --- |
+| Ship a useful capability with real evidence | GitHub ingress work was deployed before its upstream review; later the GitHub client landed in main | Deployment evidence accelerates review, but it does not replace security and upstream fit review |
+| Keep fixes narrow and independently reviewable | A set of ingress and Linear/image fixes was offered as separate PRs after running in production for more than a week | Split changes by failure mode and preserve a clear rollback boundary |
+| Treat chart and release conflicts as part of the change | Workflow-event support merged after chart conflicts were fixed; model-default work required another rebase and chart version bump | Configuration, chart version, and runtime tests are first-class code, not release afterthoughts |
+| Make configuration precedence explicit | Per-channel and per-workflow model/reasoning defaults exposed the need to define precedence and validate model/harness pairs | Every AI setting needs a documented hierarchy and an override test |
+| Diagnose auth and egress before blaming the model | Rotating OAuth tokens, proxy synchronization, database routing, and API updates all appeared as intermittent agent failures | Include identity, proxy, network policy, and database-route checks in the first diagnostic pass |
+| Keep a contributor feedback loop | New contributors offered small review/status features and asked whether they fit the project's direction | Provide a low-friction path for small experiments, plus a deliberate feature-fit review |
+
+The fork's own change history reinforces this pattern. Early work established
+the deployment and sandbox boundary; the next wave focused on principal and
+secret-source reconciliation; later work added meeting automation, scheduling,
+health/readiness visibility, and release reconciliation. The result is a useful
+sequence for AI Ops programs: establish isolation and authority first, then add
+capabilities, then add automation, and only then widen audience or schedule.
+
+The community also identified two product-level opportunities that belong in
+the operating model rather than in a single prompt: curated company context
+retrieval and proactive workflows. Both need a bounded source inventory,
+freshness signal, audience policy, and an explicit human approval path. “More
+memory” or “more automation” is not a sufficient safety or product
+specification.
+
+Useful anchors from the reviewed history include Foundation Meeting Ops in
+[PR #60](https://github.com/worldcoin-foundation/centaur/pull/60), the
+Foundation release/configuration sequence through [PR #103](https://github.com/worldcoin-foundation/centaur/pulls?q=is%3Apr+is%3Aclosed),
+upstream workflow events in [PR #1248](https://github.com/paradigmxyz/centaur/pull/1248),
+per-scope model defaults in [PR #1073](https://github.com/paradigmxyz/centaur/pull/1073)
+and [PR #1075](https://github.com/paradigmxyz/centaur/pull/1075), and community
+review/status proposals in [PR #1414](https://github.com/paradigmxyz/centaur/pull/1414)
+and [PR #1415](https://github.com/paradigmxyz/centaur/pull/1415).
+
+## Change-ledger template
+
+For each material AI Ops change, record:
+
+```text
+Date and owner:
+Change class: tool | workflow | ingress | control plane | sandbox | chart | data
+Purpose and intended audience:
+Data sources and retention:
+Authorization boundary:
+Code commit / image / chart revision:
+Tests and focused checks:
+Deployment evidence:
+Live user-visible acceptance:
+Rollback or containment:
+Known gaps and follow-up owner:
+```
+
+## Source map
+
+This operating model synthesizes the Centaur architecture, security,
+permissioning, tools, Workflows v2, production deployment, and Slack ETL
+contracts, together with the internal operating notes and project plans for
+Orbie, meeting knowledge, AI automations, and community PR review. The internal
+notes are time-bound evidence, not a substitute for re-reading the current
+code, deployment, authorization state, or user-visible surface.
+
+- [Architecture](/architecture)
+- [How is Centaur securing my secrets?](/security)
+- [Advanced Permissioning](/secrets/advanced-permissioning)
+- [Creating Tools](/extend/tools)
+- [Creating Workflows](/extend/workflows)
+- [Workflows v2 Migration](/extend/workflows-v2)
+- [Deploying in Production](/deploying-in-production)
+- [Slack ETL](/operate/slack-etl)
+- [Orbie operating hub](https://app.notion.com/p/worldcoinfoundation/Orbie-3b3f1e63445a8078b9d2c312334422d9)
+- [Projects database](https://app.notion.com/p/worldcoinfoundation/Projects-3c1f1e63445a80a8b9aef2f92603cb6a)
+- [AI automations project](https://app.notion.com/p/worldcoinfoundation/AI-automations-3acf1e63445a80a288edd1440073ed80)
+- [Internal use cases and prompting](https://app.notion.com/p/3b4f1e63445a81019ba5d4a55159f31e)
+- [Operating and extending Orbie](https://app.notion.com/p/3b4f1e63445a8101b620e6c37a1799b3)
+- [Centaur community channel](https://slack.com/app_redirect?channel=C0B4RCXM19T)
+
+The linked [AI automations scoping spreadsheet](https://docs.google.com/spreadsheets/d/1GCy4NMoeEx5RMPLw-2KREiGymk77PkIR241sgaudUcY/edit?gid=1111082969#gid=1111082969)
+was not included in this revision: the connected Sheets API returned
+`403 PERMISSION_DENIED` for the supplied spreadsheet ID. No spreadsheet-derived
+claims are made above. After access is granted, read the exact tabs and
+ranges, then add its findings as a separately dated evidence source.
