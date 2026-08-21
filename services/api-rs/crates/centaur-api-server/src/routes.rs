@@ -27,7 +27,7 @@ use axum::{
     routing::{any, get, post},
 };
 use base64::{Engine as _, engine::general_purpose};
-use centaur_session_core::{ChatDestination, HarnessType, ThreadKey};
+use centaur_session_core::{ChatDestination, ThreadKey};
 use centaur_session_runtime::{
     ExecuteSessionInput, HarnessConflictPolicy, SandboxRuntime, SessionPrincipalRegistrar,
     SessionRuntime, thread_trace_id, thread_trace_parent_span_id,
@@ -61,10 +61,10 @@ use crate::{
     types::{
         AppendMessagesRequest, AppendMessagesResponse, CreateSessionRequest, CreateSessionResponse,
         DiscordThreadContext, EmitWorkflowEventRequest, EventsQuery, ExecuteSessionRequest,
-        ExecuteSessionResponse, GithubThreadContext, HarnessAssignment,
-        InterruptSessionExecutionRequest, InterruptSessionExecutionResponse, LinearThreadContext,
-        ListWorkflowRunsQuery, OnHarnessConflict, SessionContextResponse, SessionSseEvent,
-        SlackThreadContext, stream_error_sse,
+        ExecuteSessionResponse, GithubThreadContext, InterruptSessionExecutionRequest,
+        InterruptSessionExecutionResponse, LinearThreadContext, ListWorkflowRunsQuery,
+        OnHarnessConflict, SessionContextResponse, SessionSseEvent, SlackThreadContext,
+        stream_error_sse,
     },
 };
 
@@ -72,7 +72,6 @@ use crate::{
 pub struct AppState {
     initialized: Arc<RwLock<Option<AppRuntimeState>>>,
     metrics: PrometheusHandle,
-    codex_nanocodex_rollout_percent: u8,
     auth: ApiAuthConfig,
 }
 
@@ -89,14 +88,8 @@ impl AppState {
         Self {
             initialized: Arc::new(RwLock::new(None)),
             metrics: prometheus_handle().expect("failed to initialize Prometheus metrics recorder"),
-            codex_nanocodex_rollout_percent: 0,
             auth,
         }
-    }
-
-    pub fn with_codex_nanocodex_rollout_percent(mut self, percent: u8) -> Self {
-        self.codex_nanocodex_rollout_percent = percent;
-        self
     }
 
     pub fn ready(
@@ -225,6 +218,7 @@ const REDACTED_WEBHOOK_HEADERS: &[&str] = &[
     "x-hub-signature",
     "x-hub-signature-256",
     "x-slack-signature",
+    "webhook-signature",
     "stripe-signature",
 ];
 
@@ -656,45 +650,8 @@ async fn create_or_get_session(
     Json(request): Json<CreateSessionRequest>,
 ) -> Result<Json<CreateSessionResponse>, ApiError> {
     let thread_key = ThreadKey::try_from(raw_thread_key)?;
-    let requested_harness = request.harness_type;
+    let harness_type = request.harness_type;
     let runtime = state.runtime()?;
-    let existing_rollout_harness = if requested_harness == HarnessType::Codex {
-        runtime
-            .existing_session_harness(&thread_key)
-            .await?
-            .filter(|harness| matches!(harness, HarnessType::Codex | HarnessType::Nanocodex))
-    } else {
-        None
-    };
-    let harness_type = existing_rollout_harness.clone().unwrap_or_else(|| {
-        rollout_harness_for_thread(
-            &thread_key,
-            &requested_harness,
-            state.codex_nanocodex_rollout_percent,
-        )
-    });
-    let harness_assignment = codex_nanocodex_assignment(
-        &requested_harness,
-        &harness_type,
-        state.codex_nanocodex_rollout_percent,
-    );
-    tracing::info!(
-        component = "api_server",
-        event = "session_harness_rollout_resolved",
-        thread_key = %thread_key,
-        requested_harness = %requested_harness,
-        resolved_harness = %harness_type,
-        ab_test = harness_assignment.is_some(),
-        ab_test_experiment = harness_assignment
-            .as_ref()
-            .map_or("", |assignment| assignment.experiment),
-        ab_test_cohort = harness_assignment
-            .as_ref()
-            .map_or("", |assignment| assignment.cohort.as_ref()),
-        existing_rollout_harness_preserved = existing_rollout_harness.is_some(),
-        codex_nanocodex_rollout_percent = state.codex_nanocodex_rollout_percent,
-        "resolved requested session harness"
-    );
     let on_harness_conflict = match request.on_harness_conflict {
         Some(OnHarnessConflict::Restart) => HarnessConflictPolicy::Restart,
         Some(OnHarnessConflict::Reject) | None => HarnessConflictPolicy::Reject,
@@ -704,163 +661,14 @@ async fn create_or_get_session(
             &thread_key,
             &harness_type,
             request.persona_id.as_deref(),
-            session_metadata_with_harness_assignment(request.metadata, harness_assignment.as_ref()),
+            request.metadata,
             on_harness_conflict,
         )
         .await?;
     Ok(Json(CreateSessionResponse {
         session: outcome.session,
         harness_switched: outcome.harness_switched,
-        harness_assignment,
     }))
-}
-
-const CODEX_NANOCODEX_AB_EXPERIMENT: &str = "codex_nanocodex_ab";
-
-fn codex_nanocodex_assignment(
-    requested_harness: &HarnessType,
-    cohort: &HarnessType,
-    rollout_percent: u8,
-) -> Option<HarnessAssignment> {
-    (*requested_harness == HarnessType::Codex && (1..100).contains(&rollout_percent)).then(|| {
-        HarnessAssignment {
-            experiment: CODEX_NANOCODEX_AB_EXPERIMENT,
-            requested_harness: requested_harness.clone(),
-            cohort: cohort.clone(),
-            rollout_percent,
-        }
-    })
-}
-
-fn session_metadata_with_harness_assignment(
-    metadata: Option<Value>,
-    assignment: Option<&HarnessAssignment>,
-) -> Option<Value> {
-    let Some(assignment) = assignment else {
-        return metadata;
-    };
-    let mut metadata = metadata.unwrap_or_else(|| json!({}));
-    if let Value::Object(object) = &mut metadata {
-        object.insert(
-            "harness_assignment".to_owned(),
-            json!({
-                "experiment": assignment.experiment,
-                "requested_harness": assignment.requested_harness,
-                "cohort": assignment.cohort,
-                "rollout_percent": assignment.rollout_percent,
-            }),
-        );
-    }
-    Some(metadata)
-}
-
-fn rollout_harness_for_thread(
-    thread_key: &ThreadKey,
-    requested_harness: &HarnessType,
-    nanocodex_percent: u8,
-) -> HarnessType {
-    if *requested_harness != HarnessType::Codex || nanocodex_percent == 0 {
-        return requested_harness.clone();
-    }
-    if nanocodex_percent >= 100 {
-        return HarnessType::Nanocodex;
-    }
-
-    let digest = Sha256::digest(thread_key.as_str().as_bytes());
-    let bucket = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
-    let threshold = (u64::from(nanocodex_percent) * (u64::from(u32::MAX) + 1)) / 100;
-    if u64::from(bucket) < threshold {
-        HarnessType::Nanocodex
-    } else {
-        HarnessType::Codex
-    }
-}
-
-#[cfg(test)]
-mod harness_rollout_tests {
-    use super::*;
-
-    #[test]
-    fn codex_rollout_is_sticky_and_split_by_thread_key() {
-        let codex_thread = ThreadKey::try_from("slack:C1:1700000000.000100".to_owned()).unwrap();
-        let nanocodex_thread =
-            ThreadKey::try_from("slack:C1:1700000000.000104".to_owned()).unwrap();
-
-        assert_eq!(
-            rollout_harness_for_thread(&codex_thread, &HarnessType::Codex, 50),
-            HarnessType::Codex
-        );
-        assert_eq!(
-            rollout_harness_for_thread(&nanocodex_thread, &HarnessType::Codex, 50),
-            HarnessType::Nanocodex
-        );
-        assert_eq!(
-            rollout_harness_for_thread(&nanocodex_thread, &HarnessType::Codex, 50),
-            HarnessType::Nanocodex
-        );
-    }
-
-    #[test]
-    fn codex_rollout_honors_boundaries_and_other_harnesses() {
-        let thread_key = ThreadKey::try_from("cli:rollout-boundaries".to_owned()).unwrap();
-
-        assert_eq!(
-            rollout_harness_for_thread(&thread_key, &HarnessType::Codex, 0),
-            HarnessType::Codex
-        );
-        assert_eq!(
-            rollout_harness_for_thread(&thread_key, &HarnessType::Codex, 100),
-            HarnessType::Nanocodex
-        );
-        assert_eq!(
-            rollout_harness_for_thread(&thread_key, &HarnessType::ClaudeCode, 50),
-            HarnessType::ClaudeCode
-        );
-        assert_eq!(
-            rollout_harness_for_thread(&thread_key, &HarnessType::Nanocodex, 50),
-            HarnessType::Nanocodex
-        );
-    }
-
-    #[test]
-    fn codex_rollout_is_balanced_across_many_thread_keys() {
-        let nanocodex = (0..10_000)
-            .filter(|index| {
-                let thread_key = ThreadKey::try_from(format!("cli:rollout-{index}")).unwrap();
-                rollout_harness_for_thread(&thread_key, &HarnessType::Codex, 50)
-                    == HarnessType::Nanocodex
-            })
-            .count();
-
-        assert!(
-            (4_900..=5_100).contains(&nanocodex),
-            "nanocodex={nanocodex}"
-        );
-    }
-
-    #[test]
-    fn codex_rollout_assignment_is_explicit_and_persistable() {
-        let assignment =
-            codex_nanocodex_assignment(&HarnessType::Codex, &HarnessType::Nanocodex, 50).unwrap();
-        let metadata = session_metadata_with_harness_assignment(
-            Some(json!({"source": "slackbotv2"})),
-            Some(&assignment),
-        )
-        .unwrap();
-
-        assert_eq!(assignment.experiment, CODEX_NANOCODEX_AB_EXPERIMENT);
-        assert_eq!(assignment.cohort, HarnessType::Nanocodex);
-        assert_eq!(
-            metadata.pointer("/harness_assignment/cohort"),
-            Some(&json!("nanocodex"))
-        );
-        assert_eq!(metadata.get("source"), Some(&json!("slackbotv2")));
-        assert!(codex_nanocodex_assignment(&HarnessType::Codex, &HarnessType::Codex, 0).is_none());
-        assert!(
-            codex_nanocodex_assignment(&HarnessType::Nanocodex, &HarnessType::Nanocodex, 50)
-                .is_none()
-        );
-    }
 }
 
 async fn get_session_context(
@@ -4688,6 +4496,9 @@ fn verify_webhook_auth(
             headers,
             raw_body,
         ),
+        WorkflowWebhookAuth::StandardWebhooks { secret_ref } => {
+            verify_standard_webhook_signature(secret_ref, headers, raw_body)
+        }
         WorkflowWebhookAuth::Hmac {
             secret_ref,
             signature_header,
@@ -4703,6 +4514,33 @@ fn verify_webhook_auth(
             raw_body,
         ),
     }
+}
+
+fn verify_standard_webhook_signature(
+    secret_ref: &str,
+    headers: &HeaderMap,
+    raw_body: &[u8],
+) -> Result<(), ApiError> {
+    let secret = env::var(secret_ref).map_err(|_| {
+        ApiError::Internal(format!(
+            "webhook auth secret {secret_ref} is not configured"
+        ))
+    })?;
+    let secret = secret.trim();
+    let encoded_secret = secret.strip_prefix("whsec_").unwrap_or(secret);
+    if encoded_secret.is_empty() {
+        return Err(ApiError::Internal(format!(
+            "webhook auth secret {secret_ref} is not valid Standard Webhooks key material"
+        )));
+    }
+    let webhook = standardwebhooks::Webhook::new(secret).map_err(|_| {
+        ApiError::Internal(format!(
+            "webhook auth secret {secret_ref} is not valid Standard Webhooks key material"
+        ))
+    })?;
+    webhook
+        .verify(raw_body, headers)
+        .map_err(|_| ApiError::Unauthorized("invalid webhook signature".to_owned()))
 }
 
 fn verify_hmac_signature(
@@ -4756,6 +4594,7 @@ fn signature_header_name(auth: &WorkflowWebhookAuth) -> Option<&str> {
     match auth {
         WorkflowWebhookAuth::None | WorkflowWebhookAuth::Bearer { .. } => None,
         WorkflowWebhookAuth::Github { .. } => Some("X-Hub-Signature-256"),
+        WorkflowWebhookAuth::StandardWebhooks { .. } => Some("webhook-signature"),
         WorkflowWebhookAuth::Hmac {
             signature_header, ..
         } => Some(signature_header),
@@ -5122,6 +4961,35 @@ mod webhook_tests {
     }
 
     #[test]
+    fn redacts_standard_webhooks_signature_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("webhook-signature", "v1,c2lnbmF0dXJl".parse().unwrap());
+        headers.insert("webhook-id", "msg_test".parse().unwrap());
+        headers.insert("webhook-timestamp", "1700000000".parse().unwrap());
+        let spec = WorkflowWebhookSpec {
+            slug: "unit".to_owned(),
+            provider: None,
+            auth: WorkflowWebhookAuth::StandardWebhooks {
+                secret_ref: "TEST_WEBHOOK_SECRET".to_owned(),
+            },
+            trigger_key: None,
+            allowed_methods: vec!["POST".to_owned()],
+            allowed_content_types: vec!["application/json".to_owned()],
+            filter: None,
+        };
+
+        let safe = safe_webhook_headers(&headers, &spec);
+
+        assert_eq!(
+            safe,
+            json!({
+                "webhook-id": "msg_test",
+                "webhook-timestamp": "1700000000"
+            })
+        );
+    }
+
+    #[test]
     fn derives_header_trigger_key() {
         let mut headers = HeaderMap::new();
         headers.insert("x-test-delivery", "delivery-1".parse().unwrap());
@@ -5163,6 +5031,97 @@ mod webhook_tests {
             raw_body,
         )
         .unwrap();
+    }
+
+    fn standard_webhook_headers(
+        secret: &str,
+        message_id: &str,
+        timestamp: i64,
+        raw_body: &[u8],
+    ) -> HeaderMap {
+        let encoded_secret = secret.strip_prefix("whsec_").unwrap_or(secret);
+        let key = general_purpose::STANDARD.decode(encoded_secret).unwrap();
+        let mut signed_content = Vec::new();
+        signed_content.extend_from_slice(message_id.as_bytes());
+        signed_content.push(b'.');
+        signed_content.extend_from_slice(timestamp.to_string().as_bytes());
+        signed_content.push(b'.');
+        signed_content.extend_from_slice(raw_body);
+        let mut mac = Hmac::<Sha256>::new_from_slice(&key).unwrap();
+        mac.update(&signed_content);
+        let signature = general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+
+        let mut headers = HeaderMap::new();
+        headers.insert("webhook-id", message_id.parse().unwrap());
+        headers.insert("webhook-timestamp", timestamp.to_string().parse().unwrap());
+        headers.insert(
+            "webhook-signature",
+            format!("v2,ignored v1,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= v1,{signature}")
+                .parse()
+                .unwrap(),
+        );
+        headers
+    }
+
+    #[test]
+    fn verifies_standard_webhooks_signature() {
+        let raw_body = br#"{"hello":"signed"}"#;
+        let secret_ref = "CENTRAUR_TEST_STANDARD_WEBHOOK_SECRET";
+        let secret = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw";
+        let timestamp = OffsetDateTime::now_utc().unix_timestamp();
+        unsafe {
+            env::set_var(secret_ref, secret);
+        }
+        let headers = standard_webhook_headers(secret, "msg_test", timestamp, raw_body);
+
+        verify_standard_webhook_signature(secret_ref, &headers, raw_body).unwrap();
+    }
+
+    #[test]
+    fn rejects_invalid_or_stale_standard_webhooks_signature() {
+        let raw_body = br#"{"hello":"signed"}"#;
+        let secret_ref = "CENTRAUR_TEST_STANDARD_WEBHOOK_SECRET_REJECT";
+        let secret = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw";
+        unsafe {
+            env::set_var(secret_ref, secret);
+        }
+
+        let timestamp = OffsetDateTime::now_utc().unix_timestamp();
+        let headers = standard_webhook_headers(secret, "msg_test", timestamp, raw_body);
+        let error =
+            verify_standard_webhook_signature(secret_ref, &headers, br#"{"hello":"tampered"}"#)
+                .unwrap_err();
+        assert!(matches!(error, ApiError::Unauthorized(_)));
+
+        let stale_headers = standard_webhook_headers(secret, "msg_test", timestamp - 301, raw_body);
+        let error =
+            verify_standard_webhook_signature(secret_ref, &stale_headers, raw_body).unwrap_err();
+        assert!(matches!(error, ApiError::Unauthorized(_)));
+    }
+
+    #[test]
+    fn malformed_or_empty_standard_webhooks_secret_is_internal_error() {
+        let secret_ref = "CENTRAUR_TEST_STANDARD_WEBHOOK_SECRET_INVALID";
+        unsafe {
+            env::set_var(secret_ref, "whsec_not-base64");
+        }
+        let headers = standard_webhook_headers(
+            "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw",
+            "msg_test",
+            OffsetDateTime::now_utc().unix_timestamp(),
+            b"{}",
+        );
+
+        let error = verify_standard_webhook_signature(secret_ref, &headers, b"{}").unwrap_err();
+
+        assert!(matches!(error, ApiError::Internal(_)));
+
+        unsafe {
+            env::set_var(secret_ref, "whsec_");
+        }
+        let error = verify_standard_webhook_signature(secret_ref, &headers, b"{}").unwrap_err();
+
+        assert!(matches!(error, ApiError::Internal(_)));
     }
 
     fn webhook_filter(value: Value) -> WebhookFilter {
