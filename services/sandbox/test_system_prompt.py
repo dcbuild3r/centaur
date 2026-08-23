@@ -26,6 +26,14 @@ class SystemPromptTest(unittest.TestCase):
         self.assertIn("A nonzero exit status from a command is an input to reason about", prompt)
         self.assertIn("Never end a turn silently after a failed command or tool", prompt)
 
+    def test_granola_share_links_require_direct_retrieval(self) -> None:
+        prompt = SYSTEM_PROMPT.read_text()
+
+        self.assertIn("[Granola share links]", prompt)
+        self.assertIn("pass that exact link to `granola get`", prompt)
+        self.assertIn("both `/d/<meeting-uuid>` and `/t/<meeting-uuid>-<share-suffix>`", prompt)
+        self.assertIn("Do not substitute a similarly titled meeting", prompt)
+
     def test_mpp_fallback_discovery_guidance_is_present(self) -> None:
         prompt = SYSTEM_PROMPT.read_text()
 

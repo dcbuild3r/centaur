@@ -324,8 +324,8 @@ impl WorkflowPrincipalRegistrar {
                         })
                         .await?
                 }
-                WorkflowPrincipalDeclaration::Existing(foreign_id) => {
-                    self.client.get_principal(foreign_id).await?
+                WorkflowPrincipalDeclaration::Existing(reference) => {
+                    self.client.get_principal(reference).await?
                 }
             };
             registered.insert(workflow_name.clone(), record.id);
@@ -1681,7 +1681,7 @@ struct PythonWorkflowDiscovery {
 #[serde(untagged)]
 enum PythonWorkflowPrincipal {
     Enabled(bool),
-    ForeignId(String),
+    Reference(String),
 }
 
 #[derive(Debug, Deserialize)]
@@ -1724,12 +1724,10 @@ fn metadata_from_discovery_payload(
                     WorkflowPrincipalDeclaration::Managed,
                 );
             }
-            Some(PythonWorkflowPrincipal::ForeignId(foreign_id))
-                if !foreign_id.trim().is_empty() =>
-            {
+            Some(PythonWorkflowPrincipal::Reference(reference)) if !reference.trim().is_empty() => {
                 metadata.principals.insert(
                     workflow.workflow_name,
-                    WorkflowPrincipalDeclaration::Existing(foreign_id.trim().to_owned()),
+                    WorkflowPrincipalDeclaration::Existing(reference.trim().to_owned()),
                 );
             }
             _ => {}
@@ -4156,6 +4154,9 @@ fn python_slack_message_payload(
     if let Some(reply_broadcast) = args.get("reply_broadcast").and_then(Value::as_bool) {
         payload["reply_broadcast"] = json!(reply_broadcast);
     }
+    if let Some(mrkdwn) = args.get("mrkdwn").and_then(Value::as_bool) {
+        payload["mrkdwn"] = json!(mrkdwn);
+    }
     if let Some(blocks) = args.get("blocks") {
         payload["blocks"] = blocks.clone();
     }
@@ -4345,7 +4346,7 @@ async fn run_agent_session_turn(
                     thread_key: thread_key.into_string(),
                     execution_id: execution.execution_id,
                     status: "completed".to_owned(),
-                    result_text: result_text_from_output_lines(&output_lines),
+                    result_text: agent_turn_result_text(&event.payload, &output_lines),
                     output_lines,
                 });
             }
@@ -4354,7 +4355,7 @@ async fn run_agent_session_turn(
                     thread_key: thread_key.into_string(),
                     execution_id: execution.execution_id,
                     status: event.event_type,
-                    result_text: result_text_from_output_lines(&output_lines),
+                    result_text: agent_turn_result_text(&event.payload, &output_lines),
                     output_lines,
                 };
                 return Err(WorkflowRuntimeError::Upstream(format!(
@@ -4371,19 +4372,62 @@ async fn run_agent_session_turn(
     ))
 }
 
-fn result_text_from_output_lines(lines: &[String]) -> String {
-    lines
+fn agent_turn_result_text(terminal_payload: &Value, output_lines: &[String]) -> String {
+    if let Some(result_text) = terminal_payload.get("result_text").and_then(Value::as_str) {
+        return result_text.to_owned();
+    }
+
+    output_lines
         .iter()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter_map(|value| {
-            value
-                .get("delta")
-                .or_else(|| value.pointer("/params/delta"))
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-        })
-        .collect::<Vec<_>>()
-        .join("")
+        .rev()
+        .find_map(|line| completed_final_answer_text(line))
+        .unwrap_or_default()
+}
+
+fn completed_final_answer_text(line: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(line).ok()?;
+    if value.get("type").and_then(Value::as_str) == Some("assistant.message") {
+        let payload = value.get("payload")?;
+        if !matches!(
+            payload.get("phase").and_then(Value::as_str),
+            Some("final_answer" | "answer") | None
+        ) {
+            return None;
+        }
+        return non_empty_text(payload.get("text"));
+    }
+
+    if !matches!(
+        value.get("method").and_then(Value::as_str),
+        Some("item/completed")
+    ) && !matches!(
+        value.get("type").and_then(Value::as_str),
+        Some("item.completed")
+    ) {
+        return None;
+    }
+
+    let item = value
+        .get("item")
+        .or_else(|| value.pointer("/params/item"))?;
+    if !matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("agentMessage" | "agent_message")
+    ) || !matches!(
+        item.get("phase").and_then(Value::as_str),
+        Some("final_answer" | "answer") | None
+    ) {
+        return None;
+    }
+    non_empty_text(item.get("text"))
+}
+
+fn non_empty_text(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn workflow_run_from_row(row: sqlx::postgres::PgRow) -> Result<WorkflowRun, WorkflowRuntimeError> {
@@ -4502,6 +4546,81 @@ mod tests {
         assert_eq!(value.get("provider"), Some(&json!("amazon-bedrock")));
         assert_eq!(value.get("reasoning"), Some(&json!("high")));
         assert_eq!(value.pointer("/message/content"), Some(&json!(parts)));
+    }
+
+    #[test]
+    fn agent_turn_uses_terminal_result_text_instead_of_stream_deltas() {
+        let output_lines = vec![
+            json!({
+                "method": "item/reasoning/summaryTextDelta",
+                "params": {"delta": "internal reasoning"}
+            })
+            .to_string(),
+            json!({
+                "method": "item/agentMessage/delta",
+                "params": {"delta": "streamed draft"}
+            })
+            .to_string(),
+        ];
+
+        assert_eq!(
+            agent_turn_result_text(
+                &json!({"result_text": "Canonical final answer."}),
+                &output_lines
+            ),
+            "Canonical final answer."
+        );
+    }
+
+    #[test]
+    fn agent_turn_result_fallback_uses_only_completed_final_answer() {
+        let output_lines = vec![
+            json!({
+                "method": "item/reasoning/summaryTextDelta",
+                "params": {"delta": "internal reasoning"}
+            })
+            .to_string(),
+            json!({
+                "method": "item/agentMessage/delta",
+                "params": {"delta": "streamed commentary"}
+            })
+            .to_string(),
+            json!({
+                "method": "item/completed",
+                "params": {
+                    "item": {
+                        "type": "agentMessage",
+                        "phase": "commentary",
+                        "text": "Commentary update."
+                    }
+                }
+            })
+            .to_string(),
+            json!({
+                "type": "item.completed",
+                "item": {
+                    "type": "agentMessage",
+                    "phase": "final_answer",
+                    "text": "Fallback final answer."
+                }
+            })
+            .to_string(),
+        ];
+
+        assert_eq!(
+            agent_turn_result_text(&json!({}), &output_lines),
+            "Fallback final answer."
+        );
+    }
+
+    #[test]
+    fn agent_turn_result_fallback_does_not_return_untyped_deltas() {
+        let output_lines = vec![
+            json!({"type": "reasoning.delta", "delta": "internal reasoning"}).to_string(),
+            json!({"type": "item.agentMessage.delta", "delta": "ambiguous draft"}).to_string(),
+        ];
+
+        assert_eq!(agent_turn_result_text(&json!({}), &output_lines), "");
     }
 
     #[test]
@@ -4834,6 +4953,7 @@ mod tests {
                 "reply_broadcast": true,
                 "unfurl_links": true,
                 "unfurl_media": true,
+                "mrkdwn": true,
                 "username": "The Date Goblin",
                 "icon_emoji": ":female_mage:",
             }),
@@ -4846,6 +4966,7 @@ mod tests {
         assert_eq!(payload["reply_broadcast"], json!(true));
         assert_eq!(payload["unfurl_links"], json!(true));
         assert_eq!(payload["unfurl_media"], json!(true));
+        assert_eq!(payload["mrkdwn"], json!(true));
         assert_eq!(payload["username"], json!("The Date Goblin"));
         assert_eq!(payload["icon_emoji"], json!(":female_mage:"));
     }
@@ -4978,6 +5099,27 @@ mod tests {
             metadata.principals.get("manual_workflow"),
             Some(&WorkflowPrincipalDeclaration::Existing(
                 "finance-automation".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn discovery_metadata_preserves_workflow_principal_oid() {
+        let payload: PythonWorkflowDiscoveryPayload = serde_json::from_value(json!({
+            "workflows": [{
+                "workflow_name": "oid_workflow",
+                "source_path": "workflows/oid_workflow.py",
+                "principal": " prn_01k2m3n4p5 ",
+            }],
+        }))
+        .unwrap();
+
+        let metadata = metadata_from_discovery_payload(payload);
+
+        assert_eq!(
+            metadata.principals.get("oid_workflow"),
+            Some(&WorkflowPrincipalDeclaration::Existing(
+                "prn_01k2m3n4p5".to_owned()
             ))
         );
     }

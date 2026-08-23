@@ -30,12 +30,12 @@ use base64::{Engine as _, engine::general_purpose};
 use centaur_session_core::{ChatDestination, ThreadKey};
 use centaur_session_runtime::{
     ExecuteSessionInput, HarnessConflictPolicy, SandboxRuntime, SessionPrincipalRegistrar,
-    SessionRuntime, thread_trace_id, thread_trace_parent_span_id,
+    SessionRuntime,
 };
 use centaur_session_sqlx::PgSessionStore;
 use centaur_telemetry::{
     PrometheusHandle, http_status_class, prometheus_handle, record_api_authentication,
-    record_http_request_finished, record_http_request_started, set_span_parent_trace,
+    record_http_request_finished, record_http_request_started,
 };
 use centaur_workflows::{
     CreateWorkflowRunRequest, WebhookFilter, WorkflowRuntime, WorkflowWebhookAuth,
@@ -383,11 +383,6 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
                 if let Some(thread_key) = session_thread_key_from_request(request) {
                     span.record("centaur.thread_key", thread_key.as_str());
                     span.record("thread_key", thread_key.as_str());
-                    set_span_parent_trace(
-                        &span,
-                        &thread_trace_id(&thread_key),
-                        &thread_trace_parent_span_id(&thread_key),
-                    );
                 }
                 span
             })
@@ -532,10 +527,10 @@ async fn authorize_api_request(
             .into_response();
     }
 
-    if let Some(prefix) = caller.platform_prefix()
+    if let Some(prefixes) = caller.platform_prefixes()
         && route.starts_with("/api/session/")
         && let Some(thread_key) = session_thread_key_from_request(&request)
-        && !thread_key.as_str().starts_with(prefix)
+        && !thread_key_matches_platform(prefixes, thread_key.as_str())
     {
         record_api_authentication(caller.class().as_str(), "forbidden");
         tracing::warn!(
@@ -545,7 +540,7 @@ async fn authorize_api_request(
             } else {
                 caller.identity()
             },
-            expected_thread_prefix = prefix,
+            expected_thread_prefixes = ?prefixes,
             "ingress caller denied for another platform's session"
         );
         return ApiError::Forbidden("caller is not authorized for this session".to_owned())
@@ -632,6 +627,13 @@ fn matched_route<B>(request: &Request<B>) -> String {
 
 fn session_thread_key_from_request<B>(request: &Request<B>) -> Option<ThreadKey> {
     session_thread_key_from_path(request.uri().path())
+}
+
+/// Whether an ingress caller scoped to `prefixes` may touch this session.
+/// A bot can mint several thread-key families (githubbot: `github:`,
+/// `github-manage:`, `github-review:`), so the caller carries them all.
+fn thread_key_matches_platform(prefixes: &[&str], thread_key: &str) -> bool {
+    prefixes.iter().any(|prefix| thread_key.starts_with(prefix))
 }
 
 fn session_thread_key_from_path(path: &str) -> Option<ThreadKey> {
@@ -911,7 +913,36 @@ fn principal_subject_owns_session(subject: Option<&str>, session_principal: Opti
 
 #[cfg(test)]
 mod session_authorization_tests {
-    use super::principal_subject_owns_session;
+    use super::{principal_subject_owns_session, thread_key_matches_platform};
+
+    #[test]
+    fn ingress_scope_covers_every_family_the_bot_mints() {
+        let github = [
+            "github:",
+            "github-issue:",
+            "github-manage:",
+            "github-review:",
+        ];
+        assert!(thread_key_matches_platform(&github, "github:acme/repo:12"));
+        assert!(thread_key_matches_platform(
+            &github,
+            "github-issue:acme/repo:12"
+        ));
+        assert!(thread_key_matches_platform(
+            &github,
+            "github-manage:acme/repo:12"
+        ));
+        assert!(thread_key_matches_platform(
+            &github,
+            "github-review:acme/repo:12"
+        ));
+        assert!(!thread_key_matches_platform(&github, "slack:C123:1.2"));
+        // `github-anything:` outside the listed families stays denied.
+        assert!(!thread_key_matches_platform(
+            &github,
+            "githubx:acme/repo:12"
+        ));
+    }
 
     #[test]
     fn principal_session_reads_require_exact_persisted_owner() {
