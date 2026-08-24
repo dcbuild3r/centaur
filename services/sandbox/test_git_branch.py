@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-
 
 SANDBOX_DIR = Path(__file__).parent
 GIT_BRANCH = SANDBOX_DIR / "git-branch.sh"
@@ -39,9 +39,11 @@ class GitBranchTest(unittest.TestCase):
             env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1"},
         )
 
-    def _run_git_branch(self, extra_env: dict[str, str]) -> Path:
+    def _run_git_branch(
+        self, extra_env: dict[str, str], repo: str = "acme/centaur"
+    ) -> Path:
         result = subprocess.run(
-            [str(GIT_BRANCH), "acme/centaur", "fix-attribution"],
+            [str(GIT_BRANCH), repo, "fix-attribution"],
             check=True,
             capture_output=True,
             text=True,
@@ -53,6 +55,64 @@ class GitBranchTest(unittest.TestCase):
             },
         )
         return Path(result.stdout.strip())
+
+    def test_clones_uncached_repo_from_github(self) -> None:
+        remote_root = self.root / "remotes"
+        remote = remote_root / "acme" / "centaur.git"
+        remote.parent.mkdir(parents=True)
+        self._git("clone", "--bare", str(self.source), str(remote))
+        (self.home / ".gitconfig").write_text(
+            f'[url "file://{remote_root}/"]\n\tinsteadOf = https://github.com/\n'
+        )
+        shutil.rmtree(self.source)
+
+        destination = self._run_git_branch(
+            {
+                "CENTAUR_GIT_USER_NAME": "Release Bot",
+                "CENTAUR_GIT_USER_EMAIL": "release@example.com",
+                "GITHUB_TOKEN": "foundation-placeholder",
+                "GIT_ALLOW_PROTOCOL": "file:https",
+            }
+        )
+
+        self.assertEqual((destination / "README.md").read_text(), "seed\n")
+        self.assertEqual(
+            self._git("-C", str(destination), "remote", "get-url", "origin")
+            .stdout.strip(),
+            "https://github.com/acme/centaur.git",
+        )
+        self.assertTrue(
+            self._git("-C", str(destination), "branch", "--show-current")
+            .stdout.strip()
+            .startswith("centaur/fix-attribution-")
+        )
+
+    def test_worldfnd_selects_secondary_token(self) -> None:
+        worldfnd_source = self.home / "github" / "worldfnd" / "centaur"
+        worldfnd_source.parent.mkdir(parents=True)
+        self._git("clone", str(self.source), str(worldfnd_source))
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        token_log = self.root / "github-token.log"
+        gh = bin_dir / "gh"
+        gh.write_text(
+            "#!/bin/sh\n"
+            'printf "%s\\n" "$GITHUB_TOKEN" > "$TOKEN_LOG"\n'
+            "printf 'Orbie\\twf-orbie@users.noreply.github.com\\n'\n"
+        )
+        gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
+
+        self._run_git_branch(
+            {
+                "GITHUB_TOKEN": "default-placeholder",
+                "GITHUB_TOKEN_WORLDFND": "worldfnd-placeholder",
+                "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                "TOKEN_LOG": str(token_log),
+            },
+            repo="worldfnd/centaur",
+        )
+
+        self.assertEqual(token_log.read_text().strip(), "worldfnd-placeholder")
 
     def test_uses_authenticated_github_identity(self) -> None:
         bin_dir = self.root / "bin"

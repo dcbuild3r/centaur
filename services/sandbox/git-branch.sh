@@ -4,9 +4,9 @@
 # Usage:  git-branch <org/repo> <branch slug>
 # Example: git-branch owner/centaur fix-flaky-slack-delivery
 #
-# Creates ~/branches/<org>/<repo> as a --shared clone from ~/github/<org>/<repo>
-# with a unique agent branch checked out. The resulting directory is fully writable
-# and supports commit, push, and PR workflows.
+# Creates ~/branches/<org>/<repo> from the read-only repo cache when available,
+# otherwise clones from GitHub. The resulting directory is fully writable and
+# supports commit, push, and PR workflows.
 
 set -euo pipefail
 
@@ -30,6 +30,23 @@ REPO="$1"
 SLUG="$2"
 SRC="$HOME/github/$REPO"
 DEST="$HOME/branches/$REPO"
+
+if [[ ! "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    usage
+    echo "Error: repository must be in owner/name form." >&2
+    exit 1
+fi
+
+# Fine-grained PATs are organization-bound. Keep worldcoin and
+# worldcoin-foundation on the default placeholder, and select the dedicated
+# worldfnd placeholder for that organization. Rebinding GITHUB_TOKEN also makes
+# gh's credential helper present the selected placeholder to iron-proxy for
+# Git-over-HTTPS operations.
+GITHUB_TOKEN_ENV="GITHUB_TOKEN"
+if [ "${REPO%%/*}" = "worldfnd" ]; then
+    GITHUB_TOKEN_ENV="GITHUB_TOKEN_WORLDFND"
+    export GITHUB_TOKEN="${GITHUB_TOKEN_WORLDFND:-}"
+fi
 
 # Match commit authorship to the account that will publish the PR so GitHub does
 # not preserve a separate sandbox identity as a squash-merge co-author.
@@ -69,11 +86,6 @@ if [[ ! "$SLUG" =~ ^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$ ]]; then
     exit 1
 fi
 
-if [ ! -d "$SRC/.git" ] && ! git -C "$SRC" rev-parse --git-dir >/dev/null 2>&1; then
-    echo "Error: $SRC is not a valid git repository" >&2
-    exit 1
-fi
-
 if [ -d "$DEST/.git" ]; then
     echo "$DEST already exists — reusing" >&2
     configure_git_identity
@@ -83,17 +95,30 @@ fi
 
 mkdir -p "$(dirname "$DEST")"
 
-if ! git clone --quiet --shared "$SRC" "$DEST"; then
-    echo "shared clone failed; retrying with regular clone" >&2
-    rm -rf "$DEST"
-    git clone --quiet "$SRC" "$DEST"
-fi
+if [ -d "$SRC/.git" ] || git -C "$SRC" rev-parse --git-dir >/dev/null 2>&1; then
+    if ! git clone --quiet --shared "$SRC" "$DEST"; then
+        echo "shared clone failed; retrying with regular clone" >&2
+        rm -rf -- "$DEST"
+        git clone --quiet "$SRC" "$DEST"
+    fi
 
-# --shared clones set origin to the local path; fix it to the upstream URL
-# so that git push and gh pr create target the real GitHub remote.
-UPSTREAM_URL=$(git -C "$SRC" config --get remote.origin.url 2>/dev/null || echo "")
-if [ -n "$UPSTREAM_URL" ]; then
-    git -C "$DEST" remote set-url origin "$UPSTREAM_URL"
+    # --shared clones set origin to the local path; fix it to the upstream URL
+    # so that git push and gh pr create target the real GitHub remote.
+    UPSTREAM_URL=$(git -C "$SRC" config --get remote.origin.url 2>/dev/null || echo "")
+    if [ -n "$UPSTREAM_URL" ]; then
+        git -C "$DEST" remote set-url origin "$UPSTREAM_URL"
+    fi
+else
+    if [ -z "${GITHUB_TOKEN:-}" ]; then
+        echo "Error: $SRC is not cached and $GITHUB_TOKEN_ENV is not configured" >&2
+        exit 1
+    fi
+    UPSTREAM_URL="https://github.com/$REPO.git"
+    if ! GIT_TERMINAL_PROMPT=0 git clone --quiet "$UPSTREAM_URL" "$DEST"; then
+        rm -rf -- "$DEST"
+        echo "Error: unable to clone $REPO with $GITHUB_TOKEN_ENV" >&2
+        exit 1
+    fi
 fi
 
 BRANCH="centaur/$SLUG-$(date +%s)"

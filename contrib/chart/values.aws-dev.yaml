@@ -49,7 +49,8 @@ ironProxy:
   # reference, continue to resolve through the Centaur vault.
   secretSource: env
   secretSourceRefs:
-    GITHUB_TOKEN: op://Centaur/GitHub PAT/credential
+    GITHUB_TOKEN: op://Centaur/oged7xfyssmixegfj3kf3piymm/credential
+    GITHUB_TOKEN_WORLDFND: op://Centaur/wlsn2v5vzsr4bikftn45mfbily/credential
     NOTION_API_KEY: op://Centaur/Centaur.run - NOTION_API_KEY/password
     DUNE_API_KEY: op://Centaur/DUNE_API_KEY/credential
     GOOGLE_TOKEN_JSON: op://Centaur/GOOGLE_TOKEN_JSON/credential

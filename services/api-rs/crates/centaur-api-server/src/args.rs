@@ -42,6 +42,7 @@ use crate::{ServerError, activity_summary::ActivitySummaryConfig};
 
 const SANDBOX_REPOS_MOUNT_PATH: &str = "/home/agent/github";
 const GITHUB_TOKEN_ENV: &str = "GITHUB_TOKEN";
+const GITHUB_TOKEN_WORLDFND_ENV: &str = "GITHUB_TOKEN_WORLDFND";
 const SLACK_BOT_TOKEN_ENV: &str = "SLACK_BOT_TOKEN";
 
 /// OTLP env always forwarded from the api-rs process into codex sandboxes,
@@ -1795,8 +1796,11 @@ impl IronProxyArgs {
     /// and the cloudwatch tool embeds its own throwaway SigV4 credentials.
     fn sandbox_placeholder_env(&self) -> Result<BTreeMap<String, String>, ServerError> {
         let mut env = centaur_iron_proxy::placeholder_env(&[self.infra_fragment()?]);
-        env.entry(GITHUB_TOKEN_ENV.to_owned())
-            .or_insert_with(|| GITHUB_TOKEN_ENV.to_owned());
+        env.insert(GITHUB_TOKEN_ENV.to_owned(), GITHUB_TOKEN_ENV.to_owned());
+        env.insert(
+            GITHUB_TOKEN_WORLDFND_ENV.to_owned(),
+            GITHUB_TOKEN_WORLDFND_ENV.to_owned(),
+        );
         env.entry(SLACK_BOT_TOKEN_ENV.to_owned())
             .or_insert_with(|| SLACK_BOT_TOKEN_ENV.to_owned());
         Ok(env)
@@ -2267,6 +2271,38 @@ mod tests {
         )
         .unwrap();
         assert!(refs["NOTION_API_KEY"].starts_with("op://Centaur/"));
+    }
+
+    #[test]
+    fn configured_github_token_refs_reach_sandbox_env_and_proxy_fragment() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[("GITHUB_TOKEN", "stale-inherited-token")]);
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--kubernetes-firewall-manager-secret-source-refs",
+            r#"{"GITHUB_TOKEN":"op://Centaur/oged7xfyssmixegfj3kf3piymm/credential","GITHUB_TOKEN_WORLDFND":"op://Centaur/wlsn2v5vzsr4bikftn45mfbily/credential"}"#,
+        ])
+        .unwrap();
+
+        let env = args.sandbox.codex_app_server_env_template().unwrap();
+        for placeholder in ["GITHUB_TOKEN", "GITHUB_TOKEN_WORLDFND"] {
+            assert!(
+                env.iter()
+                    .any(|(name, value)| { name == placeholder && value == placeholder })
+            );
+        }
+
+        let refs = args.sandbox.iron_proxy.source.policy().refs;
+        assert_eq!(
+            refs.get("GITHUB_TOKEN").map(String::as_str),
+            Some("op://Centaur/oged7xfyssmixegfj3kf3piymm/credential")
+        );
+        assert_eq!(
+            refs.get("GITHUB_TOKEN_WORLDFND").map(String::as_str),
+            Some("op://Centaur/wlsn2v5vzsr4bikftn45mfbily/credential")
+        );
     }
 
     #[test]
