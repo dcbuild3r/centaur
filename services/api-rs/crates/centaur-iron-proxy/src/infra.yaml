@@ -3,3 +3,18 @@ proxy:
   # default 30s response-header timeout. Keep model-provider calls from being
   # cut off while OpenAI is still computing the first response byte.
   upstream_response_header_timeout: "120s"
+
+transforms:
+  - name: secrets
+    config:
+      secrets:
+        - id: GITHUB_TOKEN_AUTHORIZATION
+          replace:
+            proxy_value: GITHUB_TOKEN
+            match_headers: ["Authorization"]
+          rules: [{ host: github.com }, { host: api.github.com }]
+        - id: GITHUB_TOKEN_WORLDFND_AUTHORIZATION
+          replace:
+            proxy_value: GITHUB_TOKEN_WORLDFND
+            match_headers: ["Authorization"]
+          rules: [{ host: github.com }, { host: api.github.com }]
