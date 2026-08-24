@@ -16,49 +16,72 @@ Treat `create cadence` and `orbie create cadence` as exact aliases. These
 phrases always mean a Meeting Ops cadence in the governed Notion Cadences
 database; never ask whether the user means sales outreach or Slack reminders.
 
-Treat this as an interactive command. Before creating anything, ask for all
-fields in one structured checklist and wait for the user's answers. Do not
-create a partial row, guess a Slack channel, or publish a row on the user's
-behalf.
+Treat this as an intent-first interactive command with four stages:
 
-Collect:
+1. Understand the requested ritual and extract only values the user explicitly
+   supplied.
+2. Resolve safe defaults and internal identities without asking the user for
+   implementation details.
+3. Show one concise, human-readable proposal and wait for one explicit
+   confirmation. This proposal must not write to Notion, Calendar, Slack, or
+   Google Docs.
+4. After confirmation, create exactly one Notion Draft.
 
-- Ritual/title and a stable, unique `Automation ID`.
-- Frequency: `Weekly`, `Bi-weekly`, `Monthly`, or `Quarterly`.
-- Next meeting date/time in ISO format, IANA time zone, meeting time, and
-  notification time.
-- Preparation lead in business days (default `1`). A Monday meeting with a
-  one-day lead is prepared on Friday.
-- Google template URL and Google output-folder URL.
-- Scope and destination: choose the shared World Foundation Cadences database
-  for a public cadence, or provide the exact private Cadences database URL
-  copied from the Orbie Private Cadence Template. For a private cadence, the
-  caller must have invited `orbie-automation@world.org` to that database/page.
-  A private destination may be omitted for owner/recipient DMs, or may specify
-  the exact `G...` private Slack channel/group-DM ID and name.
-  Treat an explicit channel ID as authoritative; never substitute a similarly
-  named channel.
-- Creator's Notion profile or exact email. The creator is always `Owner / DRI`.
-  If the user supplies a different owner, stop and explain that the creator
-  must remain the owner.
-- Notification recipients as Notion profiles or exact email addresses, plus
-  any additional notification emails.
-- Participants, purpose, document-name template, cadence type, and audience.
+The first response should ask only for missing safety-critical information. Do
+not present a technical checklist and do not ask for Automation IDs, Slack
+channel IDs, Notion emails, purpose, participant emails, or document-name
+templates unless the user explicitly asks to control one of them.
 
-Optional fields are duration, notes delay, notify lead, and notes/links. Use
-the defaults `Europe/Prague`, `09:15`, `10:00`, `1`, `Internal WF`, and
-`Everyone` only when the user accepts the defaults. Validate all supplied
-values before writing.
+Resolve values in this order:
 
-For Calendar booking, collect `Calendar booking` (`Off` or `Auto-book`), the
-managed `Organizer calendar` alias, and `Booking window (business days)`. An
-`Auto-book` cadence must also have a positive integer `Duration (min)` and
-Participants that resolve to exact verified World email identities. Keep
-`Off` for existing Docs-only cadences. New cadences remain Draft regardless of
-the selected booking mode.
+1. Explicit user values.
+2. A known World Foundation convention.
+3. Safe workspace defaults.
+4. One grouped follow-up for a value that is genuinely required but cannot be
+   inferred.
 
-After confirmation, create the row with the Notion tool's `create_cadence`
-operation (or the bundled `notion create-cadence` command) using these rules:
+For the known weekly all-hands convention, infer `Weekly`, Europe/Prague,
+Monday at `16:00`, preparation/notification on Friday at `09:00`, `#wf-all`,
+and the internal document template `CW{week} <ritual>`. Other weekly cadences
+use the safe `10:00` meeting and `09:15` preparation defaults unless the user
+provides different values. Monthly and quarterly cadences require an explicit
+first occurrence when one cannot be inferred.
+
+Resolve Slack destinations with the Slack channel resolver. Accept a channel
+name, `#channel`, `<#CHANNEL_ID|channel>` mention, or the current Slack
+conversation. Keep the resolved ID and membership check internal, and pass
+both the resolved ID and display name to Notion. Prefer an explicit reference,
+then current conversation, then the known convention. Never substitute a
+similarly named channel after an ambiguous lookup.
+
+Resolve the Slack requester through the existing bounded Slack/Notion address
+book and use that identity as `Owner / DRI`. Resolve notification recipients
+from Slack mentions, names, or existing context. Keep raw emails and Notion
+person IDs internal; never repeat them in the Slack response.
+
+`purpose` is optional. Participants are optional for Docs-only cadences. For
+`Calendar booking: Auto-book`, require participants that resolve to exact
+verified World identities, a positive duration, the managed organizer calendar,
+and a positive booking window. Ask for participant names or Slack mentions,
+not email addresses, when resolution is missing. New cadences remain Draft.
+
+Generate document names automatically. `{YYYY-MM-DD}` remains supported and
+`{week}` expands to the two-digit ISO week (`01` through `53`). Show only the
+resolved document name in the proposal. Do not show the raw template.
+
+The proposal should use human language and include only:
+
+- ritual title;
+- frequency, first occurrence, meeting time, and timezone;
+- notification time and preparation day;
+- resolved Slack channel, if any;
+- resolved document name; and
+- whether Calendar booking is off or auto-booked.
+
+End it with: `Reply 'confirm' to create this as a Draft.` Do not create the
+Draft until the user confirms. On confirmation, call the Notion tool's
+`create_cadence` operation (or the bundled `notion create-cadence` command)
+with the resolved internal values.
 
 Before the first write in a workspace, ensure the Cadences database has the
 Calendar booking fields (`Calendar booking`, `Organizer calendar`, `Booking
@@ -69,17 +92,27 @@ URL`). The Notion client exposes this as `ensure_cadence_booking_schema` and
 1. Resolve the creator and every Notion profile to a Notion person before
    writing. Email recipients are stored in `Notification emails` and are also
    resolved to a Notion person when the workspace has a unique matching
-   profile; an email-only recipient remains valid for Slack matching.
+   profile; an email-only recipient remains valid for Slack matching. This is
+   an internal resolution step, not a user-facing input requirement.
 2. Store resolved people in `Owner / DRI` and `Notification recipients`; preserve
    every raw email fallback in `Notification emails`.
 3. Set `Auto-created` to true, `Notification mode` to `Orbie`, and
    `Automation status` to `Draft`. Set `Document access` to `Cadence members`
    for private rows and `All World members` for public rows.
-4. Use the stable `Automation ID` as the idempotency key. A retry must return
-   the existing row rather than creating a duplicate in that target database.
-5. Report the created/existing Notion page, its Draft status, and the exact
-   next step: a responsible owner must review and change the row to
-   `Published` before scheduled execution.
+4. Use the generated stable internal ID as the idempotency key. Explicit
+   legacy IDs remain accepted for compatibility. A retry or Slack redelivery
+   must return the existing row rather than creating a duplicate in that target
+   database.
+5. Report only the ritual title, Draft status, page link, and next step: a
+   responsible owner must review and change the row to `Published` before
+   scheduled execution. Never relay Automation ID, Slack channel ID, Notion
+   email, raw template, or internal error details.
+
+Before rollout, verify that one proposal has no side effects, one confirmation
+creates one Draft, and a repeated confirmation returns that Draft. Also run a
+fresh session-creation smoke test and a cached/rate-limited Slack channel
+resolution test. A 500 or duplicate request blocks rollout and is handled as a
+separate reliability regression rather than hidden by the UX flow.
 
 Never put Slack, Notion, Google, or OAuth credentials in a cadence row or in a
 Slack message.

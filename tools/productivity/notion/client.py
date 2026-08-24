@@ -10,6 +10,8 @@ import httpx
 
 from centaur_sdk import secret
 
+from .cadence_intake import infer_cadence_defaults, stable_automation_id
+
 API_BASE = "https://api.notion.com/v1"
 NOTION_VERSION = "2022-06-28"
 CADENCES_DATABASE_ID = "cbdf28b9-3bc7-474c-85ed-9b323eb09889"
@@ -370,12 +372,12 @@ class NotionClient:
         self,
         *,
         ritual: str,
-        automation_id: str,
-        frequency: str,
-        next_date: str,
-        time_zone: str,
-        meeting_time: str,
-        notification_time: str,
+        automation_id: str | None = None,
+        frequency: str = "Weekly",
+        next_date: str | None = None,
+        time_zone: str | None = None,
+        meeting_time: str | None = None,
+        notification_time: str | None = None,
         preparation_lead_business_days: int = 1,
         google_template_url: str | None = None,
         google_output_folder_url: str | None = None,
@@ -410,8 +412,9 @@ class NotionClient:
         different owner. Private cadences must provide the database copied from
         the Orbie private cadence template. They may target a private ``G...``
         Slack channel or group DM, or leave the destination empty for
-        owner/recipient DMs. An existing ``Automation ID`` is returned
-        unchanged, making retries idempotent within that database.
+        owner/recipient DMs. When omitted, ``automation_id`` is generated from
+        the canonical resolved request. An existing ID is returned unchanged,
+        making retries idempotent within that database.
         """
         visibility = _choice("visibility", visibility, {"public", "private"})
         supplied_database = cadence_database_id or cadence_database_url
@@ -433,18 +436,28 @@ class NotionClient:
         elif supplied_database and database_id != CADENCES_DATABASE_ID:
             raise ValueError("custom cadence databases must use visibility=private")
 
-        self.ensure_cadence_booking_schema(database_id)
         ritual = _required_text("ritual", ritual)
-        automation_id = _required_text("automation_id", automation_id)
-        frequency = _choice("frequency", frequency, _CADENCE_FREQUENCIES)
-        time_zone = _required_text("time_zone", time_zone)
-        meeting_time = _required_text("meeting_time", meeting_time)
-        notification_time = _required_text("notification_time", notification_time)
+        defaults = infer_cadence_defaults(
+            ritual,
+            frequency=frequency,
+            next_date=next_date,
+            time_zone=time_zone,
+            meeting_time=meeting_time,
+            notification_time=notification_time,
+            slack_channel_name=slack_channel_name,
+            document_name_template=document_name_template,
+            visibility=visibility,
+        )
+        frequency = _choice("frequency", defaults.frequency, _CADENCE_FREQUENCIES)
+        time_zone = _required_text("time_zone", defaults.time_zone)
+        meeting_time = _required_text("meeting_time", defaults.meeting_time)
+        notification_time = _required_text("notification_time", defaults.notification_time)
         if not _TIME_RE.fullmatch(meeting_time) or not _TIME_RE.fullmatch(notification_time):
             raise ValueError("meeting_time and notification_time must use HH:MM")
-        next_date = _required_text("next_date", next_date)
+        next_date = _required_text("next_date", defaults.next_date)
         _validate_next_date(next_date)
         _validate_time_zone(time_zone)
+        self.ensure_cadence_booking_schema(database_id)
         if preparation_lead_business_days < 0:
             raise ValueError("preparation_lead_business_days must be non-negative")
         calendar_booking = _choice("calendar_booking", calendar_booking, _CALENDAR_BOOKING)
@@ -473,7 +486,7 @@ class NotionClient:
         if unknown_audience:
             raise ValueError(f"unsupported audience: {sorted(unknown_audience)!r}")
         channel_id = (slack_channel_id or "").strip()
-        channel_name = (slack_channel_name or "").strip()
+        channel_name = (defaults.slack_channel_name or "").strip()
         if bool(channel_id) != bool(channel_name):
             raise ValueError("slack_channel_id and slack_channel_name must be set together")
         if visibility == "private" and channel_id and not channel_id.startswith("G"):
@@ -516,6 +529,36 @@ class NotionClient:
         recipient_emails = [value for value in recipient_values if _looks_like_email(value)]
         email_values = _unique_casefold(explicit_emails + recipient_emails)
 
+        automation_id = (automation_id or "").strip()
+        if not automation_id:
+            automation_id = stable_automation_id(
+                {
+                    "database_id": database_id,
+                    "visibility": visibility,
+                    "creator_id": creator_id,
+                    "ritual": ritual,
+                    "frequency": frequency,
+                    "next_date": next_date,
+                    "time_zone": time_zone,
+                    "meeting_time": meeting_time,
+                    "notification_time": notification_time,
+                    "preparation_lead_business_days": preparation_lead_business_days,
+                    "slack_channel_id": channel_id,
+                    "slack_channel_name": channel_name,
+                    "document_name_template": defaults.document_name_template,
+                    "notification_recipients": recipient_ids,
+                    "notification_emails": email_values,
+                    "participants": _split_values(participants),
+                    "purpose": (purpose or "").strip(),
+                    "cadence_type": cadence_type,
+                    "audience": audience_values,
+                    "calendar_booking": calendar_booking,
+                    "organizer_calendar": organizer_calendar,
+                    "booking_window_business_days": booking_window_business_days,
+                    "duration_minutes": duration_minutes,
+                }
+            )
+
         existing = self.query_database(
             database_id,
             filter={
@@ -552,7 +595,7 @@ class NotionClient:
             "Slack channel ID": {"rich_text": self.make_rich_text(channel_id)},
             "Slack channel name": {"rich_text": self.make_rich_text(channel_name)},
             "Document name template": {
-                "rich_text": self.make_rich_text(document_name_template or "")
+                "rich_text": self.make_rich_text(defaults.document_name_template)
             },
             "Participants": {
                 "rich_text": self.make_rich_text(", ".join(_split_values(participants)))

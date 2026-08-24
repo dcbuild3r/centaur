@@ -244,6 +244,23 @@ def test_resolve_channel_still_resolves_channel_names() -> None:
     assert fake_web_client.open_calls == []
 
 
+def test_resolve_channel_ref_returns_display_name_and_internal_id() -> None:
+    client, _ = _make_client()
+
+    assert client.resolve_channel_ref("#paradigm-pulse") == {
+        "id": "C123",
+        "name": "#paradigm-pulse",
+        "is_private": False,
+    }
+
+
+def test_resolve_channel_ref_rejects_user_destinations() -> None:
+    client, _ = _make_client()
+
+    with pytest.raises(ValueError, match="must be channels"):
+        client.resolve_channel_ref("<@U123ABC>")
+
+
 def test_retry_on_ratelimit_honors_retry_after(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _ = _make_client()
     now = {"value": 100.0}
