@@ -85,6 +85,68 @@ def test_create_cadence_resolves_people_and_writes_a_draft(monkeypatch):
     )
 
 
+def test_create_cadence_infers_weekly_all_hands_defaults_and_id(monkeypatch):
+    client = _client(monkeypatch)
+    created = {}
+    monkeypatch.setattr(
+        client,
+        "create_page",
+        lambda parent, properties, **_kwargs: (
+            created.update(parent=parent, properties=properties) or {"id": "page-all-hands"}
+        ),
+    )
+
+    result = client.create_cadence(
+        ritual="World Foundation Weekly All Hands",
+        next_date="2026-08-31",
+        creator_email="creator@world.org",
+        slack_channel_id="C123456789",
+        slack_channel_name="#wf-all",
+    )
+
+    assert result["id"] == "page-all-hands"
+    props = created["properties"]
+    assert props["Automation ID"]["rich_text"][0]["text"]["content"].startswith("cadence-")
+    assert props["Frequency"] == {"select": {"name": "Weekly"}}
+    assert props["Time zone"]["rich_text"][0]["text"]["content"] == "Europe/Prague"
+    assert props["Meeting time"]["rich_text"][0]["text"]["content"] == "16:00"
+    assert props["Notification time"]["rich_text"][0]["text"]["content"] == "09:00"
+    assert props["Document name template"]["rich_text"][0]["text"]["content"] == (
+        "CW{week} World Foundation Weekly All Hands"
+    )
+
+
+def test_generated_automation_id_makes_retries_idempotent(monkeypatch):
+    client = _client(monkeypatch)
+    existing = []
+    create_calls = []
+
+    def query_database(*_args, **_kwargs):
+        return {"results": existing}
+
+    def create_page(_parent, properties, **_kwargs):
+        create_calls.append(properties)
+        page = {"id": "generated-page", "properties": properties}
+        existing.append(page)
+        return page
+
+    monkeypatch.setattr(client, "query_database", query_database)
+    monkeypatch.setattr(client, "create_page", create_page)
+
+    values = {
+        "ritual": "World Foundation Weekly All Hands",
+        "next_date": "2026-08-31",
+        "creator_email": "creator@world.org",
+        "slack_channel_id": "C123456789",
+        "slack_channel_name": "#wf-all",
+    }
+    first = client.create_cadence(**values)
+    second = client.create_cadence(**values)
+
+    assert first["id"] == second["id"] == "generated-page"
+    assert len(create_calls) == 1
+
+
 def test_create_cadence_is_idempotent_by_automation_id(monkeypatch):
     existing_page = {
         "id": "existing-page",

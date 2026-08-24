@@ -1033,6 +1033,18 @@ def _parse_clock(value: Any, default: str) -> dt.time:
     return dt.time(int(match.group(1)), int(match.group(2)))
 
 
+def _default_doc_name_template(title: str, frequency: str) -> str:
+    """Return the human-facing default for legacy rows without a template."""
+
+    if frequency == "weekly" and re.search(
+        r"\bweekly\b.*\ball\s+hands\b|\ball\s+hands\b.*\bweekly\b",
+        title,
+        re.IGNORECASE,
+    ):
+        return f"CW{{week}} {title}"
+    return f"{title} — {{YYYY-MM-DD}}"
+
+
 def _zone(name: Any) -> ZoneInfo:
     zone_name = str(name or DEFAULT_CADENCE_TIME_ZONE).strip()
     try:
@@ -1295,7 +1307,7 @@ def normalize_notion_cadence(
         "notesDelayMin": _property_value(row, "Notes delay (min)"),
         "durationMin": _property_value(row, "Duration (min)"),
         "docNameTemplate": _property_value(row, "Document name template")
-        or f"{title} — {{YYYY-MM-DD}}",
+        or _default_doc_name_template(title, frequency),
         "templateTabName": "Format",
         "notesTabName": "Meeting Notes",
         "attendees": attendees,
