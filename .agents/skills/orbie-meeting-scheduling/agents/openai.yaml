@@ -1,4 +1,0 @@
-interface:
-  display_name: "Orbie Meeting Scheduling"
-  short_description: "Find and book governed Calendar and Zoom meetings"
-  default_prompt: "Use $orbie-meeting-scheduling to find, book, or reschedule a governed World Foundation meeting."
