@@ -94,9 +94,9 @@ def test_document_name_resolves_iso_week_boundaries() -> None:
 
 
 def test_stable_automation_id_is_canonical_and_opaque() -> None:
-    values = {"ritual": "Weekly Sync", "owner_id": "person-1", "channel_id": "C123"}
+    values = {"cadence": "Weekly Sync", "owner_id": "person-1", "channel_id": "C123"}
     assert stable_automation_id(values) == stable_automation_id(
-        {"channel_id": "C123", "owner_id": "person-1", "ritual": "Weekly Sync"}
+        {"channel_id": "C123", "owner_id": "person-1", "cadence": "Weekly Sync"}
     )
     assert stable_automation_id(values).startswith("cadence-")
     assert "Weekly Sync" not in stable_automation_id(values)

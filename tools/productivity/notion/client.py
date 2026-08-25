@@ -371,7 +371,7 @@ class NotionClient:
     def create_cadence(
         self,
         *,
-        ritual: str,
+        cadence: str,
         automation_id: str | None = None,
         frequency: str = "Weekly",
         next_date: str | None = None,
@@ -436,9 +436,9 @@ class NotionClient:
         elif supplied_database and database_id != CADENCES_DATABASE_ID:
             raise ValueError("custom cadence databases must use visibility=private")
 
-        ritual = _required_text("ritual", ritual)
+        cadence = _required_text("cadence", cadence)
         defaults = infer_cadence_defaults(
-            ritual,
+            cadence,
             frequency=frequency,
             next_date=next_date,
             time_zone=time_zone,
@@ -536,7 +536,7 @@ class NotionClient:
                     "database_id": database_id,
                     "visibility": visibility,
                     "creator_id": creator_id,
-                    "ritual": ritual,
+                    "cadence": cadence,
                     "frequency": frequency,
                     "next_date": next_date,
                     "time_zone": time_zone,
@@ -569,15 +569,15 @@ class NotionClient:
         ).get("results", [])
         if existing:
             existing_page = existing[0]
-            existing_ritual = self.extract_title(existing_page)
-            if existing_ritual and existing_ritual != ritual:
+            existing_cadence = self.extract_title(existing_page)
+            if existing_cadence and existing_cadence != cadence:
                 raise ValueError(
-                    f"Automation ID {automation_id!r} already belongs to {existing_ritual!r}"
+                    f"Automation ID {automation_id!r} already belongs to {existing_cadence!r}"
                 )
             return existing_page
 
         properties: dict[str, Any] = {
-            "Ritual": {"title": self.make_rich_text(ritual)},
+            "Cadence": {"title": self.make_rich_text(cadence)},
             "Automation ID": {"rich_text": self.make_rich_text(automation_id)},
             "Automation status": {"select": {"name": "Draft"}},
             "Auto-created": {"checkbox": True},
