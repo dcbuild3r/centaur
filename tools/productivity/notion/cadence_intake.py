@@ -46,8 +46,8 @@ def normalize_frequency(value: str | None) -> str:
         raise ValueError(f"unsupported frequency: {value!r}") from error
 
 
-def _is_known_weekly_all_hands(ritual: str, frequency: str) -> bool:
-    return frequency == "Weekly" and bool(_WEEKLY_ALL_HANDS_RE.search(ritual))
+def _is_known_weekly_all_hands(cadence: str, frequency: str) -> bool:
+    return frequency == "Weekly" and bool(_WEEKLY_ALL_HANDS_RE.search(cadence))
 
 
 def _next_weekly_date(now: datetime, meeting_time: str) -> str:
@@ -73,19 +73,19 @@ def _business_days_before(value: date, days: int) -> date:
     return result
 
 
-def default_document_name_template(ritual: str, frequency: str) -> str:
+def default_document_name_template(cadence: str, frequency: str) -> str:
     """Return the internal template used when the user did not provide one."""
 
-    if _is_known_weekly_all_hands(ritual, frequency):
-        return f"CW{{week}} {ritual}"
-    return f"{ritual} — {{YYYY-MM-DD}}"
+    if _is_known_weekly_all_hands(cadence, frequency):
+        return f"CW{{week}} {cadence}"
+    return f"{cadence} — {{YYYY-MM-DD}}"
 
 
 @dataclass(frozen=True)
 class CadenceDefaults:
     """Resolved values used by both the proposal and the Notion write."""
 
-    ritual: str
+    cadence: str
     frequency: str
     next_date: str
     time_zone: str
@@ -97,7 +97,7 @@ class CadenceDefaults:
 
 
 def infer_cadence_defaults(
-    ritual: str,
+    cadence: str,
     *,
     frequency: str | None = None,
     next_date: str | None = None,
@@ -116,7 +116,7 @@ def infer_cadence_defaults(
     first occurrence rather than silently inventing one.
     """
 
-    title = _required_text("ritual", ritual)
+    title = _required_text("cadence", cadence)
     normalized_frequency = normalize_frequency(frequency)
     known_all_hands = _is_known_weekly_all_hands(title, normalized_frequency)
     inferred: list[str] = []
@@ -168,7 +168,7 @@ def infer_cadence_defaults(
         inferred.append("document name")
 
     return CadenceDefaults(
-        ritual=title,
+        cadence=title,
         frequency=normalized_frequency,
         next_date=resolved_next_date,
         time_zone=zone.key,
@@ -210,7 +210,7 @@ def stable_automation_id(values: dict[str, Any]) -> str:
 class CadenceProposal:
     """Display-safe proposal; it intentionally has no IDs or email addresses."""
 
-    ritual: str
+    cadence: str
     frequency: str
     next_date: str
     time_zone: str
@@ -224,7 +224,7 @@ class CadenceProposal:
 
     def as_dict(self) -> dict[str, Any]:
         return {
-            "ritual": self.ritual,
+            "cadence": self.cadence,
             "frequency": self.frequency,
             "next_date": self.next_date,
             "time_zone": self.time_zone,
@@ -240,7 +240,7 @@ class CadenceProposal:
     def render(self) -> str:
         lines = [
             "Here's what I'll set up:",
-            f"• {self.ritual}",
+            f"• {self.cadence}",
             f"• {self.frequency}, {_local_date(self.next_date, self.time_zone).strftime('%A')} "
             f"{self.next_date} at {self.meeting_time} ({self.time_zone})",
             f"• Notification: {self.preparation_day} at {self.notification_time}",
@@ -262,7 +262,7 @@ class CadenceProposal:
 
 
 def build_cadence_proposal(
-    ritual: str,
+    cadence: str,
     *,
     calendar_booking: str = "Off",
     preparation_lead_business_days: int = 1,
@@ -271,9 +271,9 @@ def build_cadence_proposal(
 ) -> CadenceProposal:
     """Build the single concise proposal shown before a Draft write."""
 
-    defaults = infer_cadence_defaults(ritual, now=now, **values)
+    defaults = infer_cadence_defaults(cadence, now=now, **values)
     return CadenceProposal(
-        ritual=defaults.ritual,
+        cadence=defaults.cadence,
         frequency=defaults.frequency,
         next_date=defaults.next_date,
         time_zone=defaults.time_zone,

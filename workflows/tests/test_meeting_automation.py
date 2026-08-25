@@ -1077,7 +1077,7 @@ def test_input_rejects_oversized_or_control_character_instructions():
 def _published_row(**overrides):
     row = {
         "id": "notion-page-1",
-        "Ritual": "Weekly Sync",
+        "Cadence": "Weekly Sync",
         "Automation ID": "weekly-sync",
         "Automation status": "Published",
         "Frequency": "Weekly",
@@ -1437,7 +1437,7 @@ class ManualNotionFakeClient(FakeClient):
 def test_manual_run_resolves_owner_scoped_draft_notion_cadence(monkeypatch):
     row = _published_row(
         **{
-            "Ritual": "Weekly Sync Spotlight Demo",
+            "Cadence": "Weekly Sync Spotlight Demo",
             "Automation ID": "orbie-weekly-sync-spotlight-demo",
             "Automation status": "Draft",
             "Owner / DRI": '["user://owner-dc"]',

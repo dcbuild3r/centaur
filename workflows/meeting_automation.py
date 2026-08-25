@@ -1187,12 +1187,12 @@ def normalize_notion_cadence(
     allowed_statuses = {"Published", "Draft"} if allow_draft else {"Published"}
     if status not in allowed_statuses:
         raise ValueError("cadence is not available for this workflow")
-    title = str(_property_value(row, "Ritual") or "").strip()
+    title = str(_property_value(row, "Cadence") or "").strip()
     cadence_id = str(
         _property_value(row, "Automation ID") or row.get("id") or ""
     ).strip()
     if not title or not cadence_id:
-        raise ValueError("published cadence requires Ritual and Automation ID")
+        raise ValueError("published cadence requires Cadence and Automation ID")
     frequency = str(_property_value(row, "Frequency") or "").strip().lower()
     frequency = frequency.replace(" ", "-")
     if frequency not in {"weekly", "bi-weekly", "monthly", "quarterly"}:
@@ -2001,7 +2001,7 @@ async def _resolve_manual_notion_cadence(
             str(
                 _property_value(row, "Automation ID") or row.get("id") or ""
             ).casefold(),
-            str(_property_value(row, "Ritual") or "").casefold(),
+            str(_property_value(row, "Cadence") or "").casefold(),
         }
     ]
     if len(matched_rows) != 1:

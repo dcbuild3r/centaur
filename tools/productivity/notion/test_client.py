@@ -44,7 +44,7 @@ def test_create_cadence_resolves_people_and_writes_a_draft(monkeypatch):
     monkeypatch.setattr(client, "create_page", create_page)
 
     result = client.create_cadence(
-        ritual="Weekly Sync",
+        cadence="Weekly Sync",
         automation_id="weekly-sync",
         frequency="weekly",
         next_date="2026-08-17T10:00:00+02:00",
@@ -68,7 +68,7 @@ def test_create_cadence_resolves_people_and_writes_a_draft(monkeypatch):
     assert result["id"] == "page-1"
     assert created["parent"] == {"database_id": "cbdf28b9-3bc7-474c-85ed-9b323eb09889"}
     props = created["properties"]
-    assert props["Ritual"]["title"][0]["text"]["content"] == "Weekly Sync"
+    assert props["Cadence"]["title"][0]["text"]["content"] == "Weekly Sync"
     assert props["Automation status"] == {"select": {"name": "Draft"}}
     assert props["Auto-created"] == {"checkbox": True}
     assert props["Owner / DRI"]["people"] == [
@@ -97,7 +97,7 @@ def test_create_cadence_infers_weekly_all_hands_defaults_and_id(monkeypatch):
     )
 
     result = client.create_cadence(
-        ritual="World Foundation Weekly All Hands",
+        cadence="World Foundation Weekly All Hands",
         next_date="2026-08-31",
         creator_email="creator@world.org",
         slack_channel_id="C123456789",
@@ -134,7 +134,7 @@ def test_generated_automation_id_makes_retries_idempotent(monkeypatch):
     monkeypatch.setattr(client, "create_page", create_page)
 
     values = {
-        "ritual": "World Foundation Weekly All Hands",
+        "cadence": "World Foundation Weekly All Hands",
         "next_date": "2026-08-31",
         "creator_email": "creator@world.org",
         "slack_channel_id": "C123456789",
@@ -151,7 +151,7 @@ def test_create_cadence_is_idempotent_by_automation_id(monkeypatch):
     existing_page = {
         "id": "existing-page",
         "properties": {
-            "Ritual": {
+            "Cadence": {
                 "type": "title",
                 "title": [{"plain_text": "Weekly Sync"}],
             }
@@ -162,7 +162,7 @@ def test_create_cadence_is_idempotent_by_automation_id(monkeypatch):
 
     assert (
         client.create_cadence(
-            ritual="Weekly Sync",
+            cadence="Weekly Sync",
             automation_id="weekly-sync",
             frequency="Weekly",
             next_date="2026-08-17",
@@ -180,7 +180,7 @@ def test_create_cadence_rejects_a_different_owner(monkeypatch):
 
     with pytest.raises(ValueError, match="creator must remain"):
         client.create_cadence(
-            ritual="Weekly Sync",
+            cadence="Weekly Sync",
             automation_id="weekly-sync",
             frequency="Weekly",
             next_date="2026-08-17",
@@ -201,7 +201,7 @@ def test_create_cadence_allows_email_only_notification_recipients(monkeypatch):
     )
 
     result = client.create_cadence(
-        ritual="Email-only sync",
+        cadence="Email-only sync",
         automation_id="email-only-sync",
         frequency="Weekly",
         next_date="2026-08-17",
@@ -230,7 +230,7 @@ def test_create_cadence_writes_auto_book_configuration(monkeypatch):
     )
 
     result = client.create_cadence(
-        ritual="Auto-book sync",
+        cadence="Auto-book sync",
         automation_id="auto-book-sync",
         frequency="Weekly",
         next_date="2026-08-17",
@@ -259,7 +259,7 @@ def test_create_cadence_rejects_incomplete_auto_book_configuration(monkeypatch):
     client = _client(monkeypatch)
     with pytest.raises(ValueError, match="duration_minutes"):
         client.create_cadence(
-            ritual="Missing duration",
+            cadence="Missing duration",
             automation_id="missing-duration",
             frequency="Weekly",
             next_date="2026-08-17",
@@ -300,7 +300,7 @@ def test_create_private_cadence_targets_a_copied_template_and_defaults_owner_rec
     )
 
     result = client.create_cadence(
-        ritual="Private Weekly Sync",
+        cadence="Private Weekly Sync",
         automation_id="private-weekly-sync",
         frequency="Weekly",
         next_date="2026-08-17",
@@ -328,7 +328,7 @@ def test_create_private_cadence_rejects_an_unmarked_database(monkeypatch):
 
     with pytest.raises(ValueError, match="copied from the Orbie private cadence template"):
         client.create_cadence(
-            ritual="Private Weekly Sync",
+            cadence="Private Weekly Sync",
             automation_id="private-weekly-sync",
             frequency="Weekly",
             next_date="2026-08-17",
