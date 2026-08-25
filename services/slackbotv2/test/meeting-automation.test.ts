@@ -46,6 +46,7 @@ function slackMessage(
 describe('meeting automation command parsing', () => {
   test.each([
     ['run cadence weekly team sync', 'weekly team sync'],
+    ['cadence run weekly team sync', 'weekly team sync'],
     ['run meeting automation "Leadership 1:1"', 'Leadership 1:1'],
     ['meeting ops private cadence', 'private cadence'],
     [`<@${BOT_USER_ID}|orbie> run cadence  weekly team sync  `, 'weekly team sync'],
