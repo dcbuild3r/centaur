@@ -983,8 +983,15 @@ async def _ensure_document_editors(
         for permission in before
         if str(permission.get("role") or "").strip() in {"writer", "owner"}
     }
+    writer_domains = {
+        str(permission.get("domain") or "").strip().lower()
+        for permission in before
+        if str(permission.get("role") or "").strip() in {"writer", "owner"}
+        and str(permission.get("type") or "").strip() == "domain"
+    }
     for email in requested:
-        if email in writers:
+        email_domain = email.rsplit("@", 1)[-1] if "@" in email else ""
+        if email in writers or email_domain in writer_domains:
             continue
         await ctx.step(
             f"{step_prefix}:share_drive_file:{email}",
@@ -1001,7 +1008,19 @@ async def _ensure_document_editors(
         for permission in after
         if str(permission.get("role") or "").strip() in {"writer", "owner"}
     }
-    missing = [email for email in requested if email not in verified]
+    verified_domains = {
+        str(permission.get("domain") or "").strip().lower()
+        for permission in after
+        if str(permission.get("role") or "").strip() in {"writer", "owner"}
+        and str(permission.get("type") or "").strip() == "domain"
+    }
+    missing = [
+        email
+        for email in requested
+        if email not in verified
+        and (email.rsplit("@", 1)[-1] if "@" in email else "")
+        not in verified_domains
+    ]
     if missing:
         raise ValueError(
             "GSuite did not verify Editor access for: " + ", ".join(missing)
