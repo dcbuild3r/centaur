@@ -194,6 +194,7 @@ def resolve_document_name(template: str, next_date: str, time_zone: str) -> str:
     return (
         str(template)
         .replace("{YYYY-MM-DD}", occurrence_date.isoformat())
+        .replace("{calendar_week}", f"{occurrence_date.isocalendar().week:02d}")
         .replace("{week}", f"{occurrence_date.isocalendar().week:02d}")
     )
 

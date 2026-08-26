@@ -43,6 +43,14 @@ test('resolves the two-digit ISO week placeholder', () => {
   )).toBe('CW32 World Foundation Weekly All Hands')
 })
 
+test('resolves the calendar_week alias used by cadence rows', () => {
+  expect(pure.resolveDocName(
+    'CW{calendar_week} World Foundation Weekly All Hands',
+    new Date('2026-08-31T10:00:00Z'),
+    'UTC',
+  )).toBe('CW36 World Foundation Weekly All Hands')
+})
+
 test('ISO week placeholder follows year boundaries', () => {
   expect(pure.isoWeek(new Date('2026-12-31T10:00:00Z'), 'UTC')).toBe('53')
   expect(pure.isoWeek(new Date('2027-01-01T10:00:00Z'), 'UTC')).toBe('53')

@@ -93,6 +93,14 @@ def test_document_name_resolves_iso_week_boundaries() -> None:
     )
 
 
+def test_document_name_supports_calendar_week_alias() -> None:
+    assert resolve_document_name(
+        "CW{calendar_week} World Foundation Weekly All Hands",
+        "2026-08-31",
+        "UTC",
+    ) == "CW36 World Foundation Weekly All Hands"
+
+
 def test_stable_automation_id_is_canonical_and_opaque() -> None:
     values = {"cadence": "Weekly Sync", "owner_id": "person-1", "channel_id": "C123"}
     assert stable_automation_id(values) == stable_automation_id(

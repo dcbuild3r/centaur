@@ -24,6 +24,7 @@ var MeetingOpsPure = (function () {
   function resolveDocName(template, date, timeZone) {
     return String(template)
       .split('{YYYY-MM-DD}').join(dateKey(date, timeZone))
+      .split('{calendar_week}').join(isoWeek(date, timeZone))
       .split('{week}').join(isoWeek(date, timeZone));
   }
 
