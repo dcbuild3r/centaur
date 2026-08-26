@@ -1490,6 +1490,7 @@ def test_manual_run_resolves_owner_scoped_draft_notion_cadence(monkeypatch):
         call for call in client.calls if call[0] == "run_scheduled_cadence"
     )
     assert scheduled_call[1]["id"] == "orbie-weekly-sync-spotlight-demo"
+    assert scheduled_call[3]["requester_slack_user_id"] == "UDC"
     assert result["verified_editors"] == [
         "dc.builder@world.org",
         "piotr.piwowarczyk@world.org",

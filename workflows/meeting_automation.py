@@ -162,6 +162,7 @@ class MeetingOpsClient(Protocol):
         *,
         now: str,
         requester_slack_team_id: str,
+        requester_slack_user_id: str | None = None,
     ) -> dict[str, Any] | None: ...
 
     async def run_scheduled_notifications(
@@ -320,16 +321,20 @@ class MeetingOpsToolClient:
         *,
         now: str,
         requester_slack_team_id: str,
+        requester_slack_user_id: str | None = None,
     ) -> dict[str, Any] | None:
+        arguments: dict[str, Any] = {
+            "cadence": cadence,
+            "occurrence_at": occurrence_at,
+            "now": now,
+            "requester_slack_team_id": requester_slack_team_id,
+        }
+        if requester_slack_user_id:
+            arguments["requester_slack_user_id"] = requester_slack_user_id
         result = await self._ctx.call_tool(
             MEETING_OPS_TOOL,
             "run_scheduled_cadence",
-            {
-                "cadence": cadence,
-                "occurrence_at": occurrence_at,
-                "now": now,
-                "requester_slack_team_id": requester_slack_team_id,
-            },
+            arguments,
         )
         output = _tool_output(result)
         return output if isinstance(output, dict) else None
@@ -2450,6 +2455,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                 occurrence_at,
                 now=_parse_now(inp.now).isoformat(),
                 requester_slack_team_id=team_id,
+                requester_slack_user_id=user_id,
             ),
         )
         document_editor_emails = list(cadence.get("documentEditorEmails") or [])

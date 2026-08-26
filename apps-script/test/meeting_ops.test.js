@@ -616,6 +616,42 @@ test('scheduled entrypoint creates the requested occurrence and queues recipient
   ))).toEqual(['ORBIE_OUTBOX:agenda:manual-cadence:2026-08-14:U1'])
 })
 
+test('owner-triggered Notion cadence bypasses scheduled channel allowlist', () => {
+  prepareManualTemplate()
+  const result = runScheduledCadenceJob({
+    scheduledByOrbie: true,
+    manualByOwner: true,
+    requesterSlackUserId: 'U1',
+    requesterSlackTeamId: 'TL1HM8UUU',
+    cadence: {
+      ...manualCadence(),
+      visibility: 'public',
+      notifyChannel: 'C069VHQEJEQ',
+      notifyChannelName: '#wf-all',
+      notificationRecipients: [],
+    },
+    occurrenceAt: '2026-08-31T14:00:00Z',
+    now: '2026-08-26T20:00:00Z',
+  })
+
+  expect(result.docId).toBeTruthy()
+  expect(executionProperty('ALLOWED_WF_CHANNEL_IDS')).toBeNull()
+})
+
+test('owner-triggered Notion cadence rejects a non-owner before copying', () => {
+  prepareManualTemplate()
+  expect(() => runScheduledCadenceJob({
+    scheduledByOrbie: true,
+    manualByOwner: true,
+    requesterSlackUserId: 'U-NOT-OWNER',
+    requesterSlackTeamId: 'TL1HM8UUU',
+    cadence: manualCadence(),
+    occurrenceAt: '2026-08-31T14:00:00Z',
+    now: '2026-08-26T20:00:00Z',
+  })).toThrow('Cadence is not authorized')
+  expect([...documents.keys()]).toEqual(['manual-template'])
+})
+
 test('document editors are granted on the copied document, never the source', () => {
   prepareManualTemplate()
   const result = runScheduledCadenceJob({

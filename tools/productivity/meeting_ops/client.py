@@ -120,6 +120,7 @@ def run_scheduled_cadence(
     *,
     now: str | None = None,
     requester_slack_team_id: str,
+    requester_slack_user_id: str | None = None,
     custom_instructions: str | None = None,
 ) -> dict[str, Any] | None:
     """Create or reuse one Notion-configured scheduled occurrence."""
@@ -130,6 +131,9 @@ def run_scheduled_cadence(
         "requesterSlackTeamId": requester_slack_team_id,
         "scheduledByOrbie": True,
     }
+    if requester_slack_user_id:
+        request["requesterSlackUserId"] = requester_slack_user_id
+        request["manualByOwner"] = True
     if now:
         request["now"] = now
     if custom_instructions:
