@@ -54,6 +54,57 @@ def test_find_availability_uses_freebusy_only_and_returns_slots(monkeypatch):
     assert "summary" not in calls[0]
 
 
+def test_email_organizer_requires_a_visible_writable_calendar(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    monkeypatch.setenv("MEETING_ORGANIZER_CALENDARS", "{}")
+    calls = []
+
+    class FakeCalendarList:
+        def list(self, **kwargs):
+            calls.append(("list", kwargs))
+            return self
+
+        def execute(self):
+            return {
+                "items": [
+                    {"id": "owner@example.com", "accessRole": "writer"},
+                ]
+            }
+
+    class FakeFreebusy:
+        def query(self, **kwargs):
+            calls.append(("freebusy", kwargs))
+            return self
+
+        def execute(self):
+            return {
+                "calendars": {
+                    "owner@example.com": {"busy": []},
+                    "person@world.org": {"busy": []},
+                }
+            }
+
+    class FakeService:
+        def calendarList(self):
+            return FakeCalendarList()
+
+        def freebusy(self):
+            return FakeFreebusy()
+
+    monkeypatch.setattr(client, "get_calendar_service", lambda: FakeService())
+    result = client.MeetingSchedulerClient().find_availability(
+        "OWNER@example.com",
+        ["person@world.org"],
+        "2026-08-17T09:00:00Z",
+        "2026-08-17T10:00:00Z",
+        30,
+    )
+
+    assert result["candidates"]
+    assert calls[0][0] == "list"
+    assert calls[1][0] == "freebusy"
+
+
 def test_ad_hoc_booking_requires_confirmation(monkeypatch):
     monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
     monkeypatch.setenv("MEETING_ORGANIZER_CALENDARS", '{"wf":"organizer@world.org"}')

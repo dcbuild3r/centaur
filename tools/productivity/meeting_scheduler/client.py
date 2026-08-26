@@ -43,6 +43,7 @@ DEFAULT_TIME_ZONE = "UTC"
 MAX_CANDIDATES = 32
 SCHEDULER_STATUSES = {"pending", "booked", "blocked", "completed", "cancelled"}
 EMAIL_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
+WRITABLE_CALENDAR_ACCESS_ROLES = frozenset({"writer", "owner"})
 
 
 class MeetingSchedulerError(RuntimeError):
@@ -164,9 +165,35 @@ def _organizer_calendar_map() -> dict[str, str]:
 def _resolve_organizer(alias: str) -> str:
     alias = str(alias or "").strip()
     calendar_id = _organizer_calendar_map().get(alias)
-    if not calendar_id:
+    if calendar_id:
+        return calendar_id
+    if not EMAIL_RE.fullmatch(alias):
         raise MeetingSchedulerError(f"organizer calendar {alias!r} is not allowlisted")
-    return calendar_id
+
+    # Manual Slack scheduling supplies the verified proposer's email after the
+    # workflow has resolved it from Slack. Require an exact, writable calendar
+    # match before allowing that identity to become the event organizer.
+    try:
+        calendars = (
+            get_calendar_service().calendarList().list(showHidden=False).execute().get("items", [])
+        )
+    except Exception as error:
+        raise MeetingSchedulerError("Google Calendar organizer lookup failed") from error
+    matching = next(
+        (
+            calendar
+            for calendar in calendars
+            if isinstance(calendar, dict)
+            and str(calendar.get("id") or "").strip().lower() == alias.lower()
+        ),
+        None,
+    )
+    if matching is None:
+        raise MeetingSchedulerError(f"organizer calendar {alias!r} is not visible to Orbie")
+    access_role = str(matching.get("accessRole") or "").strip().lower()
+    if access_role not in WRITABLE_CALENDAR_ACCESS_ROLES:
+        raise MeetingSchedulerError(f"organizer calendar {alias!r} requires writer or owner access")
+    return str(matching["id"])
 
 
 def _database_url() -> str:
