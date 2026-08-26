@@ -161,6 +161,7 @@ Rails.application.routes.draw do
         post :approve
         post :disable
         post :promote
+        post :demote
       end
     end
     resource :system_settings, only: %i[edit update], path: "settings"
@@ -273,6 +274,9 @@ Rails.application.routes.draw do
       namespace :sandbox do
         resource :permissions, only: :show
         resources :oauth_apps, only: :index
+        resources :scheduled_tasks, only: %i[index show create update destroy] do
+          post :run, on: :member
+        end
         resources :skills, only: %i[index show create update destroy] do
           collection { get :search }
           member do

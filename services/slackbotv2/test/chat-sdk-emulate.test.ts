@@ -26,6 +26,7 @@ import { clearRequesterIdentityCacheForTests } from '../src/session-api'
 import { slackbotMetrics } from '../src/metrics'
 import { createOpenAiMessageOverridesStrategy } from '../src/message-overrides-strategy'
 import claudeSettings from '../../../harness/claude/settings.json'
+import codexConfig from '../../../harness/codex/config.toml'
 
 const BOT_TOKEN = 'xoxb-slackbotv2-emulate'
 const USER_TOKEN = 'xoxp-slackbotv2-user'
@@ -36,6 +37,20 @@ const USER_ID = 'USLACKBOTV2USER'
 const USER_B_ID = 'USLACKBOTV2USERB'
 const TEAM_ID = 'T000000001'
 const CHANNEL_ID = 'C000000001'
+const bakedCodexConfig = codexConfig as {
+  model: string
+  model_reasoning_effort: string
+  service_tier: string
+}
+
+function displayName(value: string): string {
+  const normalized = value.trim().toLowerCase()
+  if (normalized === 'xhigh') return 'XHigh'
+  return normalized.length === 0
+    ? normalized
+    : `${normalized[0]!.toUpperCase()}${normalized.slice(1)}`
+}
+
 /** How real Slack renders a streamed message whose stream broke or was never stopped. */
 const BROKEN_STREAM_TEXT = ':warning: Something went wrong'
 
@@ -1036,7 +1051,7 @@ describe('slackbotv2', () => {
       .map(block => JSON.stringify(block))
       .find(text => text.includes('Open chat in Console'))
     expect(footer).toContain('Open chat in Console')
-    expect(footer).not.toContain('GPT-5.6-SOL')
+    expect(footer).not.toContain(bakedCodexConfig.model.toUpperCase())
     expect(footer).not.toContain('Codex')
   })
 
@@ -1050,7 +1065,7 @@ describe('slackbotv2', () => {
         .filter(call => call.method === 'chat.stopStream')
         .flatMap(call => (Array.isArray(call.body.blocks) ? (call.body.blocks as unknown[]) : []))
         .map(block => JSON.stringify(block))
-        .filter(text => text.includes('GPT-5.6-SOL'))
+        .filter(text => text.includes(bakedCodexConfig.model.toUpperCase()))
 
     const parent = await postUserMessage('Response metadata thread context.')
     const firstMention = await postUserMessage(`<@${BOT_USER_ID}> start`, parent.ts)
@@ -1076,7 +1091,9 @@ describe('slackbotv2', () => {
     await Promise.all(firstWaits)
     expect(metadataBlockTexts(slackApi.calls)).toHaveLength(1)
     expect(metadataBlockTexts(slackApi.calls)[0]).toContain('Codex')
-    expect(metadataBlockTexts(slackApi.calls)[0]).toContain('Low')
+    expect(metadataBlockTexts(slackApi.calls)[0]).toContain(
+      displayName(bakedCodexConfig.model_reasoning_effort)
+    )
     expect(metadataBlockTexts(slackApi.calls)[0]).not.toContain('Fast')
     expect(metadataBlockTexts(slackApi.calls)[0]).not.toContain('Open chat in Console')
 
@@ -1119,7 +1136,7 @@ describe('slackbotv2', () => {
         .filter(call => call.method === 'chat.stopStream')
         .flatMap(call => (Array.isArray(call.body.blocks) ? (call.body.blocks as unknown[]) : []))
         .map(block => JSON.stringify(block))
-        .filter(text => text.includes('GPT-5.6-SOL'))
+        .filter(text => text.includes(bakedCodexConfig.model.toUpperCase()))
 
     const parent = await postUserMessage('Service tier thread context.')
     const firstMention = await postUserMessage(`<@${BOT_USER_ID}> start`, parent.ts)
@@ -1144,7 +1161,9 @@ describe('slackbotv2', () => {
     expect(firstResponse.status).toBe(200)
     await Promise.all(firstWaits)
     expect(metadataBlockTexts(slackApi.calls)).toHaveLength(1)
-    expect(metadataBlockTexts(slackApi.calls)[0]).toContain('Fast')
+    expect(metadataBlockTexts(slackApi.calls)[0]).toContain(
+      displayName(bakedCodexConfig.service_tier)
+    )
     expect(metadataBlockTexts(slackApi.calls)[0]).toContain('Open chat in Console')
 
     slackApi.reset()
@@ -1219,7 +1238,7 @@ describe('slackbotv2', () => {
       .map(block => JSON.stringify(block))
       .find(text => text.includes('Open chat in Console'))
     expect(footer).toContain('Nanocodex')
-    expect(footer).toContain('Low')
+    expect(footer).toContain(displayName(bakedCodexConfig.model_reasoning_effort))
     expect(footer).not.toContain('Codex*')
     expect(codexApi.creates[0]?.body.harness_type).toBe('nanocodex')
     expect(codexApi.creates[0]?.body.metadata.harness_assignment).toEqual(harnessAssignment)
@@ -4175,6 +4194,8 @@ describe('slackbotv2', () => {
         '/api/webhooks/slack',
         signedSlackEvent({
           event_id: 'Ev-slackbotv2-slow-execute',
+          retry_num: '1',
+          retry_reason: 'http_timeout',
           event: {
             type: 'app_mention',
             user: USER_ID,
@@ -4248,6 +4269,8 @@ describe('slackbotv2', () => {
         slack_event_id: 'Ev-slackbotv2-slow-execute',
         slack_event_type: 'app_mention',
         slack_message_ts: mention.ts,
+        slack_retry_num: '1',
+        slack_retry_reason: 'http_timeout',
         slack_thread_ts: parent.ts,
         task_count: expect.any(Number)
       })
@@ -5664,6 +5687,8 @@ async function threadTexts(threadTs: string): Promise<string[]> {
 function signedSlackEvent(input: {
   event_id: string
   event: Record<string, unknown>
+  retry_num?: string
+  retry_reason?: string
 }): RequestInit {
   const timestamp = Math.floor(Date.now() / 1000)
   const body = JSON.stringify({
@@ -5678,13 +5703,16 @@ function signedSlackEvent(input: {
   const signature = createHmac('sha256', SIGNING_SECRET)
     .update(`v0:${timestamp}:${body}`)
     .digest('hex')
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    'x-slack-request-timestamp': String(timestamp),
+    'x-slack-signature': `v0=${signature}`
+  }
+  if (input.retry_num) headers['x-slack-retry-num'] = input.retry_num
+  if (input.retry_reason) headers['x-slack-retry-reason'] = input.retry_reason
   return {
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-slack-request-timestamp': String(timestamp),
-      'x-slack-signature': `v0=${signature}`
-    },
+    headers,
     body
   }
 }
