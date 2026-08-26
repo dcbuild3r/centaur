@@ -38,12 +38,14 @@ ZOOM_ACCESS_TOKEN = "ZOOM_ACCESS_TOKEN"
 SCHEDULER_ENABLED = "MEETING_SCHEDULER_ENABLED"
 ORGANIZER_CALENDARS = "MEETING_ORGANIZER_CALENDARS"
 ZOOM_HOST_USER_ID = "MEETING_ZOOM_HOST_USER_ID"
+ZOOM_SCHEDULE_FOR_USERS = "MEETING_ZOOM_SCHEDULE_FOR_USERS"
 DEFAULT_DATABASE = "ai_v2"
 DEFAULT_TIME_ZONE = "UTC"
 MAX_CANDIDATES = 32
 SCHEDULER_STATUSES = {"pending", "booked", "blocked", "completed", "cancelled"}
 EMAIL_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
 WRITABLE_CALENDAR_ACCESS_ROLES = frozenset({"writer", "owner"})
+MAX_TRANSCRIPT_BYTES = 10 * 1024 * 1024
 
 
 class MeetingSchedulerError(RuntimeError):
@@ -159,6 +161,21 @@ def _organizer_calendar_map() -> dict[str, str]:
         raise MeetingSchedulerError(f"{ORGANIZER_CALENDARS} must be a JSON object")
     return {
         str(key): str(calendar_id) for key, calendar_id in value.items() if str(calendar_id).strip()
+    }
+
+
+def _zoom_schedule_for_map() -> dict[str, str]:
+    raw = _config_value(ZOOM_SCHEDULE_FOR_USERS, "{}").strip()
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise MeetingSchedulerError(f"{ZOOM_SCHEDULE_FOR_USERS} must be a JSON object") from error
+    if not isinstance(value, dict):
+        raise MeetingSchedulerError(f"{ZOOM_SCHEDULE_FOR_USERS} must be a JSON object")
+    return {
+        str(key): str(user_id).strip()
+        for key, user_id in value.items()
+        if str(key).strip() and str(user_id).strip()
     }
 
 
@@ -684,25 +701,113 @@ class MeetingSchedulerClient:
         return body
 
     def _zoom_create(
-        self, *, title: str, start: dt.datetime, duration: int, time_zone: str, occurrence_key: str
+        self,
+        *,
+        title: str,
+        start: dt.datetime,
+        duration: int,
+        time_zone: str,
+        occurrence_key: str,
+        organizer_calendar_key: str,
     ) -> dict[str, Any]:
         host = _config_value(ZOOM_HOST_USER_ID).strip()
         if not host:
             raise MeetingSchedulerError(f"{ZOOM_HOST_USER_ID} is required")
+        payload: dict[str, Any] = {
+            "topic": title,
+            "type": 2,
+            "start_time": _rfc3339(start),
+            "duration": duration,
+            "timezone": time_zone,
+            "tracking_fields": [{"field": "orbie_occurrence_key", "value": occurrence_key}],
+            "settings": {
+                "auto_recording": "cloud",
+                "join_before_host": False,
+                "waiting_room": True,
+            },
+        }
+        schedule_for = _zoom_schedule_for_map().get(organizer_calendar_key)
+        if schedule_for:
+            # This allowlist is operator-controlled. Zoom also enforces that
+            # the connected Orbie account has scheduling privilege for the user.
+            payload["schedule_for"] = schedule_for
         return self._zoom_request(
             "POST",
             f"/users/{host}/meetings",
             occurrence_key=occurrence_key,
-            payload={
-                "topic": title,
-                "type": 2,
-                "start_time": _rfc3339(start),
-                "duration": duration,
-                "timezone": time_zone,
-                "tracking_fields": [{"field": "orbie_occurrence_key", "value": occurrence_key}],
-                "settings": {"join_before_host": False, "waiting_room": True},
-            },
+            payload=payload,
         )
+
+    def get_recording(self, meeting_id: str) -> dict[str, Any]:
+        """Return recording metadata and the bounded VTT transcript, when ready."""
+
+        _require_enabled()
+        normalized_id = str(meeting_id or "").strip()
+        if not normalized_id or len(normalized_id) > 128 or any(char.isspace() for char in normalized_id):
+            raise MeetingSchedulerError("meeting_id must be a non-empty, bounded token")
+        recording = self._zoom_request(
+            "GET", f"/meetings/{quote(normalized_id, safe='')}/recordings"
+        )
+        files = recording.get("recording_files")
+        public_files: list[dict[str, Any]] = []
+        transcript = None
+        for item in files if isinstance(files, list) else []:
+            if not isinstance(item, dict):
+                continue
+            public_files.append(
+                {
+                    key: item.get(key)
+                    for key in ("id", "file_type", "file_extension", "file_size", "recording_type", "status")
+                    if item.get(key) is not None
+                }
+            )
+            if transcript is None and str(item.get("file_type") or "").upper() == "TRANSCRIPT":
+                download_url = str(item.get("download_url") or "").strip()
+                if download_url:
+                    transcript = self._zoom_download_transcript(download_url)
+        return {
+            "meeting_id": recording.get("id") or normalized_id,
+            "topic": recording.get("topic"),
+            "start_time": recording.get("start_time"),
+            "recording_files": public_files,
+            "transcript": transcript,
+            "transcript_status": "ready" if transcript is not None else "pending",
+        }
+
+    def get_summary(self, meeting_id: str) -> dict[str, Any]:
+        """Return Zoom AI Companion's processed meeting summary, when available."""
+
+        _require_enabled()
+        normalized_id = str(meeting_id or "").strip()
+        if not normalized_id or len(normalized_id) > 128 or any(
+            char.isspace() for char in normalized_id
+        ):
+            raise MeetingSchedulerError("meeting_id must be a non-empty, bounded token")
+        summary = self._zoom_request(
+            "GET", f"/meetings/{quote(normalized_id, safe='')}/meeting_summary"
+        )
+        # Keep the provider payload because Zoom may add summary sections, but
+        # never expose token-bearing URLs or provider-internal download links.
+        return {
+            key: value
+            for key, value in summary.items()
+            if key not in {"download_url", "play_url", "share_url"}
+        }
+
+    def _zoom_download_transcript(self, download_url: str) -> str:
+        parsed = urlparse(download_url)
+        hostname = (parsed.hostname or "").lower()
+        if parsed.scheme != "https" or not (hostname == "zoom.us" or hostname.endswith(".zoom.us")):
+            raise MeetingSchedulerError("Zoom returned an invalid transcript download URL")
+        with httpx.Client(timeout=30.0, follow_redirects=False) as client:
+            response = client.get(download_url, headers=self._zoom_headers())
+        if response.status_code >= 400:
+            raise MeetingSchedulerError(
+                f"Zoom transcript download failed with HTTP {response.status_code}"
+            )
+        if len(response.content) > MAX_TRANSCRIPT_BYTES:
+            raise MeetingSchedulerError("Zoom transcript exceeded the size limit")
+        return response.content.decode("utf-8-sig")
 
     @staticmethod
     def _calendar_event_id(key: str) -> str:
@@ -969,6 +1074,7 @@ class MeetingSchedulerClient:
                             duration=duration,
                             time_zone=time_zone,
                             occurrence_key=key,
+                            organizer_calendar_key=organizer_calendar_key,
                         )
                     join_url = str(zoom.get("join_url") or "").strip()
                     zoom_id = str(zoom.get("id") or "").strip()

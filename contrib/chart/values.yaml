@@ -477,6 +477,9 @@ apiRs:
     enabled: false
     organizerCalendars: "{}"
     zoomHostUserId: ""
+    # Optional organizer-calendar-key -> Zoom user mapping. Leave empty for
+    # Orbie-owned rooms; entries require Zoom scheduling privilege grants.
+    zoomScheduleForUsers: "{}"
   # Scheduled ETL workflow configuration. The chart renders these into api-rs
   # env so workflow discovery sees the right schedules, then derives the
   # workflow-host passthrough list from the same non-secret config.

@@ -116,8 +116,9 @@
 {{- end -}}
 {{- end -}}
 {{- end -}}
-{{- $meetingSchedulerPassthroughNames := list "MEETING_SCHEDULER_ENABLED" "MEETING_ORGANIZER_CALENDARS" "MEETING_ZOOM_HOST_USER_ID" -}}
+{{- $meetingSchedulerPassthroughNames := list "MEETING_SCHEDULER_ENABLED" "MEETING_ORGANIZER_CALENDARS" "MEETING_ZOOM_HOST_USER_ID" "MEETING_ZOOM_SCHEDULE_FOR_USERS" -}}
 {{- $meetingOrganizerCalendars := .Values.apiRs.meetingScheduler.organizerCalendars -}}
+{{- $meetingZoomScheduleForUsers := .Values.apiRs.meetingScheduler.zoomScheduleForUsers -}}
 {{- $apiRsEtlPassthroughNames = uniq $apiRsEtlPassthroughNames -}}
 {{- $apiRsEtlPassthroughNames = concat $apiRsEtlPassthroughNames $meetingSchedulerPassthroughNames | uniq -}}
 apiVersion: v1
@@ -331,6 +332,10 @@ spec:
 {{- if not (hasKey .Values.apiRs.extraEnv "MEETING_ZOOM_HOST_USER_ID") }}
             - name: MEETING_ZOOM_HOST_USER_ID
               value: {{ .Values.apiRs.meetingScheduler.zoomHostUserId | quote }}
+{{- end }}
+{{- if not (hasKey .Values.apiRs.extraEnv "MEETING_ZOOM_SCHEDULE_FOR_USERS") }}
+            - name: MEETING_ZOOM_SCHEDULE_FOR_USERS
+              value: {{ if kindIs "map" $meetingZoomScheduleForUsers }}{{ toJson $meetingZoomScheduleForUsers | quote }}{{ else }}{{ $meetingZoomScheduleForUsers | quote }}{{ end }}
 {{- end }}
 {{- range $env := $apiRsEtlEnv }}
 {{- if not (hasKey $.Values.apiRs.extraEnv $env.name) }}

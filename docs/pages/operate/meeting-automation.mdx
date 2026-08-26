@@ -149,14 +149,18 @@ Before enabling `MEETING_SCHEDULER_ENABLED` in Dev:
    cadence calendars. Map automated calendar IDs through
    `MEETING_ORGANIZER_CALENDARS`; never map `primary` or accept a raw calendar
    ID from a caller.
-3. Create the World Foundation Zoom Server-to-Server OAuth app with a licensed
-   designated host. Store its account/client credentials and the managed
-   short-lived `ZOOM_ACCESS_TOKEN` rotation in the secret system. Do not put
-   them in Apps Script or a skill.
+3. Configure the World Foundation Zoom General/User-managed OAuth app, connect
+   it as the licensed Orbie host, and let Centaur Console own the rotating
+   refresh-token family. The scheduler consumes broker credential
+   `zoom-orbie-general-oauth`; do not put an access token, refresh token, or
+   client secret in Apps Script, Helm values, 1Password runtime references, or
+   a skill. Leave `MEETING_ZOOM_SCHEDULE_FOR_USERS` empty for Orbie-owned rooms;
+   delegation requires both an explicit mapping and Zoom scheduling privilege.
 4. Grant `meeting-scheduler` only to `workflow-meeting-automation`. Keep
    generic `gsuite` Calendar write methods unavailable to Slack principals.
-5. Run the focused tests and a user-visible Slack, Calendar, Zoom, retry, and
-   reschedule smoke before making the public Console skill discoverable.
+5. Run the focused tests and a user-visible Slack, Calendar, Zoom, retry,
+   reschedule, cloud-recording, and transcript smoke before making the public
+   Console skill discoverable.
 
 Do not grant `meeting_ops` directly to Slack user, channel, or warm-pool
 principals.

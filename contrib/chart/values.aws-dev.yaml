@@ -54,7 +54,6 @@ ironProxy:
     DUNE_API_KEY: op://Centaur/DUNE_API_KEY/credential
     GOOGLE_TOKEN_JSON: op://Centaur/GOOGLE_TOKEN_JSON/credential
     MEETING_OPS_SCRIPT_ID: op://Centaur/MEETING_OPS_SCRIPT_ID/credential
-    ZOOM_ACCESS_TOKEN: op://Centaur/ZOOM_ACCESS_TOKEN/credential
 
 secrets:
   bootstrapSecretName: centaur-onepassword-bootstrap
