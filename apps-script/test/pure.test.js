@@ -276,9 +276,9 @@ test('notification keys are stable per cadence occurrence and kind', () => {
   )).toBe('agenda:cadence-1:2026-08-05:U123')
 })
 
-test('authorized cadences include public and private owner/access/recipient entries only', () => {
+test('authorized cadences include owner and additional-owner entries only', () => {
   const cadences = [
-    { id: 'public', visibility: 'public', status: 'active' },
+    { id: 'public', visibility: 'public', ownerSlackUserId: 'U123', status: 'active' },
     { id: 'owner', visibility: 'private', ownerSlackUserId: 'U123', status: 'active' },
     { id: 'access', visibility: 'private', accessSlackUserIds: ['U123'], status: 'active' },
     { id: 'recipient', visibility: 'private', notificationRecipients: ['U123'], status: 'active' },
@@ -286,6 +286,7 @@ test('authorized cadences include public and private owner/access/recipient entr
     { id: 'disabled', visibility: 'public', status: 'disabled' },
   ]
   expect(pure.authorizedCadences(cadences, 'U123').map((cadence) => cadence.id))
-    .toEqual(['public', 'owner', 'access', 'recipient'])
+    .toEqual(['public', 'owner', 'access'])
   expect(pure.isCadenceAuthorized(cadences[5], 'U123')).toBe(false)
+  expect(pure.isCadenceAuthorized(cadences[0], 'U999')).toBe(false)
 })

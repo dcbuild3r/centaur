@@ -249,8 +249,9 @@ global.MeetingOpsPure = {
     return now >= new Date(occurrence.getTime() + delayMin * 60_000)
   },
   isCadenceAuthorized(cadenceValue, requesterSlackUserId) {
-    return cadenceValue.visibility === 'private' &&
-      cadenceValue.ownerSlackUserId === requesterSlackUserId
+    return [cadenceValue.ownerSlackUserId]
+      .concat(cadenceValue.accessSlackUserIds || [])
+      .includes(requesterSlackUserId)
   },
   notificationRecipients(cadenceValue, requesterSlackUserId, scheduled) {
     if (cadenceValue.visibility !== 'private') return [null]
@@ -550,6 +551,30 @@ test('manual runs use the request date when the scheduled occurrence is outside 
   expect(result.occurrenceAt).toBe('2026-08-10T14:00:00.000Z')
   expect(result.docId).toBeTruthy()
   expect(executionProperty('NEXT_OCCURRENCE:manual-cadence')).toBeNull()
+})
+
+test('manual public runs by an owner do not require a channel allowlist', () => {
+  prepareManualTemplate()
+  global.getMeetingConfig_ = () => [manualCadence({
+    visibility: 'public',
+    notifyChannel: 'C069VHQEJEQ',
+    notifyChannelName: '#wf-all',
+    notificationRecipients: [],
+  })]
+
+  const result = runCadenceJob(manualRequest('2026-08-10T14:00:00Z'))
+
+  expect(result.docId).toBeTruthy()
+  expect(executionProperty('ALLOWED_WF_CHANNEL_IDS')).toBeNull()
+})
+
+test('manual runs reject callers who are not cadence owners', () => {
+  prepareManualTemplate()
+  const request = manualRequest('2026-08-10T14:00:00Z')
+  request.requesterSlackUserId = 'U-NOT-OWNER'
+
+  expect(() => runCadenceJob(request)).toThrow('Cadence is not authorized')
+  expect([...documents.keys()]).toEqual(['manual-template'])
 })
 
 test('manual runs do not use a future next occurrence or advance the schedule', () => {

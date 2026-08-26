@@ -180,11 +180,9 @@ var MeetingOpsPure = (function () {
   function isCadenceAuthorized(cadence, requesterSlackUserId) {
     if (!requesterSlackUserId) return false;
     if (cadence.status && cadence.status !== 'active') return false;
-    if (cadence.visibility === 'public') return true;
-    var privateUsers = [cadence.ownerSlackUserId]
-      .concat(cadence.accessSlackUserIds || [])
-      .concat(cadence.notificationRecipients || []);
-    return privateUsers.indexOf(String(requesterSlackUserId)) !== -1;
+    var owners = [cadence.ownerSlackUserId]
+      .concat(cadence.accessSlackUserIds || []);
+    return owners.indexOf(String(requesterSlackUserId)) !== -1;
   }
 
   function authorizedCadences(cadences, requesterSlackUserId) {

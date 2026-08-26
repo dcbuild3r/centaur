@@ -1330,7 +1330,7 @@ def normalize_notion_cadence(
         # Public channel cadences may intentionally mention nobody. Private
         # cadences require an explicitly configured Owner / DRI.
         "ownerSlackUserId": owner_ids[0] if owner_ids else None,
-        "accessSlackUserIds": [],
+        "accessSlackUserIds": owner_ids[1:],
         "documentEditorEmails": document_editor_emails,
         "documentAccess": access_mode,
         "notifyLeadMin": 0,

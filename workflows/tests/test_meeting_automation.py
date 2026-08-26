@@ -1124,6 +1124,33 @@ def test_notion_cadence_uses_friday_for_a_one_business_day_monday_prep():
     assert cadence["notificationRecipients"] == ["U0BEQ8M7QSK"]
 
 
+def test_notion_cadence_preserves_all_owners_for_manual_authorization():
+    row = _published_row(
+        **{"Owner / DRI": '["user://owner-1", "user://owner-2"]'}
+    )
+    notion_users = [
+        *_notion_users(),
+        {"id": "owner-2", "person": {"email": "dc.builder@world.org"}},
+    ]
+    slack_users = [
+        *_slack_users(),
+        {
+            "id": "UDC",
+            "email": "dc.builder@world.org",
+            "team_id": "TL1HM8UUU",
+            "is_bot": False,
+            "deleted": False,
+        },
+    ]
+
+    cadence = meeting_automation.normalize_notion_cadence(
+        row, notion_users, slack_users
+    )
+
+    assert cadence["ownerSlackUserId"] == "U0BEQ8M7QSK"
+    assert cadence["accessSlackUserIds"] == ["UDC"]
+
+
 def test_public_notion_cadence_resolves_channel_members_for_doc_editors():
     members = [
         *_slack_users(),

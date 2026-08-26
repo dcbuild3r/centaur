@@ -390,7 +390,11 @@ function queueOrbieNotification_(
   requesterSlackUserId,
   scheduled
 ) {
-  if (meeting.visibility === 'public') assertAllowedChannel_(meeting);
+  // Manual runs are already authenticated against the cadence owners. Keep
+  // the destination allowlist only for unattended scheduled execution.
+  if (meeting.visibility === 'public' && scheduled === true) {
+    assertAllowedChannel_(meeting);
+  }
   var timeZone = meeting.timeZone || DEFAULT_TIME_ZONE;
   var recipients = MeetingOpsPure.notificationRecipients(
     meeting,
