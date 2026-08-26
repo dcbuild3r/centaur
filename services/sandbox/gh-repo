@@ -1,0 +1,29 @@
+#!/bin/bash
+# Run gh with the token placeholder selected for the current checkout's owner.
+
+set -euo pipefail
+
+remote_url="$(git config --get remote.origin.url 2>/dev/null || true)"
+owner=""
+case "$remote_url" in
+    https://github.com/*/*|http://github.com/*/*)
+        owner="${remote_url#*github.com/}"
+        owner="${owner%%/*}"
+        ;;
+    git@github.com:*/*|ssh://git@github.com/*/*)
+        owner="${remote_url#*github.com[:/]}"
+        owner="${owner%%/*}"
+        ;;
+esac
+
+token_env="GITHUB_TOKEN"
+if [ "$owner" = "worldfnd" ]; then
+    token_env="GITHUB_TOKEN_WORLDFND"
+fi
+
+if [ -z "${!token_env:-}" ]; then
+    echo "Error: $token_env is not configured for ${owner:-the current repository}" >&2
+    exit 1
+fi
+
+GH_TOKEN="${!token_env}" exec gh "$@"

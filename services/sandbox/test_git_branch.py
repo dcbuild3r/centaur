@@ -10,6 +10,7 @@ from pathlib import Path
 
 SANDBOX_DIR = Path(__file__).parent
 GIT_BRANCH = SANDBOX_DIR / "git-branch.sh"
+GH_REPO = SANDBOX_DIR / "gh-repo"
 COMMIT_MSG_HOOK = SANDBOX_DIR / "git-hooks" / "commit-msg"
 
 
@@ -56,6 +57,25 @@ class GitBranchTest(unittest.TestCase):
         )
         return Path(result.stdout.strip())
 
+    def _credential_password(
+        self, destination: Path, extra_env: dict[str, str]
+    ) -> str:
+        result = subprocess.run(
+            ["git", "-C", str(destination), "credential", "fill"],
+            input="protocol=https\nhost=github.com\n\n",
+            check=True,
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "HOME": str(self.home),
+                **extra_env,
+            },
+        )
+        fields = dict(line.split("=", 1) for line in result.stdout.splitlines())
+        return fields["password"]
+
     def test_clones_uncached_repo_from_github(self) -> None:
         remote_root = self.root / "remotes"
         remote = remote_root / "acme" / "centaur.git"
@@ -91,18 +111,26 @@ class GitBranchTest(unittest.TestCase):
         worldfnd_source = self.home / "github" / "worldfnd" / "centaur"
         worldfnd_source.parent.mkdir(parents=True)
         self._git("clone", str(self.source), str(worldfnd_source))
+        self._git(
+            "-C",
+            str(worldfnd_source),
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/worldfnd/centaur.git",
+        )
         bin_dir = self.root / "bin"
         bin_dir.mkdir()
         token_log = self.root / "github-token.log"
         gh = bin_dir / "gh"
         gh.write_text(
             "#!/bin/sh\n"
-            'printf "%s\\n" "$GITHUB_TOKEN" > "$TOKEN_LOG"\n'
+            'printf "%s\\n" "$GH_TOKEN" > "$TOKEN_LOG"\n'
             "printf 'Orbie\\twf-orbie@users.noreply.github.com\\n'\n"
         )
         gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
 
-        self._run_git_branch(
+        destination = self._run_git_branch(
             {
                 "GITHUB_TOKEN": "default-placeholder",
                 "GITHUB_TOKEN_WORLDFND": "worldfnd-placeholder",
@@ -113,6 +141,59 @@ class GitBranchTest(unittest.TestCase):
         )
 
         self.assertEqual(token_log.read_text().strip(), "worldfnd-placeholder")
+        self.assertEqual(
+            self._credential_password(
+                destination,
+                {
+                    "GITHUB_TOKEN": "default-placeholder",
+                    "GITHUB_TOKEN_WORLDFND": "worldfnd-placeholder",
+                },
+            ),
+            "worldfnd-placeholder",
+        )
+        helper_config = self._git(
+            "-C", str(destination), "config", "--get-all", "credential.helper"
+        ).stdout
+        self.assertIn("GITHUB_TOKEN_WORLDFND", helper_config)
+        self.assertNotIn("worldfnd-placeholder", helper_config)
+
+        token_log.unlink()
+        subprocess.run(
+            ["bash", str(GH_REPO), "api", "user"],
+            cwd=destination,
+            check=True,
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "GITHUB_TOKEN": "default-placeholder",
+                "GITHUB_TOKEN_WORLDFND": "worldfnd-placeholder",
+                "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                "TOKEN_LOG": str(token_log),
+            },
+        )
+        self.assertEqual(token_log.read_text().strip(), "worldfnd-placeholder")
+
+    def test_default_owner_credential_helper_returns_default_token(self) -> None:
+        destination = self._run_git_branch(
+            {
+                "CENTAUR_GIT_USER_NAME": "Release Bot",
+                "CENTAUR_GIT_USER_EMAIL": "release@example.com",
+                "GITHUB_TOKEN": "default-placeholder",
+                "GITHUB_TOKEN_WORLDFND": "worldfnd-placeholder",
+            }
+        )
+
+        self.assertEqual(
+            self._credential_password(
+                destination,
+                {
+                    "GITHUB_TOKEN": "default-placeholder",
+                    "GITHUB_TOKEN_WORLDFND": "worldfnd-placeholder",
+                },
+            ),
+            "default-placeholder",
+        )
 
     def test_uses_authenticated_github_identity(self) -> None:
         bin_dir = self.root / "bin"
@@ -192,6 +273,16 @@ class GitBranchTest(unittest.TestCase):
         self.assertEqual(
             self._git("-C", str(destination), "config", "user.email").stdout.strip(),
             "new@example.com",
+        )
+        self.assertEqual(
+            self._credential_password(
+                destination,
+                {
+                    "GITHUB_TOKEN": "refreshed-placeholder",
+                    "GITHUB_TOKEN_WORLDFND": "worldfnd-placeholder",
+                },
+            ),
+            "refreshed-placeholder",
         )
 
     def test_rejects_partial_explicit_identity(self) -> None:

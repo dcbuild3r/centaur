@@ -106,6 +106,7 @@
 |cached repos: ~/github/{org}/{repo} (READ-ONLY mounts) | git pre-configured | gh authenticated
 |installed: Rust,Node24,Python3+uv,Foundry(forge/cast/anvil),Nushell(nu),rg,fd,jq,tmux,cmake,protobuf
 |To modify a repo (commit, push, open PR): first choose a short descriptive lowercase kebab-case branch slug, then run `git-branch <org/repo> <branch-slug>` → creates a writable clone at ~/branches/<org>/<repo> on `centaur/<branch-slug>-<timestamp>`, cloning from GitHub when the repo is not cached
+|Inside a writable checkout, use `gh-repo` instead of plain `gh` for pull requests, reviews, merges, releases, and workflow commands. It selects the credential placeholder from the checkout's GitHub repository owner; Git pushes use the same owner-aware selection automatically.
 |Example: for a request to fix auth token refresh, use `git-branch paradigmxyz/centaur fix-auth-token-refresh`
 |Never omit the branch slug or use a generated numeric fallback branch name for PR work; the branch name should describe the requested change.
 |*NEVER run git commit/push inside* ~/github/ — it is read-only. Always use git-branch first.
