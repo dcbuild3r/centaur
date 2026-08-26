@@ -13,6 +13,116 @@ async def _async_value(value):
     return value
 
 
+def test_zoom_create_defaults_to_orbie_and_cloud_recording(monkeypatch):
+    monkeypatch.setenv("MEETING_ZOOM_HOST_USER_ID", "orbie@world.org")
+    monkeypatch.setenv("MEETING_ZOOM_SCHEDULE_FOR_USERS", "{}")
+    scheduler = client.MeetingSchedulerClient()
+    calls = []
+    monkeypatch.setattr(
+        scheduler,
+        "_zoom_request",
+        lambda method, path, **kwargs: calls.append((method, path, kwargs)) or {"id": "1"},
+    )
+
+    scheduler._zoom_create(
+        title="Planning",
+        start=client._parse_rfc3339("2099-08-17T10:00:00Z", field="start"),
+        duration=30,
+        time_zone="UTC",
+        occurrence_key="cadence:1",
+        organizer_calendar_key="wf",
+    )
+
+    payload = calls[0][2]["payload"]
+    assert calls[0][1] == "/users/orbie@world.org/meetings"
+    assert payload["settings"]["auto_recording"] == "cloud"
+    assert "schedule_for" not in payload
+
+
+def test_zoom_create_only_delegates_through_operator_allowlist(monkeypatch):
+    monkeypatch.setenv("MEETING_ZOOM_HOST_USER_ID", "orbie@world.org")
+    monkeypatch.setenv(
+        "MEETING_ZOOM_SCHEDULE_FOR_USERS", json.dumps({"wf": "delegate@world.org"})
+    )
+    scheduler = client.MeetingSchedulerClient()
+    calls = []
+    monkeypatch.setattr(
+        scheduler,
+        "_zoom_request",
+        lambda method, path, **kwargs: calls.append(kwargs) or {"id": "1"},
+    )
+
+    scheduler._zoom_create(
+        title="Planning",
+        start=client._parse_rfc3339("2099-08-17T10:00:00Z", field="start"),
+        duration=30,
+        time_zone="UTC",
+        occurrence_key="cadence:1",
+        organizer_calendar_key="wf",
+    )
+
+    assert calls[0]["payload"]["schedule_for"] == "delegate@world.org"
+
+
+def test_get_recording_fetches_transcript_without_returning_signed_urls(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+    monkeypatch.setattr(
+        scheduler,
+        "_zoom_request",
+        lambda *_args, **_kwargs: {
+            "id": "123",
+            "topic": "Planning",
+            "recording_files": [
+                {
+                    "id": "file-1",
+                    "file_type": "TRANSCRIPT",
+                    "status": "completed",
+                    "download_url": "https://us02web.zoom.us/rec/download/signed",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(scheduler, "_zoom_download_transcript", lambda _url: "WEBVTT\n")
+
+    result = scheduler.get_recording("123")
+
+    assert result["transcript"] == "WEBVTT\n"
+    assert result["transcript_status"] == "ready"
+    assert "download_url" not in result["recording_files"][0]
+
+
+def test_zoom_transcript_download_rejects_non_zoom_hosts():
+    with pytest.raises(client.MeetingSchedulerError, match="invalid transcript"):
+        client.MeetingSchedulerClient()._zoom_download_transcript(
+            "https://example.com/recording.vtt"
+        )
+
+
+def test_get_summary_uses_zoom_summary_endpoint_and_strips_signed_urls(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+    calls = []
+    monkeypatch.setattr(
+        scheduler,
+        "_zoom_request",
+        lambda method, path, **_kwargs: calls.append((method, path))
+        or {
+            "meeting_id": "123",
+            "meeting_summary": "Decisions were made.",
+            "next_steps": ["Ship it"],
+            "share_url": "https://zoom.us/private/signed",
+        },
+    )
+
+    result = scheduler.get_summary("123")
+
+    assert calls == [("GET", "/meetings/123/meeting_summary")]
+    assert result["meeting_summary"] == "Decisions were made."
+    assert result["next_steps"] == ["Ship it"]
+    assert "share_url" not in result
+
+
 def test_find_availability_uses_freebusy_only_and_returns_slots(monkeypatch):
     monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
     monkeypatch.setenv("MEETING_ORGANIZER_CALENDARS", json.dumps({"wf": "organizer@world.org"}))
@@ -52,6 +162,57 @@ def test_find_availability_uses_freebusy_only_and_returns_slots(monkeypatch):
     ]
     assert result["candidates"][0]["start"] == "2026-08-17T10:00:00Z"
     assert "summary" not in calls[0]
+
+
+def test_email_organizer_requires_a_visible_writable_calendar(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    monkeypatch.setenv("MEETING_ORGANIZER_CALENDARS", "{}")
+    calls = []
+
+    class FakeCalendarList:
+        def list(self, **kwargs):
+            calls.append(("list", kwargs))
+            return self
+
+        def execute(self):
+            return {
+                "items": [
+                    {"id": "owner@example.com", "accessRole": "writer"},
+                ]
+            }
+
+    class FakeFreebusy:
+        def query(self, **kwargs):
+            calls.append(("freebusy", kwargs))
+            return self
+
+        def execute(self):
+            return {
+                "calendars": {
+                    "owner@example.com": {"busy": []},
+                    "person@world.org": {"busy": []},
+                }
+            }
+
+    class FakeService:
+        def calendarList(self):
+            return FakeCalendarList()
+
+        def freebusy(self):
+            return FakeFreebusy()
+
+    monkeypatch.setattr(client, "get_calendar_service", lambda: FakeService())
+    result = client.MeetingSchedulerClient().find_availability(
+        "OWNER@example.com",
+        ["person@world.org"],
+        "2026-08-17T09:00:00Z",
+        "2026-08-17T10:00:00Z",
+        30,
+    )
+
+    assert result["candidates"]
+    assert calls[0][0] == "list"
+    assert calls[1][0] == "freebusy"
 
 
 def test_ad_hoc_booking_requires_confirmation(monkeypatch):

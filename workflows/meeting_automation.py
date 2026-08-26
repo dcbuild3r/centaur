@@ -1142,6 +1142,37 @@ def _resolve_booking_attendees(
     return attendees
 
 
+def _resolve_requester_calendar_email(
+    inp: Input,
+    slack_users: list[dict[str, Any]],
+) -> str:
+    """Resolve the authenticated manual scheduler to one calendar identity."""
+
+    requester_id = str(inp.requester_slack_user_id or "").strip()
+    matches = [
+        user
+        for user in slack_users
+        if str(user.get("id") or "").strip() == requester_id
+        and str(user.get("team_id") or "").strip() == WORLD_SLACK_TEAM_ID
+        and not user.get("deleted")
+        and not user.get("is_deleted")
+        and not user.get("is_bot")
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            "manual meeting organizer must resolve to exactly one active Slack user"
+        )
+    email = str(matches[0].get("email") or "").strip().lower()
+    if not EMAIL_RE.fullmatch(email):
+        raise ValueError("manual meeting organizer has no verified calendar email")
+    supplied_email = str(inp.requester_slack_email or "").strip().lower()
+    if supplied_email and supplied_email != email:
+        raise ValueError(
+            "requester Slack email does not match the verified Slack directory"
+        )
+    return email
+
+
 def normalize_notion_cadence(
     row: dict[str, Any],
     notion_users: list[dict[str, Any]],
@@ -1565,7 +1596,6 @@ def _scheduling_args(inp: Input) -> tuple[str, dict[str, Any], str]:
 
     if operation == "find_availability":
         require(
-            "organizer_calendar_key",
             "attendee_emails",
             "time_min",
             "time_max",
@@ -1579,7 +1609,6 @@ def _scheduling_args(inp: Input) -> tuple[str, dict[str, Any], str]:
             "duration_minutes",
             "time_zone",
             "attendee_emails",
-            "organizer_calendar_key",
             "confirmation_token",
         )
         args.setdefault("request_id", args["occurrence_key"])
@@ -1641,6 +1670,15 @@ def _public_scheduling_result(
             "actualStart": actual_start,
             "zoomJoinUrl": join_url,
         }
+        organizer_email = str(
+            result.get("organizer_calendar_id")
+            or result.get("organizerCalendarId")
+            or result.get("organizer_calendar_key")
+            or result.get("organizerCalendarKey")
+            or ""
+        ).strip()
+        if organizer_email:
+            public["organizerEmail"] = organizer_email
         event_link = str(
             result.get("calendarHtmlLink") or result.get("calendar_html_link") or ""
         ).strip()
@@ -1819,6 +1857,9 @@ async def _authorize_scheduling_cadence_operation(
 async def _scheduling_handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     client = _client(ctx)
     operation, args, request_key = _scheduling_args(inp)
+    if operation in {"find_availability", "book_meeting"} and args.get("cadence_id"):
+        raise ValueError("manual meeting scheduling cannot target a cadence")
+    slack_users: list[dict[str, Any]] | None = None
     if "attendee_emails" in args:
         slack_users = await ctx.step(
             f"scheduling:list_slack_users:{request_key}",
@@ -1826,6 +1867,21 @@ async def _scheduling_handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any
         )
         args["attendee_emails"] = _resolve_booking_attendees(
             args["attendee_emails"], slack_users
+        )
+    if operation in {"find_availability", "book_meeting"}:
+        if inp.requester_slack_team_id != WORLD_SLACK_TEAM_ID:
+            raise ValueError(
+                "manual meeting ownership requires a verified World Slack requester"
+            )
+        if slack_users is None:
+            slack_users = await ctx.step(
+                f"scheduling:list_slack_users:{request_key}",
+                lambda: client.slack_users(),
+            )
+        # Manual meetings are owned by the person who proposed them. The
+        # caller cannot choose a different calendar through scheduling_args.
+        args["organizer_calendar_key"] = _resolve_requester_calendar_email(
+            inp, slack_users
         )
     preflight: dict[str, Any] | None = None
     if operation in {

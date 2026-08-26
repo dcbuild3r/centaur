@@ -37,9 +37,8 @@ secrets = [
         "calendar.googleapis.com",
         "www.googleapis.com",
     ], fields = { refresh_token = { secret_ref = "GOOGLE_TOKEN_JSON", json_key = "refresh_token" }, client_id = { secret_ref = "GOOGLE_TOKEN_JSON", json_key = "client_id" }, client_secret = { secret_ref = "GOOGLE_TOKEN_JSON", json_key = "client_secret" } } },
-    # The managed secret contains the short-lived bearer token minted for the
-    # World Foundation Zoom Server-to-Server OAuth app. The app's account/client
-    # credentials never enter the tool or a user-facing principal.
-    { type = "http", name = "ZOOM_ACCESS_TOKEN", mode = "inject", inject_header = "Authorization", inject_formatter = "Bearer {{ .Value }}", hosts = ["api.zoom.us"] },
+    # Console owns the General OAuth refresh-token family and delivers only the
+    # current access token. Zoom transcript downloads use regional *.zoom.us URLs.
+    { type = "brokered_token", name = "ZOOM_ACCESS_TOKEN", credential = "zoom-orbie-general-oauth", hosts = ["api.zoom.us", "*.zoom.us"] },
     { type = "pg_dsn", name = "CENTAUR_POSTGRES_DSN", database = "ai_v2", secret_ref = "CENTAUR_POSTGRES_DSN", role = "centaur_meeting_scheduler" },
 ]

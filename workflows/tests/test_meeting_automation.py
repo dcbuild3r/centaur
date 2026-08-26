@@ -232,7 +232,13 @@ class SchedulingFakeClient:
                 "email": "piotr.piwowarczyk@world.org",
                 "team_id": "TL1HM8UUU",
                 "is_bot": False,
-            }
+            },
+            {
+                "id": "UPERSON",
+                "email": "person@world.org",
+                "team_id": "TL1HM8UUU",
+                "is_bot": False,
+            },
         ]
 
     async def update_notion_booking(self, page_id, status, **kwargs):
@@ -428,6 +434,70 @@ def test_scheduling_args_reject_unknown_provider_fields():
                 },
             )
         )
+
+
+def test_manual_scheduling_uses_the_verified_requester_as_organizer(monkeypatch):
+    client = SchedulingFakeClient(
+        {
+            "status": "ok",
+            "candidates": [
+                {
+                    "start": "2026-08-24T09:00:00Z",
+                    "end": "2026-08-24T09:30:00Z",
+                    "timezone": "UTC",
+                }
+            ],
+        }
+    )
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+
+    result = asyncio.run(
+        meeting_automation.handler(
+            _input(
+                slack_channel_id="",
+                scheduling_operation="find_availability",
+                scheduling_args={
+                    "attendee_emails": ["person@world.org"],
+                    "time_min": "2026-08-24T09:00:00Z",
+                    "time_max": "2026-08-24T10:00:00Z",
+                    "duration_minutes": 30,
+                },
+            ),
+            FakeContext(),
+        )
+    )
+
+    assert result["status"] == "ok"
+    scheduling_call = next(call for call in client.calls if call[0] == "scheduling")
+    assert scheduling_call[2]["organizer_calendar_key"] == "piotr.piwowarczyk@world.org"
+
+
+def test_manual_booking_cannot_bypass_requester_ownership_with_cadence_id(monkeypatch):
+    client = SchedulingFakeClient({"status": "ok", "candidates": []})
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+
+    with pytest.raises(ValueError, match="cannot target a cadence"):
+        asyncio.run(
+            meeting_automation.handler(
+                _input(
+                    slack_channel_id="",
+                    scheduling_operation="book_meeting",
+                    scheduling_args={
+                        "occurrence_key": "manual:1",
+                        "title": "Planning",
+                        "start": "2099-08-24T09:00:00Z",
+                        "duration_minutes": 30,
+                        "time_zone": "UTC",
+                        "attendee_emails": ["person@world.org"],
+                        "cadence_id": "managed-cadence",
+                        "confirmation_token": "confirmed",
+                    },
+                ),
+                FakeContext(),
+            )
+        )
+
+    assert not any(call[0] == "scheduling" for call in client.calls)
 
 
 def test_reschedule_updates_the_existing_notion_cadence_booking(monkeypatch):

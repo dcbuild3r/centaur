@@ -19,21 +19,28 @@ provider tool from a user-facing session.
 
 1. Resolve every attendee to exactly one verified World identity and use its
    exact email address.
-2. Ask for duration, date range, timezone, working hours, and the managed
-   organizer-calendar alias.
+2. Ask for duration, date range, timezone, and working hours. The verified
+   Slack requester is the manual meeting organizer; never ask the requester
+   to choose an organizer-calendar alias.
 3. Submit `find_availability` through the workflow broker. Present only
    free/busy-derived candidate start
    and end times, with timezone and attendee list; do not summarize conflicts.
 
 ## Ad-hoc booking or rescheduling
 
-Show the selected slot, duration, timezone, organizer alias, attendees, and
-the World Foundation Zoom requirement. Wait for an unambiguous confirmation in
-the current conversation before calling `book_meeting` or `reschedule_meeting`.
+Show the selected slot, duration, timezone, attendees, and the World Foundation
+Zoom requirement. Manual bookings are created on the verified proposer's
+writable Google Calendar so that person owns the invitation instead of
+`orbie-automation@world.org`. Wait for an unambiguous confirmation in the
+current conversation before calling `book_meeting` or `reschedule_meeting`.
 Use a stable request/occurrence key and pass the confirmation token only after
 the user has explicitly confirmed the exact slot. A stale reschedule version
 must be re-read and presented again. Cancellation also requires explicit
 confirmation.
+
+If the proposer's calendar is not visible to Orbie with `writer` or `owner`
+access, fail closed and ask an administrator to grant that access. Do not fall
+back to the Orbie automation calendar.
 
 ## Cadences
 
@@ -42,6 +49,9 @@ workflow. Only a Published cadence with `Calendar booking = Auto-book`, a
 managed `Organizer calendar`, a positive booking window, a positive duration,
 and cleanly resolved participants may book automatically. Existing `Off`
 cadences remain Docs-only.
+
+Automated cadence bookings continue to use their configured managed organizer
+calendar; the proposer-owned rule applies to manual meetings.
 
 The workflow books or reconciles one occurrence, writes the booking status and
 Zoom URL to Notion, runs the existing Docs worker with the actual booked time,
