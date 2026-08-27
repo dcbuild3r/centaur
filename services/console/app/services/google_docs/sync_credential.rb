@@ -9,6 +9,9 @@ module GoogleDocs
     DOCS_READONLY_SCOPE = "https://www.googleapis.com/auth/documents.readonly"
     GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document"
     EXPORT_MIME_TYPE = "text/plain"
+    NAME_MAX_BYTES = 1_024
+    USER_CORPUS = "user"
+    FETCH_READ_TIMEOUT_SECONDS = 60
 
     FILES_LIST_ENDPOINT = "https://www.googleapis.com/drive/v3/files"
     CHANGES_LIST_ENDPOINT = "https://www.googleapis.com/drive/v3/changes"
@@ -23,6 +26,17 @@ module GoogleDocs
 
     class GoogleApiError < StandardError; end
     class InvalidPageTokenError < GoogleApiError; end
+
+    NETWORK_ERRORS = [
+      EOFError,
+      Errno::ECONNREFUSED,
+      Errno::ECONNRESET,
+      Errno::EHOSTUNREACH,
+      Errno::EPIPE,
+      Errno::ETIMEDOUT,
+      SocketError,
+      Timeout::Error
+    ].freeze
 
     class << self
       attr_accessor :google_api_http
@@ -65,7 +79,7 @@ module GoogleDocs
       @google_api_http = google_api_http || self.class.google_api_http
     end
 
-    def start_page_token
+    def user_start_page_token
       google_api(
         START_PAGE_TOKEN_ENDPOINT,
         "supportsAllDrives" => "true"
@@ -74,13 +88,14 @@ module GoogleDocs
       raise GoogleApiError, "Google Drive returned no start page token"
     end
 
-    def list_files_page(page_token: nil)
+    def list_user_files_page(page_token: nil)
       google_api(
         FILES_LIST_ENDPOINT,
         {
           "q" => "mimeType = '#{GOOGLE_DOC_MIME_TYPE}' and trashed = false",
           "pageSize" => self.class.page_size,
           "fields" => "nextPageToken,files(#{FILE_FIELDS})",
+          "corpora" => USER_CORPUS,
           "includeItemsFromAllDrives" => "true",
           "supportsAllDrives" => "true",
           "orderBy" => "modifiedTime,name",
@@ -89,7 +104,7 @@ module GoogleDocs
       )
     end
 
-    def list_changes_page(page_token:)
+    def list_user_changes_page(page_token:)
       google_api(
         CHANGES_LIST_ENDPOINT,
         {
@@ -114,7 +129,7 @@ module GoogleDocs
       {
         file_id: file.fetch("id"),
         drive_id: file["driveId"].to_s,
-        name: file["name"].to_s,
+        name: truncated_name(file),
         mime_type: file["mimeType"].to_s,
         web_view_link: file["webViewLink"].to_s,
         owners: Array(file["owners"]),
@@ -138,7 +153,7 @@ module GoogleDocs
         file_id: file.fetch("id"),
         provider_subject: credential.provider_subject.to_s,
         provider_email: credential.provider_email.to_s,
-        observed_name: file["name"].to_s,
+        observed_name: truncated_name(file),
         observed_mime_type: file["mimeType"].to_s,
         observed_web_view_link: file["webViewLink"].to_s,
         role_hint: role_hint(file),
@@ -194,6 +209,13 @@ module GoogleDocs
     end
 
     private
+
+    def truncated_name(file)
+      name = file["name"].to_s
+      return name if name.bytesize <= NAME_MAX_BYTES
+
+      name.byteslice(0, NAME_MAX_BYTES).scrub("")
+    end
 
     def source_version(file)
       file["version"].presence || file["modifiedTime"].to_s
@@ -272,10 +294,12 @@ module GoogleDocs
       return response if response.is_a?(Hash)
 
       raise GoogleApiError, "Google API returned invalid response"
+    rescue *NETWORK_ERRORS => error
+      raise GoogleApiError, "Google API network request failed: #{error.class}"
     end
 
     def net_http_get(endpoint, params)
-      response = HttpClient.new.get(
+      response = HttpClient.new(read_timeout: FETCH_READ_TIMEOUT_SECONDS).get(
         endpoint,
         params: params,
         headers: { "Authorization" => "Bearer #{credential.access_token}" }
