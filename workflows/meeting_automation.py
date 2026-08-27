@@ -27,6 +27,7 @@ DEFAULT_MEETING_TIME = "10:00"
 DEFAULT_NOTIFICATION_TIME = "09:15"
 DEFAULT_PREPARATION_BUSINESS_DAYS = 1
 EMAIL_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
+MANUAL_ORGANIZER_CALENDAR_KEY = "MEETING_MANUAL_ORGANIZER_CALENDAR_KEY"
 
 
 def _env_value(name: str, default: str) -> str:
@@ -1318,6 +1319,15 @@ def _resolve_requester_calendar_email(
     return email
 
 
+def _manual_organizer_calendar_key() -> str:
+    key = _env_value(MANUAL_ORGANIZER_CALENDAR_KEY, "").strip()
+    if not key:
+        raise ValueError(
+            f"{MANUAL_ORGANIZER_CALENDAR_KEY} must name a managed organizer calendar"
+        )
+    return key
+
+
 def normalize_notion_cadence(
     row: dict[str, Any],
     notion_users: list[dict[str, Any]],
@@ -2023,11 +2033,11 @@ async def _scheduling_handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any
                 f"scheduling:list_slack_users:{request_key}",
                 lambda: client.slack_users(),
             )
-        # Manual meetings are owned by the person who proposed them. The
-        # caller cannot choose a different calendar through scheduling_args.
-        args["organizer_calendar_key"] = _resolve_requester_calendar_email(
-            inp, slack_users
-        )
+        # Resolve the authenticated requester even though the managed Orbie
+        # calendar owns the event. The caller cannot choose a different
+        # organizer through scheduling_args.
+        _resolve_requester_calendar_email(inp, slack_users)
+        args["organizer_calendar_key"] = _manual_organizer_calendar_key()
     preflight: dict[str, Any] | None = None
     if operation in {
         "reschedule_meeting",

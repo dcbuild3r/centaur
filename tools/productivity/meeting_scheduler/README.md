@@ -36,6 +36,5 @@ than sent to a broader audience.
 Client credentials and token material must not appear in a cadence, skill,
 Slack message, repository, Terraform state, or runtime environment variable.
 Live activation also requires the Calendar free/busy/event scopes, the
-`orbie-automation@world.org` free/busy shares, writable shares for the
-calendars of approved manual proposers, and an explicit organizer alias for
-automated cadences.
+`orbie-automation@world.org` free/busy shares and explicit organizer aliases
+for both Orbie-owned manual meetings and automated cadences.
