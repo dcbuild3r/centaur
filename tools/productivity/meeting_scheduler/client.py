@@ -721,8 +721,10 @@ class MeetingSchedulerClient:
             "tracking_fields": [{"field": "orbie_occurrence_key", "value": occurrence_key}],
             "settings": {
                 "auto_recording": "cloud",
-                "join_before_host": False,
-                "waiting_room": True,
+                "join_before_host": True,
+                "jbh_time": 0,
+                "meeting_authentication": False,
+                "waiting_room": False,
             },
         }
         schedule_for = _zoom_schedule_for_map().get(organizer_calendar_key)
