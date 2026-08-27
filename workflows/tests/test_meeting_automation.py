@@ -440,7 +440,7 @@ def test_scheduling_args_reject_unknown_provider_fields():
         )
 
 
-def test_manual_scheduling_uses_the_verified_requester_as_organizer(monkeypatch):
+def test_manual_scheduling_uses_the_managed_orbie_calendar_as_organizer(monkeypatch):
     client = SchedulingFakeClient(
         {
             "status": "ok",
@@ -454,6 +454,7 @@ def test_manual_scheduling_uses_the_verified_requester_as_organizer(monkeypatch)
         }
     )
     monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+    monkeypatch.setenv("MEETING_MANUAL_ORGANIZER_CALENDAR_KEY", "orbie")
 
     result = asyncio.run(
         meeting_automation.handler(
@@ -473,7 +474,7 @@ def test_manual_scheduling_uses_the_verified_requester_as_organizer(monkeypatch)
 
     assert result["status"] == "ok"
     scheduling_call = next(call for call in client.calls if call[0] == "scheduling")
-    assert scheduling_call[2]["organizer_calendar_key"] == "piotr.piwowarczyk@world.org"
+    assert scheduling_call[2]["organizer_calendar_key"] == "orbie"
 
 
 def test_manual_booking_cannot_bypass_requester_ownership_with_cadence_id(monkeypatch):

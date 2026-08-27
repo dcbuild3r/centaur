@@ -50,11 +50,11 @@ The scheduler reads participant free/busy only. It never returns private event
 titles or descriptions. All writes are gated by the scheduler feature flag,
 stable occurrence identity, and the workflow principal's provider grants.
 Manual ad-hoc availability and bookings resolve the verified Slack requester
-to an exact calendar email and create the invitation on that person's
-writable calendar, making them the event owner instead of
-`orbie-automation@world.org`. They also require explicit confirmation in the
-current conversation. Automated cadence bookings continue to use their
-configured managed organizer alias.
+before creating the invitation on Orbie's managed organizer calendar. Orbie
+owns the event and invites the requested participants; it never needs write
+access to an employee's calendar. Manual bookings also require explicit
+confirmation in the current conversation. Automated cadence bookings continue
+to use their configured managed organizer alias.
 
 If any provider, Docs, or Slack delivery step fails, the workflow leaves
 `Next date` unchanged and retries the same occurrence. Rescheduling updates
@@ -167,11 +167,10 @@ Before enabling `MEETING_SCHEDULER_ENABLED` in Dev:
 
 1. Share each participant calendar with `orbie-automation@world.org` at
    free/busy level only.
-2. Grant `writer` or `owner` access to each approved manual proposer's
-   calendar, and grant write access only to explicitly designated automated
-   cadence calendars. Map automated calendar IDs through
-   `MEETING_ORGANIZER_CALENDARS`; never map `primary` or accept a raw calendar
-   ID from a caller.
+2. Map Orbie's own calendar and explicitly designated automated cadence
+   calendars through `MEETING_ORGANIZER_CALENDARS`. Set
+   `MEETING_MANUAL_ORGANIZER_CALENDAR_KEY` to Orbie's managed alias; never map
+   `primary` or accept a raw calendar ID from a caller.
 3. Configure the World Foundation Zoom General/User-managed OAuth app, connect
    it as the licensed Orbie host, and let Centaur Console own the rotating
    refresh-token family. The scheduler consumes broker credential
