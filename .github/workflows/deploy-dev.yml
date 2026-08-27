@@ -15,6 +15,11 @@ on:
       - pnpm-lock.yaml
       - pnpm-workspace.yaml
   workflow_dispatch:
+    inputs:
+      iron_proxy_image_tag:
+        description: Existing iron-proxy tag to reuse when that service is unchanged
+        required: false
+        type: string
 
 concurrency:
   group: deploy-dev-${{ github.ref }}
@@ -105,6 +110,7 @@ jobs:
         run: aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
       - name: Check for existing immutable image tag
+        if: matrix.image != 'centaur-iron-proxy' || inputs.iron_proxy_image_tag == ''
         id: check_tag
         env:
           ECR_REPOSITORY: ${{ matrix.repository }}
@@ -127,7 +133,9 @@ jobs:
           fi
 
       - name: Build and push ${{ matrix.image }}
-        if: steps.check_tag.outputs.exists != 'true'
+        if: >-
+          (matrix.image != 'centaur-iron-proxy' || inputs.iron_proxy_image_tag == '') &&
+          steps.check_tag.outputs.exists != 'true'
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: ${{ matrix.context }}
@@ -304,6 +312,8 @@ jobs:
           fi
 
       - name: Deploy chart
+        env:
+          IRON_PROXY_IMAGE_TAG: ${{ inputs.iron_proxy_image_tag || github.sha }}
         run: |
           # repo-cache runs the agent image, which is several GB because it
           # includes the browser runtime. Allow fresh nodes to pull it before
@@ -318,7 +328,7 @@ jobs:
             --set "sandbox.image.repository=$ECR_REGISTRY/centaur-agent" \
             --set "sandbox.image.tag=$GITHUB_SHA" \
             --set "ironProxy.image.repository=$ECR_REGISTRY/centaur-iron-proxy" \
-            --set "ironProxy.image.tag=$GITHUB_SHA" \
+            --set "ironProxy.image.tag=$IRON_PROXY_IMAGE_TAG" \
             --set "console.enabled=true" \
             --set "console.image.repository=$ECR_REGISTRY/common-app" \
             --set "console.image.tag=centaur-console-$GITHUB_SHA" \
