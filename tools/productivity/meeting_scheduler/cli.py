@@ -49,3 +49,24 @@ def recording(payload: str = typer.Argument(..., help="JSON recording request"))
 @app.command("summary")
 def summary(payload: str = typer.Argument(..., help="JSON meeting summary request")) -> None:
     _print(_client().get_summary(**json.loads(payload)))
+
+
+@app.command("post-meeting-candidates")
+def post_meeting_candidates(
+    payload: str = typer.Argument(..., help="JSON candidate request"),
+) -> None:
+    _print(_client().post_meeting_candidates(**json.loads(payload)))
+
+
+@app.command("collect-post-meeting-artifacts")
+def collect_post_meeting_artifacts(
+    payload: str = typer.Argument(..., help="JSON artifact request"),
+) -> None:
+    _print(_client().collect_post_meeting_artifacts(**json.loads(payload)))
+
+
+@app.command("mark-post-meeting-delivered")
+def mark_post_meeting_delivered(
+    payload: str = typer.Argument(..., help="JSON delivery marker"),
+) -> None:
+    _print(_client().mark_post_meeting_delivered(**json.loads(payload)))
