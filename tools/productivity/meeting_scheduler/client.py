@@ -38,12 +38,14 @@ ZOOM_ACCESS_TOKEN = "ZOOM_ACCESS_TOKEN"
 SCHEDULER_ENABLED = "MEETING_SCHEDULER_ENABLED"
 ORGANIZER_CALENDARS = "MEETING_ORGANIZER_CALENDARS"
 ZOOM_HOST_USER_ID = "MEETING_ZOOM_HOST_USER_ID"
+ZOOM_SCHEDULE_FOR_USERS = "MEETING_ZOOM_SCHEDULE_FOR_USERS"
 DEFAULT_DATABASE = "ai_v2"
 DEFAULT_TIME_ZONE = "UTC"
 MAX_CANDIDATES = 32
 SCHEDULER_STATUSES = {"pending", "booked", "blocked", "completed", "cancelled"}
 EMAIL_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
 WRITABLE_CALENDAR_ACCESS_ROLES = frozenset({"writer", "owner"})
+MAX_TRANSCRIPT_BYTES = 10 * 1024 * 1024
 
 
 class MeetingSchedulerError(RuntimeError):
@@ -159,6 +161,21 @@ def _organizer_calendar_map() -> dict[str, str]:
         raise MeetingSchedulerError(f"{ORGANIZER_CALENDARS} must be a JSON object")
     return {
         str(key): str(calendar_id) for key, calendar_id in value.items() if str(calendar_id).strip()
+    }
+
+
+def _zoom_schedule_for_map() -> dict[str, str]:
+    raw = _config_value(ZOOM_SCHEDULE_FOR_USERS, "{}").strip()
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise MeetingSchedulerError(f"{ZOOM_SCHEDULE_FOR_USERS} must be a JSON object") from error
+    if not isinstance(value, dict):
+        raise MeetingSchedulerError(f"{ZOOM_SCHEDULE_FOR_USERS} must be a JSON object")
+    return {
+        str(key): str(user_id).strip()
+        for key, user_id in value.items()
+        if str(key).strip() and str(user_id).strip()
     }
 
 
@@ -524,8 +541,7 @@ class MeetingSchedulerClient:
             and stored_attendees == attendees
         )
         if not parameters_match and (
-            not allow_parameter_update
-            or current.get("status") in {"completed", "cancelled"}
+            not allow_parameter_update or current.get("status") in {"completed", "cancelled"}
         ):
             raise MeetingSchedulerError("occurrence parameters cannot be changed by a retry")
         if current.get("status") not in {"booked", "completed", "cancelled"}:
@@ -684,25 +700,219 @@ class MeetingSchedulerClient:
         return body
 
     def _zoom_create(
-        self, *, title: str, start: dt.datetime, duration: int, time_zone: str, occurrence_key: str
+        self,
+        *,
+        title: str,
+        start: dt.datetime,
+        duration: int,
+        time_zone: str,
+        occurrence_key: str,
+        organizer_calendar_key: str,
     ) -> dict[str, Any]:
         host = _config_value(ZOOM_HOST_USER_ID).strip()
         if not host:
             raise MeetingSchedulerError(f"{ZOOM_HOST_USER_ID} is required")
+        payload: dict[str, Any] = {
+            "topic": title,
+            "type": 2,
+            "start_time": _rfc3339(start),
+            "duration": duration,
+            "timezone": time_zone,
+            "tracking_fields": [{"field": "orbie_occurrence_key", "value": occurrence_key}],
+            "settings": {
+                "auto_recording": "cloud",
+                "join_before_host": True,
+                "jbh_time": 0,
+                "meeting_authentication": False,
+                "waiting_room": False,
+            },
+        }
+        schedule_for = _zoom_schedule_for_map().get(organizer_calendar_key)
+        if schedule_for:
+            # This allowlist is operator-controlled. Zoom also enforces that
+            # the connected Orbie account has scheduling privilege for the user.
+            payload["schedule_for"] = schedule_for
         return self._zoom_request(
             "POST",
             f"/users/{host}/meetings",
             occurrence_key=occurrence_key,
-            payload={
-                "topic": title,
-                "type": 2,
-                "start_time": _rfc3339(start),
-                "duration": duration,
-                "timezone": time_zone,
-                "tracking_fields": [{"field": "orbie_occurrence_key", "value": occurrence_key}],
-                "settings": {"join_before_host": False, "waiting_room": True},
-            },
+            payload=payload,
         )
+
+    def get_recording(self, meeting_id: str) -> dict[str, Any]:
+        """Return recording metadata and the bounded VTT transcript, when ready."""
+
+        _require_enabled()
+        normalized_id = str(meeting_id or "").strip()
+        if (
+            not normalized_id
+            or len(normalized_id) > 128
+            or any(char.isspace() for char in normalized_id)
+        ):
+            raise MeetingSchedulerError("meeting_id must be a non-empty, bounded token")
+        recording = self._zoom_request(
+            "GET", f"/meetings/{quote(normalized_id, safe='')}/recordings"
+        )
+        files = recording.get("recording_files")
+        public_files: list[dict[str, Any]] = []
+        transcript = None
+        for item in files if isinstance(files, list) else []:
+            if not isinstance(item, dict):
+                continue
+            public_files.append(
+                {
+                    key: item.get(key)
+                    for key in (
+                        "id",
+                        "file_type",
+                        "file_extension",
+                        "file_size",
+                        "recording_type",
+                        "status",
+                    )
+                    if item.get(key) is not None
+                }
+            )
+            if transcript is None and str(item.get("file_type") or "").upper() == "TRANSCRIPT":
+                download_url = str(item.get("download_url") or "").strip()
+                if download_url:
+                    transcript = self._zoom_download_transcript(download_url)
+        return {
+            "meeting_id": recording.get("id") or normalized_id,
+            "topic": recording.get("topic"),
+            "start_time": recording.get("start_time"),
+            "recording_files": public_files,
+            "transcript": transcript,
+            "transcript_status": "ready" if transcript is not None else "pending",
+        }
+
+    def get_summary(self, meeting_id: str) -> dict[str, Any]:
+        """Return Zoom AI Companion's processed meeting summary, when available."""
+
+        _require_enabled()
+        normalized_id = str(meeting_id or "").strip()
+        if (
+            not normalized_id
+            or len(normalized_id) > 128
+            or any(char.isspace() for char in normalized_id)
+        ):
+            raise MeetingSchedulerError("meeting_id must be a non-empty, bounded token")
+        summary = self._zoom_request(
+            "GET", f"/meetings/{quote(normalized_id, safe='')}/meeting_summary"
+        )
+        # Keep the provider payload because Zoom may add summary sections, but
+        # never expose token-bearing URLs or provider-internal download links.
+        return {
+            key: value
+            for key, value in summary.items()
+            if key not in {"download_url", "play_url", "share_url"}
+        }
+
+    def post_meeting_candidates(self, now: str, limit: int = 25) -> list[dict[str, Any]]:
+        """Return ended booked meetings whose artifacts have not been delivered."""
+        _require_enabled()
+        observed_at = _parse_rfc3339(now, field="now")
+        bounded_limit = max(1, min(int(limit), 100))
+
+        async def query(connection: asyncpg.Connection) -> list[dict[str, Any]]:
+            rows = await connection.fetch(
+                """
+                select * from orbie_meeting_occurrences
+                where status = 'booked'
+                  and zoom_meeting_id <> ''
+                  and coalesce(actual_start, requested_start)
+                      + make_interval(mins => duration_minutes) <= $1
+                  and coalesce(metadata->>'post_meeting_status', '') <> 'delivered'
+                order by coalesce(actual_start, requested_start), occurrence_key
+                limit $2
+                """,
+                observed_at,
+                bounded_limit,
+            )
+            return [_serialize_row(row) for row in rows]
+
+        return asyncio.run(_with_connection(query))
+
+    def collect_post_meeting_artifacts(self, meeting_id: str) -> dict[str, Any]:
+        """Collect processed Zoom artifacts without failing while Zoom is still processing."""
+        recording: dict[str, Any] = {"transcript_status": "pending"}
+        summary: dict[str, Any] = {}
+        errors: list[str] = []
+        try:
+            recording = self.get_recording(meeting_id)
+        except MeetingSchedulerError as error:
+            errors.append(str(error))
+        try:
+            summary = self.get_summary(meeting_id)
+        except MeetingSchedulerError as error:
+            errors.append(str(error))
+        summary_text = str(summary.get("meeting_summary") or summary.get("summary") or "").strip()
+        raw_action_items = summary.get("next_steps") or summary.get("action_items") or ""
+        action_items = (
+            "\n".join(str(item) for item in raw_action_items)
+            if isinstance(raw_action_items, list)
+            else str(raw_action_items or "").strip()
+        )
+        return {
+            "meeting_id": str(meeting_id),
+            "ready": recording.get("transcript_status") == "ready" and bool(summary_text),
+            "transcript": recording.get("transcript"),
+            "transcript_status": recording.get("transcript_status", "pending"),
+            "recording_files": recording.get("recording_files", []),
+            "action_items": action_items,
+            "summary": summary,
+            "summary_text": summary_text,
+            "processing_errors": errors,
+        }
+
+    def mark_post_meeting_delivered(
+        self,
+        occurrence_key: str,
+        *,
+        notion_page_id: str | None = None,
+        delivered_to: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Persist the terminal idempotency marker after publication and delivery."""
+        key = _require_occurrence_key(occurrence_key)
+        patch = {
+            "post_meeting_status": "delivered",
+            "post_meeting_notion_page_id": str(notion_page_id or ""),
+            "post_meeting_delivered_to": sorted(set(delivered_to or [])),
+            "post_meeting_delivered_at": dt.datetime.now(dt.UTC).isoformat(),
+        }
+
+        async def update(connection: asyncpg.Connection) -> dict[str, Any]:
+            row = await connection.fetchrow(
+                """
+                update orbie_meeting_occurrences
+                set status = 'completed', metadata = metadata || $2::jsonb,
+                    last_error = '', version = version + 1, updated_at = now()
+                where occurrence_key = $1
+                returning *
+                """,
+                key,
+                json.dumps(patch),
+            )
+            if row is None:
+                raise MeetingSchedulerError("meeting occurrence does not exist")
+            return _serialize_row(row)
+
+        return asyncio.run(_with_connection(update))
+
+    def _zoom_download_transcript(self, download_url: str) -> str:
+        parsed = urlparse(download_url)
+        hostname = (parsed.hostname or "").lower()
+        if parsed.scheme != "https" or not (hostname == "zoom.us" or hostname.endswith(".zoom.us")):
+            raise MeetingSchedulerError("Zoom returned an invalid transcript download URL")
+        with httpx.Client(timeout=30.0, follow_redirects=False) as client:
+            response = client.get(download_url, headers=self._zoom_headers())
+        if response.status_code >= 400:
+            raise MeetingSchedulerError(
+                f"Zoom transcript download failed with HTTP {response.status_code}"
+            )
+        if len(response.content) > MAX_TRANSCRIPT_BYTES:
+            raise MeetingSchedulerError("Zoom transcript exceeded the size limit")
+        return response.content.decode("utf-8-sig")
 
     @staticmethod
     def _calendar_event_id(key: str) -> str:
@@ -969,6 +1179,7 @@ class MeetingSchedulerClient:
                             duration=duration,
                             time_zone=time_zone,
                             occurrence_key=key,
+                            organizer_calendar_key=organizer_calendar_key,
                         )
                     join_url = str(zoom.get("join_url") or "").strip()
                     zoom_id = str(zoom.get("id") or "").strip()
@@ -1005,12 +1216,12 @@ class MeetingSchedulerClient:
                         attendees=attendees,
                         join_url=join_url,
                     )
+                    body["id"] = event_id
                     try:
                         event = (
                             service.events()
                             .insert(
                                 calendarId=organizer_id,
-                                id=event_id,
                                 body=body,
                                 sendUpdates="all",
                             )
@@ -1082,9 +1293,7 @@ class MeetingSchedulerClient:
         if not actual_start_value or not requested_start_value:
             raise MeetingSchedulerError("booked meeting has no occurrence start")
         actual_start = _parse_rfc3339(str(actual_start_value), field="actual_start")
-        requested_start = _parse_rfc3339(
-            str(requested_start_value), field="requested_start"
-        )
+        requested_start = _parse_rfc3339(str(requested_start_value), field="requested_start")
         if actual_start <= dt.datetime.now(dt.UTC):
             raise MeetingSchedulerError("started meetings cannot be automatically changed")
 

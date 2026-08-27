@@ -19,7 +19,7 @@ export type MeetingAutomationDispatchResult = {
   response: JsonObject
 }
 
-const MEETING_AUTOMATION_COMMAND = /^(?:run\s+cadence|run\s+meeting\s+automation|meeting\s+ops)\s+(.+)$/is
+const MEETING_AUTOMATION_COMMAND = /^(?:(?:@?orbie)\s+)?(?:run\s+cadence|cadence\s+run|run\s+meeting\s+automation|meeting\s+ops)\s+(.+)$/is
 export const MAX_CUSTOM_INSTRUCTIONS_CHARS = 4000
 
 export function parseMeetingAutomationCommand(
@@ -77,13 +77,12 @@ function isValidCustomInstructions(value: string): boolean {
 }
 
 export function isWorldFoundationMeetingAutomationSurface(
-  message: Message,
-  allowedChannelIds: readonly string[] = []
+  message: Message
 ): boolean {
   const teamId = rawSlackField(message.raw, 'team_id') ?? rawSlackField(message.raw, 'team')
   const channelId = rawSlackField(message.raw, 'channel')
   if (teamId !== WORLD_FOUNDATION_SLACK_TEAM_ID || !channelId) return false
-  return channelId.startsWith('D') || allowedChannelIds.includes(channelId)
+  return /^[CGD][A-Z0-9]+$/.test(channelId)
 }
 
 export async function dispatchMeetingAutomationCommand(
@@ -92,10 +91,7 @@ export async function dispatchMeetingAutomationCommand(
   command: MeetingAutomationCommand
 ): Promise<MeetingAutomationDispatchResult | null> {
   if (
-    !isWorldFoundationMeetingAutomationSurface(
-      message,
-      options.meetingAutomationAllowedChannelIds
-    )
+    !isWorldFoundationMeetingAutomationSurface(message)
     || message.author.isMe
     || message.author.isBot === true
   ) {

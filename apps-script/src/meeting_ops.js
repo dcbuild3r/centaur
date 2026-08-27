@@ -50,14 +50,30 @@ function runScheduledCadenceJob(payload) {
   }
   return withScriptLock_(function () {
     var cadence = MeetingOpsPure.normalizeCadence(request.cadence);
+    var manualByOwner = request.manualByOwner === true;
+    var requesterSlackUserId = manualByOwner
+      ? String(request.requesterSlackUserId || '')
+      : null;
+    if (manualByOwner && !MeetingOpsPure.isCadenceAuthorized(
+      cadence,
+      requesterSlackUserId
+    )) {
+      throw new Error('Cadence is not authorized for ' + requesterSlackUserId);
+    }
     var occurrence = new Date(request.occurrenceAt);
     if (isNaN(occurrence.getTime())) {
       throw new Error('occurrenceAt must be an ISO timestamp');
     }
     validateMeeting_(cadence);
-    processNotesNotification_(cadence, new Date(request.now || new Date()), null, true);
-    return processAgenda_(cadence, occurrence, null, {
-      scheduled: true,
+    processNotesNotification_(
+      cadence,
+      new Date(request.now || new Date()),
+      requesterSlackUserId,
+      !manualByOwner
+    );
+    return processAgenda_(cadence, occurrence, requesterSlackUserId, {
+      manual: manualByOwner,
+      scheduled: !manualByOwner,
       occurrence: occurrence,
       customInstructions: request.customInstructions
     });
@@ -390,7 +406,11 @@ function queueOrbieNotification_(
   requesterSlackUserId,
   scheduled
 ) {
-  if (meeting.visibility === 'public') assertAllowedChannel_(meeting);
+  // Manual runs are already authenticated against the cadence owners. Keep
+  // the destination allowlist only for unattended scheduled execution.
+  if (meeting.visibility === 'public' && scheduled === true) {
+    assertAllowedChannel_(meeting);
+  }
   var timeZone = meeting.timeZone || DEFAULT_TIME_ZONE;
   var recipients = MeetingOpsPure.notificationRecipients(
     meeting,

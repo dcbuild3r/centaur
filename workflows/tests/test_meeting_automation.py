@@ -259,7 +259,9 @@ def test_notion_tool_client_discovers_marked_private_cadence_databases():
         "row-private-db",
     ]
     assert rows[1]["_cadence_database_id"] == "private-db"
-    assert not any(args.get("database_id") == "unrelated-db" for _, _, args in context.calls)
+    assert not any(
+        args.get("database_id") == "unrelated-db" for _, _, args in context.calls
+    )
 
 
 def _input(query="AI Workstream", **overrides):
@@ -436,7 +438,7 @@ def test_scheduling_args_reject_unknown_provider_fields():
         )
 
 
-def test_manual_scheduling_uses_the_verified_requester_as_organizer(monkeypatch):
+def test_manual_scheduling_uses_the_managed_orbie_calendar_as_organizer(monkeypatch):
     client = SchedulingFakeClient(
         {
             "status": "ok",
@@ -450,6 +452,7 @@ def test_manual_scheduling_uses_the_verified_requester_as_organizer(monkeypatch)
         }
     )
     monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+    monkeypatch.setenv("MEETING_MANUAL_ORGANIZER_CALENDAR_KEY", "orbie")
 
     result = asyncio.run(
         meeting_automation.handler(
@@ -469,7 +472,7 @@ def test_manual_scheduling_uses_the_verified_requester_as_organizer(monkeypatch)
 
     assert result["status"] == "ok"
     scheduling_call = next(call for call in client.calls if call[0] == "scheduling")
-    assert scheduling_call[2]["organizer_calendar_key"] == "piotr.piwowarczyk@world.org"
+    assert scheduling_call[2]["organizer_calendar_key"] == "orbie"
 
 
 def test_manual_booking_cannot_bypass_requester_ownership_with_cadence_id(monkeypatch):
@@ -893,6 +896,26 @@ def test_unverified_editor_grant_prevents_success_delivery(monkeypatch):
     assert context.posts == []
 
 
+def test_domain_writer_permission_verifies_world_member_editors():
+    client = FakeClient([])
+    client.drive_permissions = [
+        {"type": "domain", "domain": "world.org", "role": "writer"}
+    ]
+
+    verified = asyncio.run(
+        meeting_automation._ensure_document_editors(
+            FakeContext(),
+            client,
+            step_prefix="domain-access",
+            run_result={"docId": "doc-1"},
+            emails=["dc.builder@world.org", "piotr.piwowarczyk@world.org"],
+        )
+    )
+
+    assert verified == ["dc.builder@world.org", "piotr.piwowarczyk@world.org"]
+    assert [call for call in client.calls if call[0] == "drive_share"] == []
+
+
 def test_manual_private_delivery_rejects_malformed_acknowledgement(monkeypatch):
     client = MalformedAcknowledgementClient(
         [{"id": "private-ai", "title": "AI Workstream", "visibility": "private"}],
@@ -1077,7 +1100,7 @@ def test_input_rejects_oversized_or_control_character_instructions():
 def _published_row(**overrides):
     row = {
         "id": "notion-page-1",
-        "Ritual": "Weekly Sync",
+        "Cadence": "Weekly Sync",
         "Automation ID": "weekly-sync",
         "Automation status": "Published",
         "Frequency": "Weekly",
@@ -1122,6 +1145,31 @@ def test_notion_cadence_uses_friday_for_a_one_business_day_monday_prep():
     assert cadence["_preparation_at"].isoformat() == "2026-08-14T09:15:00+02:00"
     assert cadence["_occurrence_local"].isoformat() == "2026-08-17T10:00:00+02:00"
     assert cadence["notificationRecipients"] == ["U0BEQ8M7QSK"]
+
+
+def test_notion_cadence_preserves_all_owners_for_manual_authorization():
+    row = _published_row(**{"Owner / DRI": '["user://owner-1", "user://owner-2"]'})
+    notion_users = [
+        *_notion_users(),
+        {"id": "owner-2", "person": {"email": "dc.builder@world.org"}},
+    ]
+    slack_users = [
+        *_slack_users(),
+        {
+            "id": "UDC",
+            "email": "dc.builder@world.org",
+            "team_id": "TL1HM8UUU",
+            "is_bot": False,
+            "deleted": False,
+        },
+    ]
+
+    cadence = meeting_automation.normalize_notion_cadence(
+        row, notion_users, slack_users
+    )
+
+    assert cadence["ownerSlackUserId"] == "U0BEQ8M7QSK"
+    assert cadence["accessSlackUserIds"] == ["UDC"]
 
 
 def test_public_notion_cadence_resolves_channel_members_for_doc_editors():
@@ -1324,6 +1372,9 @@ class ScheduledFakeClient:
         self.drive_permissions = []
         self.bookings = []
         self.booking_updates = []
+        self.post_candidates = []
+        self.post_operations = []
+        self.post_publications = []
 
     async def notion_cadences(self):
         return [self.row]
@@ -1407,6 +1458,24 @@ class ScheduledFakeClient:
     async def drive_file_permissions(self, file_id):
         return list(self.drive_permissions)
 
+    async def scheduling_operation(self, operation, args):
+        self.post_operations.append((operation, args))
+        if operation == "post_meeting_candidates":
+            return list(self.post_candidates)
+        if operation == "collect_post_meeting_artifacts":
+            return {
+                "ready": True,
+                "summary_text": "Decisions were made.",
+                "transcript": "WEBVTT\nHello world.",
+            }
+        if operation == "mark_post_meeting_delivered":
+            return {"status": "completed", "occurrenceKey": args["occurrence_key"]}
+        raise AssertionError(operation)
+
+    async def publish_notion_meeting_summary(self, page_id, **kwargs):
+        self.post_publications.append((page_id, kwargs))
+        return {"page_id": page_id, "created": True}
+
 
 class ManualNotionFakeClient(FakeClient):
     def __init__(self, row):
@@ -1431,13 +1500,16 @@ class ManualNotionFakeClient(FakeClient):
         return [self.row]
 
     async def notion_users(self):
-        return [{"id": "owner-dc", "person": {"email": "dc.builder@world.org"}}]
+        return [
+            {"id": "owner-primary", "person": {"email": "piotr.piwowarczyk@world.org"}},
+            {"id": "owner-dc", "person": {"email": "dc.builder@world.org"}},
+        ]
 
 
 def test_manual_run_resolves_owner_scoped_draft_notion_cadence(monkeypatch):
     row = _published_row(
         **{
-            "Ritual": "Weekly Sync Spotlight Demo",
+            "Cadence": "Weekly Sync Spotlight Demo",
             "Automation ID": "orbie-weekly-sync-spotlight-demo",
             "Automation status": "Draft",
             "Owner / DRI": '["user://owner-dc"]',
@@ -1463,10 +1535,45 @@ def test_manual_run_resolves_owner_scoped_draft_notion_cadence(monkeypatch):
         call for call in client.calls if call[0] == "run_scheduled_cadence"
     )
     assert scheduled_call[1]["id"] == "orbie-weekly-sync-spotlight-demo"
+    assert scheduled_call[3]["requester_slack_user_id"] == "UDC"
     assert result["verified_editors"] == [
         "dc.builder@world.org",
         "piotr.piwowarczyk@world.org",
     ]
+
+
+def test_manual_run_authorizes_a_secondary_notion_owner(monkeypatch):
+    row = _published_row(
+        **{
+            "Cadence": "Weekly All Hands Call",
+            "Automation ID": "weekly-all-hands-call",
+            "Automation status": "Published",
+            "Owner / DRI": '["user://owner-primary", "user://owner-dc"]',
+            "Notification recipients": "",
+            "Notification emails": "",
+            "Document access": "All World members",
+        }
+    )
+    client = ManualNotionFakeClient(row)
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+
+    result = asyncio.run(
+        meeting_automation.handler(
+            _input(
+                "weekly all hands call",
+                requester_slack_user_id="UDC",
+                requester_slack_email="dc.builder@world.org",
+            ),
+            FakeContext(),
+        )
+    )
+
+    scheduled_call = next(
+        call for call in client.calls if call[0] == "run_scheduled_cadence"
+    )
+    assert scheduled_call[1]["ownerSlackUserId"] == "UPIOTR"
+    assert scheduled_call[1]["accessSlackUserIds"] == ["UDC"]
+    assert result["cadence"]["id"] == "weekly-all-hands-call"
 
 
 def test_scheduled_handler_delivers_channel_message_and_advances_notion_date(
@@ -1489,6 +1596,42 @@ def test_scheduled_handler_delivers_channel_message_and_advances_notion_date(
     assert "newly created document from the template" in client.sent[0][2]
     assert "<@U0BEQ8M7QSK>" in client.sent[0][2]
     assert client.advanced == [("notion-page-1", "2026-08-24")]
+
+
+def test_scheduled_handler_publishes_zoom_artifacts_and_notifies_participant(
+    monkeypatch,
+):
+    client = ScheduledFakeClient(_published_row())
+    client.post_candidates = [
+        {
+            "occurrence_key": "weekly-sync:2026-08-10",
+            "cadence_id": "weekly-sync",
+            "title": "Weekly Sync",
+            "actual_start": "2026-08-10T08:00:00+00:00",
+            "zoom_meeting_id": "123",
+            "attendee_emails": ["mandy.payne@world.org"],
+        }
+    ]
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+
+    result = asyncio.run(
+        meeting_automation.handler(
+            meeting_automation.Input(
+                now="2026-08-14T07:15:00Z",
+                metadata={"source": "workflow_schedule"},
+            ),
+            FakeContext(),
+        )
+    )
+
+    assert client.post_publications[0][1]["occurrence_key"] == "weekly-sync:2026-08-10"
+    assert any(
+        kind == "dm" and destination == "U0BEQ8M7QSK"
+        for kind, destination, *_ in client.sent
+    )
+    assert any(kind == "channel" for kind, *_ in client.sent)
+    assert client.post_operations[-1][0] == "mark_post_meeting_delivered"
+    assert result["post_meetings"][0]["status"] == "delivered"
 
 
 def test_auto_book_scheduled_handler_books_before_docs_and_uses_actual_time(

@@ -46,6 +46,9 @@ function slackMessage(
 describe('meeting automation command parsing', () => {
   test.each([
     ['run cadence weekly team sync', 'weekly team sync'],
+    ['cadence run weekly team sync', 'weekly team sync'],
+    ['orbie cadence run weekly all hands call', 'weekly all hands call'],
+    ['@orbie cadence run weekly all hands call', 'weekly all hands call'],
     ['run meeting automation "Leadership 1:1"', 'Leadership 1:1'],
     ['meeting ops private cadence', 'private cadence'],
     [`<@${BOT_USER_ID}|orbie> run cadence  weekly team sync  `, 'weekly team sync'],
@@ -98,30 +101,34 @@ describe('meeting automation command parsing', () => {
 })
 
 describe('meeting automation dispatch', () => {
-  test('accepts World DMs and only explicitly allowlisted World channels', () => {
+  test('accepts valid World Slack conversations', () => {
     expect(isWorldFoundationMeetingAutomationSurface(slackMessage('run cadence weekly'))).toBe(true)
     expect(
       isWorldFoundationMeetingAutomationSurface(
         slackMessage('run cadence weekly', {
           raw: { channel: 'CCHANNEL', team: WORLD_FOUNDATION_SLACK_TEAM_ID, user: USER_ID }
-        }),
-        ['CCHANNEL']
+        })
       )
     ).toBe(true)
     expect(
       isWorldFoundationMeetingAutomationSurface(
         slackMessage('run cadence weekly', {
           raw: { channel: 'COTHER', team: WORLD_FOUNDATION_SLACK_TEAM_ID, user: USER_ID }
-        }),
-        ['CCHANNEL']
+        })
+      )
+    ).toBe(true)
+    expect(
+      isWorldFoundationMeetingAutomationSurface(
+        slackMessage('run cadence weekly', {
+          raw: { channel: DM_CHANNEL_ID, team: 'TOTHER', user: USER_ID }
+        })
       )
     ).toBe(false)
     expect(
       isWorldFoundationMeetingAutomationSurface(
         slackMessage('run cadence weekly', {
-          raw: { channel: DM_CHANNEL_ID, team: 'TOTHER', user: USER_ID }
-        }),
-        [DM_CHANNEL_ID]
+          raw: { channel: 'XINVALID', team: WORLD_FOUNDATION_SLACK_TEAM_ID, user: USER_ID }
+        })
       )
     ).toBe(false)
   })
@@ -196,7 +203,7 @@ describe('meeting automation dispatch', () => {
     })
   })
 
-  test('does not call the broker for a channel or another team', async () => {
+  test('does not call the broker for another team', async () => {
     let calls = 0
     const options: SlackbotV2Options = {
       apiUrl: 'https://api.example.test',
@@ -212,15 +219,6 @@ describe('meeting automation dispatch', () => {
       await dispatchMeetingAutomationCommand(
         options,
         slackMessage('run cadence weekly', {
-          raw: { channel: 'CCHANNEL', team: WORLD_FOUNDATION_SLACK_TEAM_ID, user: USER_ID }
-        }),
-        { cadenceQuery: 'weekly' }
-      )
-    ).toBeNull()
-    expect(
-      await dispatchMeetingAutomationCommand(
-        options,
-        slackMessage('run cadence weekly', {
           raw: { channel: DM_CHANNEL_ID, team: 'TOTHER', user: USER_ID }
         }),
         { cadenceQuery: 'weekly' }
@@ -229,12 +227,11 @@ describe('meeting automation dispatch', () => {
     expect(calls).toBe(0)
   })
 
-  test('posts an allowlisted World channel request to the broker', async () => {
+  test('posts any valid World channel request to the broker', async () => {
     const requests: Array<{ body: unknown }> = []
     const options: SlackbotV2Options = {
       apiUrl: 'https://api.example.test',
       botToken: 'xoxb-test',
-      meetingAutomationAllowedChannelIds: ['CCHANNEL'],
       fetch: async (_input, init) => {
         requests.push({ body: init?.body ? JSON.parse(String(init.body)) : undefined })
         return Response.json({ created: true, ok: true, run_id: 'run-channel', status: 'queued' })

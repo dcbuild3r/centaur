@@ -3031,16 +3031,12 @@ fn validate_meeting_scheduling_request(
         }
         let channel_id = request.slack_channel_id.as_deref().unwrap_or("").trim();
         let is_dm = valid_slack_identifier(channel_id, 'D');
-        let is_allowlisted_channel = ['C', 'G']
+        let is_channel = ['C', 'G']
             .iter()
-            .any(|prefix| valid_slack_identifier(channel_id, *prefix))
-            && meeting_automation_allowed_slack_channels()
-                .iter()
-                .any(|allowed| allowed == channel_id);
-        if !is_dm && !is_allowlisted_channel {
+            .any(|prefix| valid_slack_identifier(channel_id, *prefix));
+        if !is_dm && !is_channel {
             return Err(ApiError::BadRequest(
-                "meeting scheduling must be requested from a Slack DM or an allowlisted channel"
-                    .to_owned(),
+                "meeting scheduling must be requested from a Slack conversation".to_owned(),
             ));
         }
         if !is_dm
@@ -3197,14 +3193,7 @@ fn verify_slack_request_identity(
 fn validate_slack_meeting_automation_request(
     request: SlackMeetingAutomationRunRequest,
 ) -> Result<SlackMeetingAutomationRunRequest, ApiError> {
-    let allowed_channels = meeting_automation_allowed_slack_channels();
-    validate_slack_meeting_automation_request_for_channels(request, &allowed_channels)
-}
-
-fn validate_slack_meeting_automation_request_for_channels(
-    mut request: SlackMeetingAutomationRunRequest,
-    allowed_channels: &[String],
-) -> Result<SlackMeetingAutomationRunRequest, ApiError> {
+    let mut request = request;
     request.cadence_query = request.cadence_query.trim().to_owned();
     request.requester_slack_user_id = request.requester_slack_user_id.trim().to_owned();
     request.requester_slack_team_id = request.requester_slack_team_id.trim().to_owned();
@@ -3230,14 +3219,12 @@ fn validate_slack_meeting_automation_request_for_channels(
         ));
     }
     let is_dm = valid_slack_identifier(&request.slack_channel_id, 'D');
-    let is_allowed_channel = ['C', 'G']
+    let is_channel = ['C', 'G']
         .iter()
-        .any(|prefix| valid_slack_identifier(&request.slack_channel_id, *prefix))
-        && allowed_channels.contains(&request.slack_channel_id);
-    if !is_dm && !is_allowed_channel {
+        .any(|prefix| valid_slack_identifier(&request.slack_channel_id, *prefix));
+    if !is_dm && !is_channel {
         return Err(ApiError::BadRequest(
-            "meeting automation must be requested from a Slack DM or an allowlisted channel"
-                .to_owned(),
+            "meeting automation must be requested from a Slack conversation".to_owned(),
         ));
     }
     if !is_dm && request.slack_thread_ts.is_none() {
@@ -3285,16 +3272,6 @@ fn validate_slack_meeting_automation_request_for_channels(
         ));
     }
     Ok(request)
-}
-
-fn meeting_automation_allowed_slack_channels() -> Vec<String> {
-    env::var("MEETING_AUTOMATION_ALLOWED_SLACK_CHANNEL_IDS")
-        .unwrap_or_default()
-        .split(|character: char| character == ',' || character.is_whitespace())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
 }
 
 fn valid_slack_identifier(value: &str, prefix: char) -> bool {
@@ -3394,7 +3371,7 @@ mod slack_meeting_automation_request_tests {
     }
 
     #[test]
-    fn accepts_allowlisted_channels_and_rejects_other_channels() {
+    fn accepts_world_channels_with_threads_and_rejects_invalid_conversations() {
         let mut channel_request = request();
         channel_request.slack_channel_id = "C123ABC".to_owned();
         assert!(matches!(
@@ -3402,17 +3379,22 @@ mod slack_meeting_automation_request_tests {
             Err(ApiError::BadRequest(_))
         ));
 
-        let mut allowed_channel_request = request();
-        allowed_channel_request.slack_channel_id = "C123ABC".to_owned();
-        allowed_channel_request.slack_thread_ts = Some("1786000000.123456".to_owned());
-        let allowed = vec!["C123ABC".to_owned()];
-        assert!(
-            validate_slack_meeting_automation_request_for_channels(
-                allowed_channel_request,
-                &allowed
-            )
-            .is_ok()
-        );
+        let mut threaded_channel_request = request();
+        threaded_channel_request.slack_channel_id = "C123ABC".to_owned();
+        threaded_channel_request.slack_thread_ts = Some("1786000000.123456".to_owned());
+        assert!(validate_slack_meeting_automation_request(threaded_channel_request).is_ok());
+
+        let mut group_request = request();
+        group_request.slack_channel_id = "G123ABC".to_owned();
+        group_request.slack_thread_ts = Some("1786000000.123456".to_owned());
+        assert!(validate_slack_meeting_automation_request(group_request).is_ok());
+
+        let mut invalid_conversation = request();
+        invalid_conversation.slack_channel_id = "X123ABC".to_owned();
+        assert!(matches!(
+            validate_slack_meeting_automation_request(invalid_conversation),
+            Err(ApiError::BadRequest(_))
+        ));
 
         let mut user_request = request();
         user_request.requester_slack_user_id = "not-a-user".to_owned();
@@ -3762,6 +3744,15 @@ async fn invoke_workflow_webhook(
         ));
     }
     verify_webhook_auth(spec, &headers, &raw_body)?;
+
+    // Zoom validates a newly configured event-subscription endpoint with a
+    // synchronous challenge. Do this only after the request signature has
+    // been verified, and do not create a durable workflow run for it.
+    if matches!(spec.auth, WorkflowWebhookAuth::Zoom { .. }) {
+        if let Some(response) = zoom_endpoint_validation_response(spec, &raw_body)? {
+            return Ok((StatusCode::OK, Json(response)));
+        }
+    }
 
     let raw_body_sha256 = hex::encode(Sha256::digest(&raw_body));
     let body = parse_webhook_body(&headers, &raw_body)?;
@@ -4735,6 +4726,9 @@ fn verify_webhook_auth(
             headers,
             raw_body,
         ),
+        WorkflowWebhookAuth::Zoom { secret_ref } => {
+            verify_zoom_webhook_signature(secret_ref, headers, raw_body)
+        }
         WorkflowWebhookAuth::StandardWebhooks { secret_ref } => {
             verify_standard_webhook_signature(secret_ref, headers, raw_body)
         }
@@ -4753,6 +4747,73 @@ fn verify_webhook_auth(
             raw_body,
         ),
     }
+}
+
+fn verify_zoom_webhook_signature(
+    secret_ref: &str,
+    headers: &HeaderMap,
+    raw_body: &[u8],
+) -> Result<(), ApiError> {
+    let timestamp = header_value(headers, "X-Zm-Request-Timestamp")
+        .ok_or_else(|| ApiError::Unauthorized("missing Zoom webhook timestamp".to_owned()))?;
+    let timestamp_seconds = timestamp
+        .parse::<i64>()
+        .map_err(|_| ApiError::Unauthorized("invalid Zoom webhook timestamp".to_owned()))?;
+    if (OffsetDateTime::now_utc().unix_timestamp() - timestamp_seconds).abs() > 300 {
+        return Err(ApiError::Unauthorized(
+            "stale Zoom webhook timestamp".to_owned(),
+        ));
+    }
+    let signature = header_value(headers, "X-Zm-Signature")
+        .ok_or_else(|| ApiError::Unauthorized("missing Zoom webhook signature".to_owned()))?;
+    let secret = env::var(secret_ref).map_err(|_| {
+        ApiError::Internal(format!(
+            "webhook auth secret {secret_ref} is not configured"
+        ))
+    })?;
+    let message = [b"v0:".as_slice(), timestamp.as_bytes(), b":", raw_body].concat();
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.trim().as_bytes())
+        .map_err(|_| ApiError::Internal("invalid Zoom webhook secret".to_owned()))?;
+    mac.update(&message);
+    let expected = format!("v0={}", hex::encode(mac.finalize().into_bytes()));
+    if constant_time_eq(signature.trim().as_bytes(), expected.as_bytes()) {
+        Ok(())
+    } else {
+        Err(ApiError::Unauthorized(
+            "invalid Zoom webhook signature".to_owned(),
+        ))
+    }
+}
+
+fn zoom_endpoint_validation_response(
+    spec: &WorkflowWebhookSpec,
+    raw_body: &[u8],
+) -> Result<Option<Value>, ApiError> {
+    let payload: Value = serde_json::from_slice(raw_body)
+        .map_err(|_| ApiError::BadRequest("invalid Zoom webhook JSON".to_owned()))?;
+    if payload.get("event").and_then(Value::as_str) != Some("endpoint.url_validation") {
+        return Ok(None);
+    }
+    let plain_token = payload
+        .pointer("/payload/plainToken")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError::BadRequest("missing Zoom plainToken".to_owned()))?;
+    let WorkflowWebhookAuth::Zoom { secret_ref } = &spec.auth else {
+        return Ok(None);
+    };
+    let secret = env::var(secret_ref).map_err(|_| {
+        ApiError::Internal(format!(
+            "webhook auth secret {secret_ref} is not configured"
+        ))
+    })?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.trim().as_bytes())
+        .map_err(|_| ApiError::Internal("invalid Zoom webhook secret".to_owned()))?;
+    mac.update(plain_token.as_bytes());
+    Ok(Some(json!({
+        "plainToken": plain_token,
+        "encryptedToken": hex::encode(mac.finalize().into_bytes()),
+    })))
 }
 
 fn verify_standard_webhook_signature(
@@ -4833,6 +4894,7 @@ fn signature_header_name(auth: &WorkflowWebhookAuth) -> Option<&str> {
     match auth {
         WorkflowWebhookAuth::None | WorkflowWebhookAuth::Bearer { .. } => None,
         WorkflowWebhookAuth::Github { .. } => Some("X-Hub-Signature-256"),
+        WorkflowWebhookAuth::Zoom { .. } => Some("X-Zm-Signature"),
         WorkflowWebhookAuth::StandardWebhooks { .. } => Some("webhook-signature"),
         WorkflowWebhookAuth::Hmac {
             signature_header, ..
@@ -5270,6 +5332,75 @@ mod webhook_tests {
             raw_body,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn verifies_zoom_signature_and_validation_challenge() {
+        let secret_ref = "CENTAUR_TEST_ZOOM_WEBHOOK_SECRET";
+        unsafe {
+            env::set_var(secret_ref, "zoom-test-secret");
+        }
+        let raw_body =
+            br#"{"event":"endpoint.url_validation","payload":{"plainToken":"plain-123"}}"#;
+        let timestamp = OffsetDateTime::now_utc().unix_timestamp().to_string();
+        let message = [b"v0:".as_slice(), timestamp.as_bytes(), b":", raw_body].concat();
+        let mut mac = Hmac::<Sha256>::new_from_slice(b"zoom-test-secret").unwrap();
+        mac.update(&message);
+        let signature = format!("v0={}", hex::encode(mac.finalize().into_bytes()));
+        let mut headers = HeaderMap::new();
+        headers.insert("x-zm-request-timestamp", timestamp.parse().unwrap());
+        headers.insert("x-zm-signature", signature.parse().unwrap());
+
+        verify_zoom_webhook_signature(secret_ref, &headers, raw_body).unwrap();
+
+        let spec = WorkflowWebhookSpec {
+            slug: "zoom-post-meeting".to_owned(),
+            provider: Some("zoom".to_owned()),
+            auth: WorkflowWebhookAuth::Zoom {
+                secret_ref: secret_ref.to_owned(),
+            },
+            trigger_key: None,
+            allowed_methods: vec!["POST".to_owned()],
+            allowed_content_types: vec!["application/json".to_owned()],
+            filter: None,
+        };
+        let response = zoom_endpoint_validation_response(&spec, raw_body)
+            .unwrap()
+            .unwrap();
+        assert_eq!(response["plainToken"], "plain-123");
+
+        let mut challenge_mac = Hmac::<Sha256>::new_from_slice(b"zoom-test-secret").unwrap();
+        challenge_mac.update(b"plain-123");
+        assert_eq!(
+            response["encryptedToken"],
+            hex::encode(challenge_mac.finalize().into_bytes())
+        );
+    }
+
+    #[test]
+    fn rejects_zoom_signature_for_modified_body() {
+        let secret_ref = "CENTAUR_TEST_ZOOM_WEBHOOK_TAMPER_SECRET";
+        unsafe {
+            env::set_var(secret_ref, "zoom-test-secret");
+        }
+        let signed_body = br#"{"event":"recording.completed"}"#;
+        let timestamp = OffsetDateTime::now_utc().unix_timestamp().to_string();
+        let message = [b"v0:".as_slice(), timestamp.as_bytes(), b":", signed_body].concat();
+        let mut mac = Hmac::<Sha256>::new_from_slice(b"zoom-test-secret").unwrap();
+        mac.update(&message);
+        let signature = format!("v0={}", hex::encode(mac.finalize().into_bytes()));
+        let mut headers = HeaderMap::new();
+        headers.insert("x-zm-request-timestamp", timestamp.parse().unwrap());
+        headers.insert("x-zm-signature", signature.parse().unwrap());
+
+        assert!(
+            verify_zoom_webhook_signature(
+                secret_ref,
+                &headers,
+                br#"{"event":"meeting.summary_completed"}"#,
+            )
+            .is_err()
+        );
     }
 
     fn standard_webhook_headers(

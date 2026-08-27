@@ -47,6 +47,7 @@ import {
   interruptSessionExecution,
   isRetryableSessionApiError,
   openSessionEventStream,
+  resolveSlackMeetingAutomationRequester,
   serializeAttachment,
   serializeMessageLinks,
   serializeMessage,
@@ -81,6 +82,13 @@ import {
   isWorldFoundationMeetingAutomationSurface,
   parseMeetingAutomationCommand
 } from './meeting-automation'
+import {
+  dispatchConfirmedMeetingBooking,
+  isMeetingConfirmation,
+  meetingBookingPreview,
+  parseFixedTimeMeetingRequest,
+  type PendingMeetingBooking
+} from './meeting-scheduling'
 import type {
   ForwardSessionInput,
   JsonObject,
@@ -537,16 +545,26 @@ async function handleSlackMessageHandoff(
     if (await handleStopCommand(thread, message, input.options, input.trigger)) {
       return
     }
+    if (
+      input.mode === 'execute'
+      && isWorldFoundationMeetingAutomationSurface(message)
+      && await handleMeetingSchedulingMessage(
+        thread,
+        message,
+        input.options,
+        input.state,
+        trace
+      )
+    ) {
+      return
+    }
     const meetingAutomationCommand =
       input.mode === 'execute'
         ? parseMeetingAutomationCommand(message.text, input.options.botUserId)
         : null
     if (
       meetingAutomationCommand &&
-      isWorldFoundationMeetingAutomationSurface(
-        message,
-        input.options.meetingAutomationAllowedChannelIds
-      )
+      isWorldFoundationMeetingAutomationSurface(message)
     ) {
       if (
         await handleMeetingAutomationCommand(
@@ -604,6 +622,50 @@ async function handleSlackMessageHandoff(
     )
     throw error
   }
+}
+
+async function handleMeetingSchedulingMessage(
+  thread: Thread<SlackbotV2ThreadState>,
+  message: ChatMessage,
+  options: SlackbotV2Options,
+  state: StateAdapter,
+  trace: SlackbotV2Trace
+): Promise<boolean> {
+  const serialized = await serializeMessage(message, options)
+  const requester = await resolveSlackMeetingAutomationRequester(options, serialized)
+  if (!requester?.slackEmail) return false
+  const pendingKey = [
+    'slackbotv2:pending-meeting-booking',
+    requester.slackTeamId,
+    requester.slackChannelId,
+    requester.slackUserId
+  ].join(':')
+  if (isMeetingConfirmation(message.text)) {
+    const pending = await state.get<PendingMeetingBooking>(pendingKey)
+    if (!pending || Number(pending.expiresAtMs) <= Date.now()) return false
+    const response = await dispatchConfirmedMeetingBooking(options, message, pending)
+    if (!response) {
+      await thread.post("I couldn't verify that this confirmation came from the meeting owner, so nothing was booked.")
+      return true
+    }
+    await state.delete(pendingKey)
+    await thread.post('Meeting booking queued. I’ll post the Calendar and Zoom result here.')
+    traceLog(options, 'slackbotv2_meeting_booking_queued', trace, {
+      run_id: stringValue(response.run_id)
+    })
+    return true
+  }
+
+  const booking = parseFixedTimeMeetingRequest(message.text, requester.slackEmail)
+  if (!booking) return false
+  await state.set(
+    pendingKey,
+    booking,
+    Math.max(1, booking.expiresAtMs - Date.now())
+  )
+  await thread.post(meetingBookingPreview(booking))
+  traceLog(options, 'slackbotv2_meeting_booking_confirmation_requested', trace)
+  return true
 }
 
 async function handleMeetingAutomationCommand(
@@ -1335,7 +1397,11 @@ async function syncThreadMessageToSession(
     provider: shouldStartExecution ? resolvedProvider : undefined,
     reasoning: resolvedReasoning,
     restartOnHarnessConflict:
-      shouldStartExecution && rolloutSelected ? Boolean(resolvedHarnessType) : undefined,
+      shouldStartExecution
+        ? rolloutSelected
+          ? Boolean(resolvedHarnessType)
+          : Boolean(explicitOverrides.harnessType)
+        : undefined,
     onEventId: eventId => {
       lastEventId = Math.max(lastEventId, eventId)
     },

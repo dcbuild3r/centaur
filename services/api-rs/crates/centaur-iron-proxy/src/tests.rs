@@ -68,9 +68,13 @@ fn harness_auth_fragments_are_baked_in() {
         Some("120s")
     );
     let placeholders = placeholder_env(&[infra]);
-    for name in ["GITHUB_TOKEN", "SLACK_BOT_TOKEN"] {
-        assert_eq!(placeholders.get(name).map(String::as_str), None);
+    for name in ["GITHUB_TOKEN", "GITHUB_TOKEN_WORLDFND"] {
+        assert_eq!(placeholders.get(name).map(String::as_str), Some(name));
     }
+    assert_eq!(
+        placeholders.get("SLACK_BOT_TOKEN").map(String::as_str),
+        None
+    );
 }
 
 #[test]

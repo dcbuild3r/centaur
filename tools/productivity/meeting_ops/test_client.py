@@ -110,6 +110,24 @@ def test_run_scheduled_notifications_uses_the_workflow_entrypoint(monkeypatch):
     assert service.scripts_api.calls[0]["body"]["function"] == "runScheduledNotificationsJob"
 
 
+def test_owner_triggered_notion_cadence_marks_manual_owner_request(monkeypatch):
+    service = _Service({"done": True, "response": {"result": {"meetingId": "weekly"}}})
+    monkeypatch.setattr(client, "get_script_service", lambda: service)
+    monkeypatch.setattr(client, "secret", lambda name: "script-123")
+
+    client.run_scheduled_cadence(
+        {"id": "weekly", "ownerSlackUserId": "U123"},
+        "2026-08-31T14:00:00Z",
+        now="2026-08-26T20:00:00Z",
+        requester_slack_team_id="TL1HM8UUU",
+        requester_slack_user_id="U123",
+    )
+
+    request = service.scripts_api.calls[0]["body"]["parameters"][0]
+    assert request["manualByOwner"] is True
+    assert request["requesterSlackUserId"] == "U123"
+
+
 def test_execution_error_surfaces_apps_script_message(monkeypatch):
     service = _Service(
         {

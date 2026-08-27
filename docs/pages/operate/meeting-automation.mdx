@@ -50,16 +50,35 @@ The scheduler reads participant free/busy only. It never returns private event
 titles or descriptions. All writes are gated by the scheduler feature flag,
 stable occurrence identity, and the workflow principal's provider grants.
 Manual ad-hoc availability and bookings resolve the verified Slack requester
-to an exact calendar email and create the invitation on that person's
-writable calendar, making them the event owner instead of
-`orbie-automation@world.org`. They also require explicit confirmation in the
-current conversation. Automated cadence bookings continue to use their
-configured managed organizer alias.
+before creating the invitation on Orbie's managed organizer calendar. Orbie
+owns the event and invites the requested participants; it never needs write
+access to an employee's calendar. Manual bookings also require explicit
+confirmation in the current conversation. Automated cadence bookings continue
+to use their configured managed organizer alias.
 
 If any provider, Docs, or Slack delivery step fails, the workflow leaves
 `Next date` unchanged and retries the same occurrence. Rescheduling updates
 the existing Calendar/Zoom pair and the occurrence's actual time; the cadence
 anchor is not moved.
+
+## Post-meeting publication
+
+The scheduled handler polls ended booked meetings until Zoom exposes both the
+cloud-recording transcript and AI Companion summary. For cadence meetings it
+appends the summary and bounded transcript to that cadence's existing Notion
+page. The hidden `ORBiE_ZOOM_SUMMARY:<occurrence_key>` marker makes this append
+idempotent across workflow retries. Public cadences also receive a Slack channel
+announcement linking to the canonical page. Private cadences retain their
+existing Notion access and receive no public-channel message.
+
+Attendees whose exact `@world.org` email resolves to an active human member of
+the World Slack workspace receive a DM. Unresolved attendees are returned in
+the workflow result instead of broadening access. Ad-hoc meetings have no
+cadence page, so their participant DM includes a bounded transcript excerpt.
+The occurrence is marked `completed` only after required Notion publication
+and Slack delivery succeed. Zoom processing errors remain retryable; operators
+must distinguish successful deployment from acceptance with a real recorded
+meeting, processed transcript/summary, Notion append, and Slack delivery.
 
 ## Access model
 
@@ -136,7 +155,11 @@ After deployment, verify all of the following:
 13. In Dev, a real Auto-book cadence produces one Calendar invite with the
    World Foundation Zoom URL, a matching Notion booking status, and a joinable
    Zoom meeting. A retry reuses both provider IDs; a reschedule changes the
-   same pair and leaves the original cadence anchor intact.
+    same pair and leaves the original cadence anchor intact.
+14. End the meeting and wait for Zoom processing. Confirm one idempotent Notion
+    summary/transcript append, participant DMs, and (for a public cadence) one
+    channel announcement. Rerun the scheduled handler and confirm no duplicate
+    Notion blocks or Slack delivery.
 
 ## Provider activation checklist
 
@@ -144,19 +167,22 @@ Before enabling `MEETING_SCHEDULER_ENABLED` in Dev:
 
 1. Share each participant calendar with `orbie-automation@world.org` at
    free/busy level only.
-2. Grant `writer` or `owner` access to each approved manual proposer's
-   calendar, and grant write access only to explicitly designated automated
-   cadence calendars. Map automated calendar IDs through
-   `MEETING_ORGANIZER_CALENDARS`; never map `primary` or accept a raw calendar
-   ID from a caller.
-3. Create the World Foundation Zoom Server-to-Server OAuth app with a licensed
-   designated host. Store its account/client credentials and the managed
-   short-lived `ZOOM_ACCESS_TOKEN` rotation in the secret system. Do not put
-   them in Apps Script or a skill.
+2. Map Orbie's own calendar and explicitly designated automated cadence
+   calendars through `MEETING_ORGANIZER_CALENDARS`. Set
+   `MEETING_MANUAL_ORGANIZER_CALENDAR_KEY` to Orbie's managed alias; never map
+   `primary` or accept a raw calendar ID from a caller.
+3. Configure the World Foundation Zoom General/User-managed OAuth app, connect
+   it as the licensed Orbie host, and let Centaur Console own the rotating
+   refresh-token family. The scheduler consumes broker credential
+   `zoom-orbie-general-oauth`; do not put an access token, refresh token, or
+   client secret in Apps Script, Helm values, 1Password runtime references, or
+   a skill. Leave `MEETING_ZOOM_SCHEDULE_FOR_USERS` empty for Orbie-owned rooms;
+   delegation requires both an explicit mapping and Zoom scheduling privilege.
 4. Grant `meeting-scheduler` only to `workflow-meeting-automation`. Keep
    generic `gsuite` Calendar write methods unavailable to Slack principals.
-5. Run the focused tests and a user-visible Slack, Calendar, Zoom, retry, and
-   reschedule smoke before making the public Console skill discoverable.
+5. Run the focused tests and a user-visible Slack, Calendar, Zoom, retry,
+   reschedule, cloud-recording, and transcript smoke before making the public
+   Console skill discoverable.
 
 Do not grant `meeting_ops` directly to Slack user, channel, or warm-pool
 principals.

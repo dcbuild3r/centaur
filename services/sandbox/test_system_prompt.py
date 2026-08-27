@@ -25,6 +25,13 @@ class SystemPromptTest(unittest.TestCase):
         self.assertIn("A nonzero exit status from a command is an input to reason about", prompt)
         self.assertIn("Never end a turn silently after a failed command or tool", prompt)
 
+    def test_github_writes_use_owner_aware_commands(self) -> None:
+        prompt = SYSTEM_PROMPT.read_text()
+
+        self.assertIn("run `git-branch <org/repo> <branch-slug>`", prompt)
+        self.assertIn("use `gh-repo` instead of plain `gh`", prompt)
+        self.assertIn("Git pushes use the same owner-aware selection automatically", prompt)
+
     def test_granola_share_links_require_direct_retrieval(self) -> None:
         prompt = SYSTEM_PROMPT.read_text()
 

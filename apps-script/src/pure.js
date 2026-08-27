@@ -24,6 +24,7 @@ var MeetingOpsPure = (function () {
   function resolveDocName(template, date, timeZone) {
     return String(template)
       .split('{YYYY-MM-DD}').join(dateKey(date, timeZone))
+      .split('{calendar_week}').join(isoWeek(date, timeZone))
       .split('{week}').join(isoWeek(date, timeZone));
   }
 
@@ -180,11 +181,9 @@ var MeetingOpsPure = (function () {
   function isCadenceAuthorized(cadence, requesterSlackUserId) {
     if (!requesterSlackUserId) return false;
     if (cadence.status && cadence.status !== 'active') return false;
-    if (cadence.visibility === 'public') return true;
-    var privateUsers = [cadence.ownerSlackUserId]
-      .concat(cadence.accessSlackUserIds || [])
-      .concat(cadence.notificationRecipients || []);
-    return privateUsers.indexOf(String(requesterSlackUserId)) !== -1;
+    var owners = [cadence.ownerSlackUserId]
+      .concat(cadence.accessSlackUserIds || []);
+    return owners.indexOf(String(requesterSlackUserId)) !== -1;
   }
 
   function authorizedCadences(cadences, requesterSlackUserId) {

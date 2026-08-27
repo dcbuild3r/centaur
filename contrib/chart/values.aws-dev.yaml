@@ -21,6 +21,12 @@ apiRs:
   opVault: Centaur
   sandboxReadyTimeoutSecs: 240
   sandboxWarmPoolSize: 3
+  meetingScheduler:
+    enabled: true
+    organizerCalendars: '{"orbie":"orbie-automation@world.org"}'
+    manualOrganizerCalendarKey: orbie
+    zoomHostUserId: orbie-automation@world.org
+    zoomScheduleForUsers: "{}"
   extraEnv:
     MEETING_OPS_SCHEDULER_ENABLED: "true"
     MEETING_OPS_SCHEDULER_CRON: "*/15 * * * *"
@@ -49,12 +55,12 @@ ironProxy:
   # reference, continue to resolve through the Centaur vault.
   secretSource: env
   secretSourceRefs:
-    GITHUB_TOKEN: op://Centaur/GitHub PAT/credential
+    GITHUB_TOKEN: op://Centaur/oged7xfyssmixegfj3kf3piymm/credential
+    GITHUB_TOKEN_WORLDFND: op://Centaur/wlsn2v5vzsr4bikftn45mfbily/credential
     NOTION_API_KEY: op://Centaur/Centaur.run - NOTION_API_KEY/password
     DUNE_API_KEY: op://Centaur/DUNE_API_KEY/credential
     GOOGLE_TOKEN_JSON: op://Centaur/GOOGLE_TOKEN_JSON/credential
     MEETING_OPS_SCRIPT_ID: op://Centaur/MEETING_OPS_SCRIPT_ID/credential
-    ZOOM_ACCESS_TOKEN: op://Centaur/ZOOM_ACCESS_TOKEN/credential
 
 secrets:
   bootstrapSecretName: centaur-onepassword-bootstrap
@@ -75,7 +81,6 @@ console:
 
 slackbotv2:
   enabled: true
-  meetingAutomationAllowedChannelIds: "C0BM12ZNSTT,C0B5Y44QRED"
   # Allow World Foundation members to request deletion of Orbie-authored
   # messages with the configured wastebasket reaction.
   deleteAllowedTeamIds: "TL1HM8UUU"

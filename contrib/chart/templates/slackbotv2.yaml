@@ -95,16 +95,14 @@ spec:
               value: {{ .Values.slackbotv2.userName | quote }}
             - name: SLACKBOTV2_ACTIVITY_SUMMARY_STATUS_ENABLED
               value: {{ .Values.apiRs.activitySummary.enabled | quote }}
+            - name: MEETING_MANUAL_ORGANIZER_CALENDAR_KEY
+              value: {{ .Values.apiRs.meetingScheduler.manualOrganizerCalendarKey | quote }}
             - name: SLACKBOTV2_AUTO_JOIN_CREATED_CHANNELS
               value: {{ .Values.slackbotv2.autoJoinCreatedChannels | quote }}
             - name: SLACKBOTV2_RESPONSE_METADATA_MODE
               value: {{ .Values.slackbotv2.responseMetadataMode | quote }}
             - name: SLACKBOTV2_RESPONSE_SERVICE_TIER_ENABLED
               value: {{ .Values.slackbotv2.responseServiceTierEnabled | quote }}
-{{- if .Values.slackbotv2.meetingAutomationAllowedChannelIds }}
-            - name: MEETING_AUTOMATION_ALLOWED_SLACK_CHANNEL_IDS
-              value: {{ .Values.slackbotv2.meetingAutomationAllowedChannelIds | quote }}
-{{- end }}
             - name: SLACKBOTV2_MESSAGE_OVERRIDES_STRATEGY
               value: {{ .Values.slackbotv2.messageOverridesStrategy.mode | quote }}
             - name: SLACKBOTV2_MESSAGE_OVERRIDES_MODEL

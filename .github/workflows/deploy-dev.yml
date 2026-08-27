@@ -164,6 +164,24 @@ jobs:
       - name: Configure kubeconfig
         run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER_NAME" --alias "$EKS_CLUSTER_NAME"
 
+      - name: Load Zoom webhook secret from 1Password
+        uses: 1password/load-secrets-action@dafbe7cb03502b260e2b2893c753c352eee545bf # v3
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          ZOOM_WEBHOOK_SECRET: op://Centaur/ZOOM_WEBHOOK_SECRET/credential
+
+      - name: Configure Zoom webhook secret
+        run: |
+          test -n "$ZOOM_WEBHOOK_SECRET"
+          jq --null-input \
+            --arg zoom_webhook_secret "$ZOOM_WEBHOOK_SECRET" \
+            '{stringData: {ZOOM_WEBHOOK_SECRET: $zoom_webhook_secret}}' \
+            | kubectl --namespace "$HELM_NAMESPACE" patch secret centaur-infra-env \
+                --type merge \
+                --patch-file /dev/stdin
+
       - name: Configure Console secrets
         env:
           IRON_CONTROL_INITIAL_API_KEY: ${{ secrets.IRON_CONTROL_INITIAL_API_KEY }}
@@ -206,8 +224,18 @@ jobs:
           print(urlunsplit((parsed.scheme, userinfo + "@" + host, "", parsed.query, parsed.fragment)))
           PY
           )"
+          scheduler_database_url="$(
+            DATABASE_URL="$iron_control_database_url" python3 - <<'PY'
+          import os
+          from urllib.parse import urlsplit, urlunsplit
+
+          parsed = urlsplit(os.environ["DATABASE_URL"])
+          print(urlunsplit((parsed.scheme, parsed.netloc, "/ai_v2", parsed.query, parsed.fragment)))
+          PY
+          )"
           jq --null-input \
             --arg database_url "$iron_control_database_url" \
+            --arg scheduler_database_url "$scheduler_database_url" \
             --arg api_key "$IRON_CONTROL_INITIAL_API_KEY" \
             --arg email "$IRON_CONTROL_INITIAL_USER_EMAIL" \
             --arg password "$IRON_CONTROL_INITIAL_USER_PASSWORD" \
@@ -220,6 +248,7 @@ jobs:
             '{
               stringData: {
                 IRON_CONTROL_DATABASE_URL: $database_url,
+                CENTAUR_POSTGRES_DSN: $scheduler_database_url,
                 IRON_CONTROL_INITIAL_API_KEY: $api_key,
                 IRON_CONTROL_INITIAL_USER_EMAIL: $email,
                 IRON_CONTROL_INITIAL_USER_PASSWORD: $password,
@@ -383,6 +412,15 @@ jobs:
             --source-refs '{"GOOGLE_TOKEN_JSON":"op://Centaur/GOOGLE_TOKEN_JSON/credential","MEETING_OPS_SCRIPT_ID":"op://Centaur/MEETING_OPS_SCRIPT_ID/credential"}' \
             principals grant workflow-meeting-automation --tool meeting_ops
 
+          # The same durable workflow principal owns the narrower Calendar +
+          # Zoom scheduler. Its Zoom bearer is supplied by the Console-managed
+          # broker credential; no static access token is stored in Kubernetes.
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            principals grant workflow-meeting-automation --tool meeting_scheduler
+
           # Remove both historical operator-principal variants now that the
           # workflow owns execution. Revocation is idempotent.
           kubectl --namespace "$HELM_NAMESPACE" exec \
@@ -460,6 +498,24 @@ jobs:
           grep -Fq 'oauth_token OAuth refresh_token' <<<"$principal_state"
           grep -Fq 'static MEETING_OPS_SCRIPT_ID' <<<"$principal_state"
           grep -Fq '  MEETING_OPS_SCRIPT_ID' <<<"$principal_state"
+          grep -Fq 'tool-meeting-scheduler (' <<<"$principal_state"
+          grep -Fq 'static ZOOM_ACCESS_TOKEN' <<<"$principal_state"
+
+          postgres_state="$(kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            secrets show centaur-postgres)"
+          grep -Fq '"source_type": "env"' <<<"$postgres_state"
+          grep -Fq '"var": "CENTAUR_POSTGRES_DSN"' <<<"$postgres_state"
+
+          zoom_state="$(kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            secrets show tool-meeting-scheduler-zoom-access-token)"
+          grep -Fq '"source_type": "token_broker"' <<<"$zoom_state"
+          grep -Fq '"credential_id": "zoom-orbie-general-oauth"' <<<"$zoom_state"
 
           role_state="$(kubectl --namespace "$HELM_NAMESPACE" exec \
             deployment/centaur-centaur-api-rs -- \
