@@ -1335,7 +1335,11 @@ async function syncThreadMessageToSession(
     provider: shouldStartExecution ? resolvedProvider : undefined,
     reasoning: resolvedReasoning,
     restartOnHarnessConflict:
-      shouldStartExecution && rolloutSelected ? Boolean(resolvedHarnessType) : undefined,
+      shouldStartExecution
+        ? rolloutSelected
+          ? Boolean(resolvedHarnessType)
+          : Boolean(explicitOverrides.harnessType)
+        : undefined,
     onEventId: eventId => {
       lastEventId = Math.max(lastEventId, eventId)
     },

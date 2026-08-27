@@ -74,7 +74,7 @@ export type SlackbotV2AppendMessagesRequest = {
 export type SlackbotV2CreateSessionRequest = {
   harness_type: string
   metadata: JsonObject
-  /** 'restart': switch the thread to harness_type if it's pinned to another harness. */
+  /** 'restart': replace the thread sandbox on harness_type, even if unchanged. */
   on_harness_conflict?: 'reject' | 'restart'
 }
 

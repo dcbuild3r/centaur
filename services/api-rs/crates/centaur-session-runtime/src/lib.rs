@@ -315,14 +315,15 @@ pub enum SandboxWorkloadMode {
     },
 }
 
-/// What to do when a session already exists with a different harness.
+/// What to do when a session already exists.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HarnessConflictPolicy {
     /// Fail with [`SessionStoreError::HarnessConflict`] (the default).
     Reject,
-    /// Restart the thread on the requested harness: stop the old sandbox,
-    /// clear the harness thread state, and switch the session row over. The
-    /// new harness starts with no conversational memory.
+    /// Restart the thread on the requested harness, even when it is already
+    /// using that harness: stop the old sandbox, clear the harness thread
+    /// state, and switch the session row over. The new harness starts with no
+    /// conversational memory.
     Restart,
 }
 
@@ -330,7 +331,7 @@ pub enum HarnessConflictPolicy {
 #[derive(Clone, Debug)]
 pub struct CreateOrGetSessionOutcome {
     pub session: Session,
-    /// True when the session was restarted onto a different harness because
+    /// True when the session was restarted on the requested harness because
     /// the request asked for [`HarnessConflictPolicy::Restart`].
     pub harness_switched: bool,
 }
@@ -1514,7 +1515,12 @@ impl SessionRuntime {
             if let Some(context) = persona_resolution.context.as_ref() {
                 add_persona_metadata(&mut session_metadata, context);
             }
-            match self
+            let session_existed = match self.store.get_session(thread_key).await {
+                Ok(_) => true,
+                Err(SessionStoreError::NotFound { .. }) => false,
+                Err(error) => return Err(error.into()),
+            };
+            let session = match self
                 .store
                 .create_or_get_session(
                     thread_key,
@@ -1550,6 +1556,15 @@ impl SessionRuntime {
                 }
                 Err(error) => return Err(error.into()),
             };
+            if session_existed
+                && on_harness_conflict == HarnessConflictPolicy::Restart
+                && !harness_switched
+            {
+                let previous_harness = session.harness_type.to_string();
+                self.restart_session_on_harness(thread_key, harness_type, &previous_harness)
+                    .await?;
+                harness_switched = true;
+            }
             // Persist the principal OID on the session row so a resumed session
             // can recreate its sandbox after a restart without re-deriving it.
             // Existing sessions are immutable at this boundary: changing their

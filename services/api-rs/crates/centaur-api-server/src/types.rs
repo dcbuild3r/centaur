@@ -10,10 +10,11 @@ pub struct CreateSessionRequest {
     pub harness_type: HarnessType,
     pub persona_id: Option<String>,
     pub metadata: Option<Value>,
-    /// What to do when the session already exists on a different harness.
-    /// Omitted or `reject`: fail with 409. `restart`: stop the old sandbox and
-    /// restart the thread on the requested harness (the new harness starts
-    /// with no conversational memory).
+    /// What to do when the session already exists. Omitted or `reject`: fail
+    /// with 409 only when the requested harness differs. `restart`: stop the
+    /// old sandbox and restart the thread on the requested harness, including
+    /// when it already uses that harness (the new harness starts with no
+    /// conversational memory).
     #[serde(default)]
     pub on_harness_conflict: Option<OnHarnessConflict>,
 }
@@ -29,7 +30,7 @@ pub enum OnHarnessConflict {
 pub struct CreateSessionResponse {
     #[serde(flatten)]
     pub session: Session,
-    /// True when this request restarted the thread onto a different harness.
+    /// True when this request restarted the thread on the requested harness.
     pub harness_switched: bool,
 }
 

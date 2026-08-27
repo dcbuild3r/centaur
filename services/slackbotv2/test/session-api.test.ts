@@ -780,14 +780,27 @@ describe('forwardToSessionApi overrides', () => {
 })
 
 describe('forwardToSessionApi harness restart', () => {
-  test('explicit harness override requests restart on conflict', async () => {
+  test('explicit harness override requests a sandbox restart', async () => {
     const { fetchFn, requests } = fakeApi()
     await forwardToSessionApi(
       options(fetchFn),
-      forwardInput(apiMessage('switch me'), { harnessType: 'codex' })
+      forwardInput(apiMessage('switch me'), {
+        harnessType: 'codex',
+        restartOnHarnessConflict: true
+      })
     )
     const create = requests.find(request => request.url.endsWith('.000100'))
     expect((create?.body as { on_harness_conflict?: string }).on_harness_conflict).toBe('restart')
+  })
+
+  test('sticky harness reuse does not request another sandbox restart', async () => {
+    const { fetchFn, requests } = fakeApi()
+    await forwardToSessionApi(
+      options(fetchFn),
+      forwardInput(apiMessage('keep going'), { harnessType: 'codex' })
+    )
+    const create = requests.find(request => request.url.endsWith('.000100'))
+    expect('on_harness_conflict' in (create?.body as object)).toBe(false)
   })
 
   test('default create does not request restart', async () => {

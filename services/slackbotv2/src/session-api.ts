@@ -901,14 +901,15 @@ async function createSession(
   harnessAssignment?: SlackbotV2HarnessAssignment
 ): Promise<CreateSessionOutcome> {
   const requested = harnessType ?? options.defaultHarnessType ?? DEFAULT_HARNESS_TYPE
-  // A sticky --claude/--amp/--codex/--nanocodex selection restarts a thread
-  // pinned to another harness; the implicit default never forces a switch.
+  // Only the current message's explicit selector (or rollout policy) may
+  // restart a session. A persisted sticky harness is passed as `harnessType`
+  // on later turns but must keep reusing its sandbox.
   const response = await postCreateSession(
     options,
     threadId,
     requested,
     message,
-    (restartOnHarnessConflict ?? Boolean(harnessType)) ? 'restart' : undefined,
+    restartOnHarnessConflict ? 'restart' : undefined,
     harnessAssignment
   )
   if (response.ok) {
