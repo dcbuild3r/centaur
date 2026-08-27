@@ -35,6 +35,7 @@ describe('fixed-time meeting scheduling ingress', () => {
 
   test('recognizes only unambiguous booking confirmations', () => {
     expect(isMeetingConfirmation('confirm')).toBeTrue()
+    expect(isMeetingConfirmation('confirm\n\nSent using @ChatGPT')).toBeTrue()
     expect(isMeetingConfirmation('yes, book it')).toBeTrue()
     expect(isMeetingConfirmation('looks good')).toBeFalse()
   })
