@@ -543,10 +543,7 @@ async function handleSlackMessageHandoff(
         : null
     if (
       meetingAutomationCommand &&
-      isWorldFoundationMeetingAutomationSurface(
-        message,
-        input.options.meetingAutomationAllowedChannelIds
-      )
+      isWorldFoundationMeetingAutomationSurface(message)
     ) {
       if (
         await handleMeetingAutomationCommand(

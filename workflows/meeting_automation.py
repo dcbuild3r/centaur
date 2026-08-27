@@ -2068,6 +2068,7 @@ async def _resolve_manual_notion_cadence(
     cadence = candidates[0]
     if inp.requester_slack_user_id not in {
         cadence.get("ownerSlackUserId"),
+        *cadence.get("accessSlackUserIds", []),
         *cadence.get("notificationRecipients", []),
     }:
         raise ValueError("manual Notion cadence is not owned by or shared with caller")

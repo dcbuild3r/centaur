@@ -1478,7 +1478,10 @@ class ManualNotionFakeClient(FakeClient):
         return [self.row]
 
     async def notion_users(self):
-        return [{"id": "owner-dc", "person": {"email": "dc.builder@world.org"}}]
+        return [
+            {"id": "owner-primary", "person": {"email": "piotr.piwowarczyk@world.org"}},
+            {"id": "owner-dc", "person": {"email": "dc.builder@world.org"}},
+        ]
 
 
 def test_manual_run_resolves_owner_scoped_draft_notion_cadence(monkeypatch):
@@ -1515,6 +1518,40 @@ def test_manual_run_resolves_owner_scoped_draft_notion_cadence(monkeypatch):
         "dc.builder@world.org",
         "piotr.piwowarczyk@world.org",
     ]
+
+
+def test_manual_run_authorizes_a_secondary_notion_owner(monkeypatch):
+    row = _published_row(
+        **{
+            "Cadence": "Weekly All Hands Call",
+            "Automation ID": "weekly-all-hands-call",
+            "Automation status": "Published",
+            "Owner / DRI": '["user://owner-primary", "user://owner-dc"]',
+            "Notification recipients": "",
+            "Notification emails": "",
+            "Document access": "All World members",
+        }
+    )
+    client = ManualNotionFakeClient(row)
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+
+    result = asyncio.run(
+        meeting_automation.handler(
+            _input(
+                "weekly all hands call",
+                requester_slack_user_id="UDC",
+                requester_slack_email="dc.builder@world.org",
+            ),
+            FakeContext(),
+        )
+    )
+
+    scheduled_call = next(
+        call for call in client.calls if call[0] == "run_scheduled_cadence"
+    )
+    assert scheduled_call[1]["ownerSlackUserId"] == "UPIOTR"
+    assert scheduled_call[1]["accessSlackUserIds"] == ["UDC"]
+    assert result["cadence"]["id"] == "weekly-all-hands-call"
 
 
 def test_scheduled_handler_delivers_channel_message_and_advances_notion_date(

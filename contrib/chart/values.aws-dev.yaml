@@ -79,7 +79,6 @@ console:
 
 slackbotv2:
   enabled: true
-  meetingAutomationAllowedChannelIds: "C0BM12ZNSTT,C0B5Y44QRED"
   # Allow World Foundation members to request deletion of Orbie-authored
   # messages with the configured wastebasket reaction.
   deleteAllowedTeamIds: "TL1HM8UUU"

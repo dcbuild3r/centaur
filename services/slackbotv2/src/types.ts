@@ -155,8 +155,6 @@ export type SlackbotV2Options = {
    * conversation id (SLACKBOTV2_CHANNEL_DEFAULTS). See channel-defaults.ts.
    */
   channelDefaults?: ChannelDefaults
-  /** World Slack channel IDs permitted to dispatch Meeting Ops commands. DMs remain allowed. */
-  meetingAutomationAllowedChannelIds?: readonly string[]
   /** Reaction name that requests deletion of a bot-authored Orbie message. */
   deleteReaction?: string
   /** Explicit Slack user IDs permitted to delete Orbie messages. */

@@ -1148,7 +1148,7 @@ async function resolveRequesterIdentity(
 }
 
 /**
- * Resolve the authenticated Slack requester and existing allowed destination
+ * Resolve the authenticated Slack requester and existing World Slack destination
  * for the meeting-automation broker. The caller never supplies these values
  * in command text; they come from the verified Slack message and profile.
  */
@@ -1158,13 +1158,10 @@ export async function resolveSlackMeetingAutomationRequester(
 ): Promise<SlackMeetingAutomationRequester | null> {
   const channelId = slackConversationId(message)
   const teamId = messageSlackTeamId(message)
-  const channelAllowed = channelId
-    ? options.meetingAutomationAllowedChannelIds?.includes(channelId) === true
-    : false
   if (
     teamId !== WORLD_FOUNDATION_SLACK_TEAM_ID
     || !channelId
-    || (slackConversationKind(channelId) !== 'dm' && !channelAllowed)
+    || !['channel', 'dm'].includes(slackConversationKind(channelId) ?? '')
   ) {
     return null
   }

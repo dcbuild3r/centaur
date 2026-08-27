@@ -611,9 +611,6 @@ slackbotv2:
   deleteAllowedUsers: ""
   deleteAllowedTeamIds: ""
   deleteAllowedChannels: ""
-  # World Slack channel IDs where an @Orbie cadence command may use the durable
-  # Meeting Ops path. DMs remain enabled; channels are denied unless listed.
-  meetingAutomationAllowedChannelIds: ""
   # Per-channel default harness / model / provider / reasoning, keyed by Slack
   # conversation id (the C…/G…/D… id). Each value is an object of optional
   # harness / model / provider / reasoning fields, using the same vocabulary as

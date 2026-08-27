@@ -2978,16 +2978,12 @@ fn validate_meeting_scheduling_request(
         }
         let channel_id = request.slack_channel_id.as_deref().unwrap_or("").trim();
         let is_dm = valid_slack_identifier(channel_id, 'D');
-        let is_allowlisted_channel = ['C', 'G']
+        let is_channel = ['C', 'G']
             .iter()
-            .any(|prefix| valid_slack_identifier(channel_id, *prefix))
-            && meeting_automation_allowed_slack_channels()
-                .iter()
-                .any(|allowed| allowed == channel_id);
-        if !is_dm && !is_allowlisted_channel {
+            .any(|prefix| valid_slack_identifier(channel_id, *prefix));
+        if !is_dm && !is_channel {
             return Err(ApiError::BadRequest(
-                "meeting scheduling must be requested from a Slack DM or an allowlisted channel"
-                    .to_owned(),
+                "meeting scheduling must be requested from a Slack conversation".to_owned(),
             ));
         }
         if !is_dm
@@ -3144,14 +3140,7 @@ fn verify_slack_request_identity(
 fn validate_slack_meeting_automation_request(
     request: SlackMeetingAutomationRunRequest,
 ) -> Result<SlackMeetingAutomationRunRequest, ApiError> {
-    let allowed_channels = meeting_automation_allowed_slack_channels();
-    validate_slack_meeting_automation_request_for_channels(request, &allowed_channels)
-}
-
-fn validate_slack_meeting_automation_request_for_channels(
-    mut request: SlackMeetingAutomationRunRequest,
-    allowed_channels: &[String],
-) -> Result<SlackMeetingAutomationRunRequest, ApiError> {
+    let mut request = request;
     request.cadence_query = request.cadence_query.trim().to_owned();
     request.requester_slack_user_id = request.requester_slack_user_id.trim().to_owned();
     request.requester_slack_team_id = request.requester_slack_team_id.trim().to_owned();
@@ -3177,14 +3166,12 @@ fn validate_slack_meeting_automation_request_for_channels(
         ));
     }
     let is_dm = valid_slack_identifier(&request.slack_channel_id, 'D');
-    let is_allowed_channel = ['C', 'G']
+    let is_channel = ['C', 'G']
         .iter()
-        .any(|prefix| valid_slack_identifier(&request.slack_channel_id, *prefix))
-        && allowed_channels.contains(&request.slack_channel_id);
-    if !is_dm && !is_allowed_channel {
+        .any(|prefix| valid_slack_identifier(&request.slack_channel_id, *prefix));
+    if !is_dm && !is_channel {
         return Err(ApiError::BadRequest(
-            "meeting automation must be requested from a Slack DM or an allowlisted channel"
-                .to_owned(),
+            "meeting automation must be requested from a Slack conversation".to_owned(),
         ));
     }
     if !is_dm && request.slack_thread_ts.is_none() {
@@ -3232,16 +3219,6 @@ fn validate_slack_meeting_automation_request_for_channels(
         ));
     }
     Ok(request)
-}
-
-fn meeting_automation_allowed_slack_channels() -> Vec<String> {
-    env::var("MEETING_AUTOMATION_ALLOWED_SLACK_CHANNEL_IDS")
-        .unwrap_or_default()
-        .split(|character: char| character == ',' || character.is_whitespace())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
 }
 
 fn valid_slack_identifier(value: &str, prefix: char) -> bool {
@@ -3341,7 +3318,7 @@ mod slack_meeting_automation_request_tests {
     }
 
     #[test]
-    fn accepts_allowlisted_channels_and_rejects_other_channels() {
+    fn accepts_world_channels_with_threads_and_rejects_invalid_conversations() {
         let mut channel_request = request();
         channel_request.slack_channel_id = "C123ABC".to_owned();
         assert!(matches!(
@@ -3349,17 +3326,22 @@ mod slack_meeting_automation_request_tests {
             Err(ApiError::BadRequest(_))
         ));
 
-        let mut allowed_channel_request = request();
-        allowed_channel_request.slack_channel_id = "C123ABC".to_owned();
-        allowed_channel_request.slack_thread_ts = Some("1786000000.123456".to_owned());
-        let allowed = vec!["C123ABC".to_owned()];
-        assert!(
-            validate_slack_meeting_automation_request_for_channels(
-                allowed_channel_request,
-                &allowed
-            )
-            .is_ok()
-        );
+        let mut threaded_channel_request = request();
+        threaded_channel_request.slack_channel_id = "C123ABC".to_owned();
+        threaded_channel_request.slack_thread_ts = Some("1786000000.123456".to_owned());
+        assert!(validate_slack_meeting_automation_request(threaded_channel_request).is_ok());
+
+        let mut group_request = request();
+        group_request.slack_channel_id = "G123ABC".to_owned();
+        group_request.slack_thread_ts = Some("1786000000.123456".to_owned());
+        assert!(validate_slack_meeting_automation_request(group_request).is_ok());
+
+        let mut invalid_conversation = request();
+        invalid_conversation.slack_channel_id = "X123ABC".to_owned();
+        assert!(matches!(
+            validate_slack_meeting_automation_request(invalid_conversation),
+            Err(ApiError::BadRequest(_))
+        ));
 
         let mut user_request = request();
         user_request.requester_slack_user_id = "not-a-user".to_owned();

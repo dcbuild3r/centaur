@@ -591,10 +591,6 @@ spec:
               value: {{ $value | quote }}
 {{- end }}
 {{- end }}
-{{- if .Values.slackbotv2.meetingAutomationAllowedChannelIds }}
-            - name: MEETING_AUTOMATION_ALLOWED_SLACK_CHANNEL_IDS
-              value: {{ .Values.slackbotv2.meetingAutomationAllowedChannelIds | quote }}
-{{- end }}
           envFrom:
             - secretRef:
                 name: {{ include "centaur.secretEnvName" . }}
