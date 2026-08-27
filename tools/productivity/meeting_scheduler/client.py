@@ -1207,12 +1207,12 @@ class MeetingSchedulerClient:
                         attendees=attendees,
                         join_url=join_url,
                     )
+                    body["id"] = event_id
                     try:
                         event = (
                             service.events()
                             .insert(
                                 calendarId=organizer_id,
-                                id=event_id,
                                 body=body,
                                 sendUpdates="all",
                             )

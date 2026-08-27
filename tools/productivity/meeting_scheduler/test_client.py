@@ -829,7 +829,8 @@ def test_book_meeting_reuses_deterministic_calendar_id_after_partial_insert(monk
 
     assert result["status"] == "booked"
     assert result["zoomJoinUrl"] == "https://zoom/j/1"
-    event_id = events.insert_calls[0]["id"]
+    assert "id" not in events.insert_calls[0]
+    event_id = events.insert_calls[0]["body"]["id"]
     assert event_id == client.MeetingSchedulerClient._calendar_event_id("cadence:1")
     assert "_" not in event_id
 
