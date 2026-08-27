@@ -259,7 +259,9 @@ def test_notion_tool_client_discovers_marked_private_cadence_databases():
         "row-private-db",
     ]
     assert rows[1]["_cadence_database_id"] == "private-db"
-    assert not any(args.get("database_id") == "unrelated-db" for _, _, args in context.calls)
+    assert not any(
+        args.get("database_id") == "unrelated-db" for _, _, args in context.calls
+    )
 
 
 def _input(query="AI Workstream", **overrides):
@@ -1145,9 +1147,7 @@ def test_notion_cadence_uses_friday_for_a_one_business_day_monday_prep():
 
 
 def test_notion_cadence_preserves_all_owners_for_manual_authorization():
-    row = _published_row(
-        **{"Owner / DRI": '["user://owner-1", "user://owner-2"]'}
-    )
+    row = _published_row(**{"Owner / DRI": '["user://owner-1", "user://owner-2"]'})
     notion_users = [
         *_notion_users(),
         {"id": "owner-2", "person": {"email": "dc.builder@world.org"}},
@@ -1371,6 +1371,9 @@ class ScheduledFakeClient:
         self.drive_permissions = []
         self.bookings = []
         self.booking_updates = []
+        self.post_candidates = []
+        self.post_operations = []
+        self.post_publications = []
 
     async def notion_cadences(self):
         return [self.row]
@@ -1453,6 +1456,24 @@ class ScheduledFakeClient:
 
     async def drive_file_permissions(self, file_id):
         return list(self.drive_permissions)
+
+    async def scheduling_operation(self, operation, args):
+        self.post_operations.append((operation, args))
+        if operation == "post_meeting_candidates":
+            return list(self.post_candidates)
+        if operation == "collect_post_meeting_artifacts":
+            return {
+                "ready": True,
+                "summary_text": "Decisions were made.",
+                "transcript": "WEBVTT\nHello world.",
+            }
+        if operation == "mark_post_meeting_delivered":
+            return {"status": "completed", "occurrenceKey": args["occurrence_key"]}
+        raise AssertionError(operation)
+
+    async def publish_notion_meeting_summary(self, page_id, **kwargs):
+        self.post_publications.append((page_id, kwargs))
+        return {"page_id": page_id, "created": True}
 
 
 class ManualNotionFakeClient(FakeClient):
@@ -1574,6 +1595,42 @@ def test_scheduled_handler_delivers_channel_message_and_advances_notion_date(
     assert "newly created document from the template" in client.sent[0][2]
     assert "<@U0BEQ8M7QSK>" in client.sent[0][2]
     assert client.advanced == [("notion-page-1", "2026-08-24")]
+
+
+def test_scheduled_handler_publishes_zoom_artifacts_and_notifies_participant(
+    monkeypatch,
+):
+    client = ScheduledFakeClient(_published_row())
+    client.post_candidates = [
+        {
+            "occurrence_key": "weekly-sync:2026-08-10",
+            "cadence_id": "weekly-sync",
+            "title": "Weekly Sync",
+            "actual_start": "2026-08-10T08:00:00+00:00",
+            "zoom_meeting_id": "123",
+            "attendee_emails": ["mandy.payne@world.org"],
+        }
+    ]
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+
+    result = asyncio.run(
+        meeting_automation.handler(
+            meeting_automation.Input(
+                now="2026-08-14T07:15:00Z",
+                metadata={"source": "workflow_schedule"},
+            ),
+            FakeContext(),
+        )
+    )
+
+    assert client.post_publications[0][1]["occurrence_key"] == "weekly-sync:2026-08-10"
+    assert any(
+        kind == "dm" and destination == "U0BEQ8M7QSK"
+        for kind, destination, *_ in client.sent
+    )
+    assert any(kind == "channel" for kind, *_ in client.sent)
+    assert client.post_operations[-1][0] == "mark_post_meeting_delivered"
+    assert result["post_meetings"][0]["status"] == "delivered"
 
 
 def test_auto_book_scheduled_handler_books_before_docs_and_uses_actual_time(

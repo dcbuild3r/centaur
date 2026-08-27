@@ -220,6 +220,17 @@ class MeetingOpsClient(Protocol):
         clear_booking: bool = False,
     ) -> dict[str, Any]: ...
 
+    async def publish_notion_meeting_summary(
+        self,
+        page_id: str,
+        *,
+        occurrence_key: str,
+        title: str,
+        start: str,
+        summary: str,
+        transcript: str,
+    ) -> dict[str, Any]: ...
+
     async def share_drive_file(self, file_id: str, email: str) -> dict[str, Any]: ...
 
     async def drive_file_permissions(self, file_id: str) -> list[dict[str, Any]]: ...
@@ -603,6 +614,38 @@ class MeetingOpsToolClient:
         output = _tool_output(result)
         return output if isinstance(output, dict) else {}
 
+    async def publish_notion_meeting_summary(
+        self,
+        page_id: str,
+        *,
+        occurrence_key: str,
+        title: str,
+        start: str,
+        summary: str,
+        transcript: str,
+    ) -> dict[str, Any]:
+        marker = f"ORBiE_ZOOM_SUMMARY:{occurrence_key}"
+        existing = await self._paginate_notion("block_children", {"block_id": page_id})
+        if any(marker in _notion_block_text(block) for block in existing):
+            return {"page_id": page_id, "marker": marker, "created": False}
+        children = [
+            _notion_heading(f"{title} — {start}", 2),
+            _notion_paragraph(marker),
+            _notion_heading("Zoom summary", 3),
+            *_notion_paragraph_chunks(summary or "Zoom summary was not available."),
+            _notion_heading("Transcript", 3),
+            *_notion_paragraph_chunks(transcript or "Transcript was not available."),
+        ]
+        result = await self._ctx.call_tool(
+            "notion",
+            "append_block_children",
+            {"block_id": page_id, "children": children[:100]},
+        )
+        output = _tool_output(result)
+        if not isinstance(output, dict):
+            raise TypeError("Notion meeting publication returned an unexpected result")
+        return {"page_id": page_id, "marker": marker, "created": True}
+
     async def share_drive_file(self, file_id: str, email: str) -> dict[str, Any]:
         result = await self._ctx.call_tool(
             "gsuite",
@@ -706,6 +749,48 @@ def _same_notion_date_start(left: Any, right: Any) -> bool:
     if right_value.tzinfo is None:
         right_value = right_value.replace(tzinfo=dt.UTC)
     return left_value.astimezone(dt.UTC) == right_value.astimezone(dt.UTC)
+
+
+def _notion_block_text(block: dict[str, Any]) -> str:
+    block_type = str(block.get("type") or "")
+    payload = block.get(block_type)
+    rich_text = payload.get("rich_text") if isinstance(payload, dict) else None
+    if not isinstance(rich_text, list):
+        return ""
+    return "".join(
+        str(item.get("plain_text") or item.get("text", {}).get("content") or "")
+        for item in rich_text
+        if isinstance(item, dict)
+    )
+
+
+def _notion_rich_text(text: str) -> list[dict[str, Any]]:
+    return [{"type": "text", "text": {"content": text}}]
+
+
+def _notion_paragraph(text: str) -> dict[str, Any]:
+    return {
+        "object": "block",
+        "type": "paragraph",
+        "paragraph": {"rich_text": _notion_rich_text(text)},
+    }
+
+
+def _notion_heading(text: str, level: int) -> dict[str, Any]:
+    kind = f"heading_{level}"
+    return {
+        "object": "block",
+        "type": kind,
+        kind: {"rich_text": _notion_rich_text(text)},
+    }
+
+
+def _notion_paragraph_chunks(text: str, size: int = 1800) -> list[dict[str, Any]]:
+    normalized = str(text or "").strip()
+    return [
+        _notion_paragraph(normalized[offset : offset + size])
+        for offset in range(0, len(normalized), size)
+    ] or [_notion_paragraph("")]
 
 
 def _as_bool(value: Any) -> bool:
@@ -929,6 +1014,43 @@ def _emails_for_slack_ids(
     return list(dict.fromkeys(emails))
 
 
+def _slack_ids_for_emails(
+    emails: list[str], slack_users: list[dict[str, Any]]
+) -> tuple[list[str], list[str]]:
+    by_email = {
+        str(user.get("email") or "").strip().lower(): str(user.get("id") or "").strip()
+        for user in slack_users
+        if not user.get("deleted")
+        and not user.get("is_deleted")
+        and not user.get("is_bot")
+        and str(user.get("team_id") or "").strip() == WORLD_SLACK_TEAM_ID
+    }
+    resolved: list[str] = []
+    unresolved: list[str] = []
+    for email in dict.fromkeys(
+        str(value).strip().lower() for value in emails if str(value).strip()
+    ):
+        user_id = by_email.get(email, "")
+        (resolved if user_id else unresolved).append(user_id or email)
+    return list(dict.fromkeys(resolved)), unresolved
+
+
+def _post_meeting_message(
+    title: str, summary: str, transcript: str, notion_url: str = ""
+) -> str:
+    parts = [
+        f"📝 *{title} — meeting follow-up*",
+        summary or "Zoom summary was not available.",
+    ]
+    if notion_url:
+        parts.append(f"Canonical notes and transcript: <{notion_url}|Notion>")
+    elif transcript:
+        excerpt = transcript[:2400]
+        suffix = "\n…" if len(transcript) > len(excerpt) else ""
+        parts.append(f"*Transcript*\n```{excerpt}{suffix}```")
+    return "\n\n".join(parts)[:3900]
+
+
 def _cadence_member_editor_emails(
     owner_ids: list[str],
     recipient_ids: list[str],
@@ -1018,8 +1140,7 @@ async def _ensure_document_editors(
         email
         for email in requested
         if email not in verified
-        and (email.rsplit("@", 1)[-1] if "@" in email else "")
-        not in verified_domains
+        and (email.rsplit("@", 1)[-1] if "@" in email else "") not in verified_domains
     ]
     if missing:
         raise ValueError(
@@ -2125,6 +2246,120 @@ async def _scheduled_handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]
                 }
             )
     by_id = {str(cadence["id"]): cadence for cadence in cadences}
+    post_meetings: list[dict[str, Any]] = []
+    candidates = await ctx.step(
+        f"scheduled:post-meeting-candidates:{now.strftime('%Y%m%d%H%M')}",
+        lambda: client.scheduling_operation(
+            "post_meeting_candidates", {"now": now_iso, "limit": 25}
+        ),
+    )
+    if not isinstance(candidates, list):
+        raise TypeError("meeting scheduler returned invalid post-meeting candidates")
+    for candidate in (item for item in candidates if isinstance(item, dict)):
+        occurrence_key = str(
+            candidate.get("occurrence_key") or candidate.get("occurrenceKey") or ""
+        ).strip()
+        meeting_id = str(
+            candidate.get("zoom_meeting_id") or candidate.get("zoomMeetingId") or ""
+        ).strip()
+        if not occurrence_key or not meeting_id:
+            continue
+        artifacts = await ctx.step(
+            f"scheduled:post-meeting-artifacts:{occurrence_key}",
+            lambda meeting_id=meeting_id: client.scheduling_operation(
+                "collect_post_meeting_artifacts", {"meeting_id": meeting_id}
+            ),
+        )
+        if not isinstance(artifacts, dict) or not artifacts.get("ready"):
+            post_meetings.append(
+                {"occurrence_key": occurrence_key, "status": "processing"}
+            )
+            continue
+        cadence = by_id.get(str(candidate.get("cadence_id") or ""))
+        title = str(candidate.get("title") or (cadence or {}).get("title") or "Meeting")
+        start = str(
+            candidate.get("actual_start") or candidate.get("requested_start") or ""
+        )
+        summary = str(artifacts.get("summary_text") or "").strip()
+        transcript = str(artifacts.get("transcript") or "").strip()
+        notion_page_id = str((cadence or {}).get("_page_id") or "")
+        notion_url = ""
+        if notion_page_id:
+            await ctx.step(
+                f"scheduled:post-meeting-notion:{occurrence_key}",
+                lambda notion_page_id=notion_page_id, occurrence_key=occurrence_key, title=title, start=start, summary=summary, transcript=transcript: (
+                    client.publish_notion_meeting_summary(
+                        notion_page_id,
+                        occurrence_key=occurrence_key,
+                        title=title,
+                        start=start,
+                        summary=summary,
+                        transcript=transcript,
+                    )
+                ),
+            )
+            notion_url = f"https://www.notion.so/{notion_page_id.replace('-', '')}"
+        attendee_ids, unresolved = _slack_ids_for_emails(
+            list(candidate.get("attendee_emails") or []), slack_users
+        )
+        delivered_to: list[str] = []
+        message = _post_meeting_message(title, summary, transcript, notion_url)
+        for user_id in attendee_ids:
+            await ctx.step(
+                f"scheduled:post-meeting-dm:{occurrence_key}:{user_id}",
+                lambda user_id=user_id, message=message, occurrence_key=occurrence_key: (
+                    client.send_slack_dm(
+                        user_id,
+                        message,
+                        client_msg_id=_notification_client_id(
+                            f"post-meeting:{occurrence_key}:{user_id}"
+                        ),
+                    )
+                ),
+            )
+            delivered_to.append(user_id)
+        if (
+            cadence
+            and cadence.get("visibility") == "public"
+            and cadence.get("notifyChannel")
+        ):
+            channel_id = str(cadence["notifyChannel"])
+            await ctx.step(
+                f"scheduled:post-meeting-channel:{occurrence_key}:{channel_id}",
+                lambda channel_id=channel_id, message=message, occurrence_key=occurrence_key: (
+                    client.send_slack_message(
+                        channel_id,
+                        message,
+                        client_msg_id=_notification_client_id(
+                            f"post-meeting:{occurrence_key}:{channel_id}"
+                        ),
+                    )
+                ),
+            )
+            delivered_to.append(channel_id)
+        marked = await ctx.step(
+            f"scheduled:post-meeting-mark:{occurrence_key}",
+            lambda occurrence_key=occurrence_key, notion_page_id=notion_page_id, delivered_to=delivered_to: (
+                client.scheduling_operation(
+                    "mark_post_meeting_delivered",
+                    {
+                        "occurrence_key": occurrence_key,
+                        "notion_page_id": notion_page_id or None,
+                        "delivered_to": delivered_to,
+                    },
+                )
+            ),
+        )
+        post_meetings.append(
+            {
+                "occurrence_key": occurrence_key,
+                "status": "delivered",
+                "notion_page_id": notion_page_id or None,
+                "delivered_to": delivered_to,
+                "unresolved_attendee_emails": unresolved,
+                "marked": bool(marked),
+            }
+        )
     due = [
         cadence
         for cadence in cadences
@@ -2360,6 +2595,7 @@ async def _scheduled_handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]
         "delivered": delivered,
         "advanced": advanced,
         "invalid": invalid,
+        "post_meetings": post_meetings,
     }
 
 

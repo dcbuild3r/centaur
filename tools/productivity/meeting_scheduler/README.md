@@ -20,6 +20,19 @@ recording; `get_recording` returns bounded transcript content and `get_summary`
 returns the AI Companion summary after Zoom has finished processing, without
 exposing signed provider URLs.
 
+The scheduled workflow also polls ended booked occurrences until both Zoom's
+processed summary and cloud-recording transcript are ready. It publishes the
+summary and bounded transcript to the cadence's
+existing Notion page, using an `ORBiE_ZOOM_SUMMARY:<occurrence_key>` marker so
+retries cannot append duplicates. It then DMs attendee emails that resolve to
+active World Slack users. Public cadences additionally announce the canonical
+Notion page in their configured channel; private cadence access is never
+broadened. Ad-hoc meetings receive the bounded transcript excerpt in Slack
+because they have no cadence page. Delivery is marked complete only after all
+required publication and Slack sends succeed. Missing or still-processing Zoom
+artifacts remain retryable, and unresolved attendee emails are reported rather
+than sent to a broader audience.
+
 Client credentials and token material must not appear in a cadence, skill,
 Slack message, repository, Terraform state, or runtime environment variable.
 Live activation also requires the Calendar free/busy/event scopes, the

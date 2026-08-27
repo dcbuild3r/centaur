@@ -41,9 +41,7 @@ def test_zoom_create_defaults_to_orbie_and_cloud_recording(monkeypatch):
 
 def test_zoom_create_only_delegates_through_operator_allowlist(monkeypatch):
     monkeypatch.setenv("MEETING_ZOOM_HOST_USER_ID", "orbie@world.org")
-    monkeypatch.setenv(
-        "MEETING_ZOOM_SCHEDULE_FOR_USERS", json.dumps({"wf": "delegate@world.org"})
-    )
+    monkeypatch.setenv("MEETING_ZOOM_SCHEDULE_FOR_USERS", json.dumps({"wf": "delegate@world.org"}))
     scheduler = client.MeetingSchedulerClient()
     calls = []
     monkeypatch.setattr(
@@ -106,13 +104,15 @@ def test_get_summary_uses_zoom_summary_endpoint_and_strips_signed_urls(monkeypat
     monkeypatch.setattr(
         scheduler,
         "_zoom_request",
-        lambda method, path, **_kwargs: calls.append((method, path))
-        or {
-            "meeting_id": "123",
-            "meeting_summary": "Decisions were made.",
-            "next_steps": ["Ship it"],
-            "share_url": "https://zoom.us/private/signed",
-        },
+        lambda method, path, **_kwargs: (
+            calls.append((method, path))
+            or {
+                "meeting_id": "123",
+                "meeting_summary": "Decisions were made.",
+                "next_steps": ["Ship it"],
+                "share_url": "https://zoom.us/private/signed",
+            }
+        ),
     )
 
     result = scheduler.get_summary("123")
@@ -121,6 +121,66 @@ def test_get_summary_uses_zoom_summary_endpoint_and_strips_signed_urls(monkeypat
     assert result["meeting_summary"] == "Decisions were made."
     assert result["next_steps"] == ["Ship it"]
     assert "share_url" not in result
+
+
+def test_collect_post_meeting_artifacts_is_ready_with_transcript_and_summary(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+    monkeypatch.setattr(
+        scheduler,
+        "get_recording",
+        lambda _meeting_id: {
+            "transcript_status": "ready",
+            "transcript": "WEBVTT\nHello world.",
+            "recording_files": [{"id": "file-1", "file_type": "TRANSCRIPT"}],
+        },
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "get_summary",
+        lambda _meeting_id: {"meeting_summary": "Decisions were made."},
+    )
+
+    result = scheduler.collect_post_meeting_artifacts("123")
+
+    assert result["ready"] is True
+    assert result["transcript"] == "WEBVTT\nHello world."
+    assert result["summary_text"] == "Decisions were made."
+    assert result["processing_errors"] == []
+
+
+def test_collect_post_meeting_artifacts_waits_for_both_artifacts(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+    monkeypatch.setattr(
+        scheduler,
+        "get_recording",
+        lambda _meeting_id: {
+            "transcript_status": "ready",
+            "transcript": "WEBVTT\nHello world.",
+            "recording_files": [],
+        },
+    )
+    monkeypatch.setattr(scheduler, "get_summary", lambda _meeting_id: {})
+
+    assert scheduler.collect_post_meeting_artifacts("123")["ready"] is False
+
+
+def test_collect_post_meeting_artifacts_retries_provider_processing(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+
+    def pending(_meeting_id):
+        raise client.MeetingSchedulerError("Zoom artifact is still processing")
+
+    monkeypatch.setattr(scheduler, "get_recording", pending)
+    monkeypatch.setattr(scheduler, "get_summary", pending)
+
+    result = scheduler.collect_post_meeting_artifacts("123")
+
+    assert result["ready"] is False
+    assert result["transcript_status"] == "pending"
+    assert len(result["processing_errors"]) == 2
 
 
 def test_find_availability_uses_freebusy_only_and_returns_slots(monkeypatch):
@@ -523,6 +583,7 @@ def test_ad_hoc_retry_rejects_parameter_drift(monkeypatch):
             return Freebusy()
 
     monkeypatch.setattr(client, "get_calendar_service", lambda: FakeService())
+
     class Connection:
         async def execute(self, *_args):
             return None
@@ -590,9 +651,7 @@ def test_cadence_reconciliation_allows_provider_bound_parameter_updates(monkeypa
             cadence_id="cadence-1",
             request_id="cadence:1",
             title="Updated",
-            requested_start=client._parse_rfc3339(
-                "2099-08-17T10:00:00Z", field="requested_start"
-            ),
+            requested_start=client._parse_rfc3339("2099-08-17T10:00:00Z", field="requested_start"),
             duration=45,
             time_zone="Europe/Prague",
             organizer_key="wf",
