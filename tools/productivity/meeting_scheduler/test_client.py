@@ -13,7 +13,7 @@ async def _async_value(value):
     return value
 
 
-def test_zoom_create_defaults_to_orbie_and_cloud_recording(monkeypatch):
+def test_zoom_create_defaults_to_orbie_join_anytime_and_cloud_recording(monkeypatch):
     monkeypatch.setenv("MEETING_ZOOM_HOST_USER_ID", "orbie@world.org")
     monkeypatch.setenv("MEETING_ZOOM_SCHEDULE_FOR_USERS", "{}")
     scheduler = client.MeetingSchedulerClient()
@@ -35,7 +35,13 @@ def test_zoom_create_defaults_to_orbie_and_cloud_recording(monkeypatch):
 
     payload = calls[0][2]["payload"]
     assert calls[0][1] == "/users/orbie@world.org/meetings"
-    assert payload["settings"]["auto_recording"] == "cloud"
+    assert payload["settings"] == {
+        "auto_recording": "cloud",
+        "join_before_host": True,
+        "jbh_time": 0,
+        "meeting_authentication": False,
+        "waiting_room": False,
+    }
     assert "schedule_for" not in payload
 
 
