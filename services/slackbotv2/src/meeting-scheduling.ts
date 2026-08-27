@@ -23,7 +23,8 @@ const BOOKING_TTL_MS = 30 * 60 * 1000
 const EMAIL = /\b[A-Z0-9._%+-]+@world\.org\b/gi
 
 export function isMeetingConfirmation(text: string): boolean {
-  return /^(?:confirm|yes,?\s*(?:book|schedule)\s+it|book\s+it|schedule\s+it)[.!]?$/i.test(text.trim())
+  const clean = text.replace(/\s*Sent using @ChatGPT\s*$/i, '').trim()
+  return /^(?:confirm|yes,?\s*(?:book|schedule)\s+it|book\s+it|schedule\s+it)[.!]?$/i.test(clean)
 }
 
 export function parseFixedTimeMeetingRequest(
