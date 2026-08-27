@@ -548,7 +548,13 @@ async function handleSlackMessageHandoff(
     if (
       input.mode === 'execute'
       && isWorldFoundationMeetingAutomationSurface(message)
-      && await handleMeetingSchedulingMessage(thread, message, input.options, trace)
+      && await handleMeetingSchedulingMessage(
+        thread,
+        message,
+        input.options,
+        input.state,
+        trace
+      )
     ) {
       return
     }
@@ -622,18 +628,27 @@ async function handleMeetingSchedulingMessage(
   thread: Thread<SlackbotV2ThreadState>,
   message: ChatMessage,
   options: SlackbotV2Options,
+  state: StateAdapter,
   trace: SlackbotV2Trace
 ): Promise<boolean> {
-  const current = (await thread.state) ?? {}
-  const pending = current.pendingMeetingBooking as PendingMeetingBooking | undefined
+  const serialized = await serializeMessage(message, options)
+  const requester = await resolveSlackMeetingAutomationRequester(options, serialized)
+  if (!requester?.slackEmail) return false
+  const pendingKey = [
+    'slackbotv2:pending-meeting-booking',
+    requester.slackTeamId,
+    requester.slackChannelId,
+    requester.slackUserId
+  ].join(':')
   if (isMeetingConfirmation(message.text)) {
+    const pending = await state.get<PendingMeetingBooking>(pendingKey)
     if (!pending || Number(pending.expiresAtMs) <= Date.now()) return false
     const response = await dispatchConfirmedMeetingBooking(options, message, pending)
     if (!response) {
       await thread.post("I couldn't verify that this confirmation came from the meeting owner, so nothing was booked.")
       return true
     }
-    await thread.setState({ pendingMeetingBooking: null })
+    await state.delete(pendingKey)
     await thread.post('Meeting booking queued. I’ll post the Calendar and Zoom result here.')
     traceLog(options, 'slackbotv2_meeting_booking_queued', trace, {
       run_id: stringValue(response.run_id)
@@ -641,12 +656,13 @@ async function handleMeetingSchedulingMessage(
     return true
   }
 
-  const serialized = await serializeMessage(message, options)
-  const requester = await resolveSlackMeetingAutomationRequester(options, serialized)
-  if (!requester?.slackEmail) return false
   const booking = parseFixedTimeMeetingRequest(message.text, requester.slackEmail)
   if (!booking) return false
-  await thread.setState({ pendingMeetingBooking: booking as unknown as JsonObject })
+  await state.set(
+    pendingKey,
+    booking,
+    Math.max(1, booking.expiresAtMs - Date.now())
+  )
   await thread.post(meetingBookingPreview(booking))
   traceLog(options, 'slackbotv2_meeting_booking_confirmation_requested', trace)
   return true
