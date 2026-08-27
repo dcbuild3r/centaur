@@ -1117,14 +1117,18 @@ async def _ensure_document_editors(
         if str(permission.get("role") or "").strip() in editor_roles
         and str(permission.get("type") or "").strip() == "domain"
     }
+    granted_permission_ids: dict[str, str] = {}
     for email in requested:
         email_domain = email.rsplit("@", 1)[-1] if "@" in email else ""
         if email in writers or email_domain in writer_domains:
             continue
-        await ctx.step(
+        grant = await ctx.step(
             f"{step_prefix}:share_drive_file:{email}",
             lambda email=email: client.share_drive_file(file_id, email),
         )
+        permission_id = str(grant.get("id") or "").strip()
+        if permission_id:
+            granted_permission_ids[permission_id] = email
     after = await ctx.step(
         f"{step_prefix}:list_drive_permissions:after",
         lambda: client.drive_file_permissions(file_id),
@@ -1136,6 +1140,17 @@ async def _ensure_document_editors(
         for permission in after
         if str(permission.get("role") or "").strip() in editor_roles
     }
+    # Shared Drive permission listings may omit ``emailAddress`` for inherited
+    # members. Correlate those rows with the permission ID returned by the
+    # successful share call so verification remains strict without depending
+    # on an email field Google does not always return.
+    verified.update(
+        granted_permission_ids[permission_id]
+        for permission in after
+        if (permission_id := str(permission.get("id") or "").strip())
+        in granted_permission_ids
+        and str(permission.get("role") or "").strip() in editor_roles
+    )
     verified_domains = {
         str(permission.get("domain") or "").strip().lower()
         for permission in after

@@ -987,6 +987,31 @@ def test_shared_drive_roles_verify_document_editors_without_resharing():
     assert [call for call in client.calls if call[0] == "drive_share"] == []
 
 
+def test_shared_drive_permission_id_verifies_editor_when_email_is_omitted():
+    class SharedDriveClient(FakeClient):
+        async def share_drive_file(self, file_id, email):
+            self.calls.append(("drive_share", file_id, email))
+            self.drive_permissions = [
+                {"id": "permission-1", "type": "user", "role": "fileOrganizer"}
+            ]
+            return {"id": "permission-1", "email": email, "role": "writer"}
+
+    client = SharedDriveClient([])
+
+    verified = asyncio.run(
+        meeting_automation._ensure_document_editors(
+            FakeContext(),
+            client,
+            step_prefix="shared-drive-id-access",
+            run_result={"docId": "doc-1"},
+            emails=["dc.builder@world.org"],
+        )
+    )
+
+    assert verified == ["dc.builder@world.org"]
+    assert ("drive_share", "doc-1", "dc.builder@world.org") in client.calls
+
+
 def test_manual_private_delivery_rejects_malformed_acknowledgement(monkeypatch):
     client = MalformedAcknowledgementClient(
         [{"id": "private-ai", "title": "AI Workstream", "visibility": "private"}],
