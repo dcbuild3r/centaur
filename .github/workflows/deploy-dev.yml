@@ -383,6 +383,15 @@ jobs:
             --source-refs '{"GOOGLE_TOKEN_JSON":"op://Centaur/GOOGLE_TOKEN_JSON/credential","MEETING_OPS_SCRIPT_ID":"op://Centaur/MEETING_OPS_SCRIPT_ID/credential"}' \
             principals grant workflow-meeting-automation --tool meeting_ops
 
+          # The same durable workflow principal owns the narrower Calendar +
+          # Zoom scheduler. Its Zoom bearer is supplied by the Console-managed
+          # broker credential; no static access token is stored in Kubernetes.
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            principals grant workflow-meeting-automation --tool meeting_scheduler
+
           # Remove both historical operator-principal variants now that the
           # workflow owns execution. Revocation is idempotent.
           kubectl --namespace "$HELM_NAMESPACE" exec \
@@ -460,6 +469,16 @@ jobs:
           grep -Fq 'oauth_token OAuth refresh_token' <<<"$principal_state"
           grep -Fq 'static MEETING_OPS_SCRIPT_ID' <<<"$principal_state"
           grep -Fq '  MEETING_OPS_SCRIPT_ID' <<<"$principal_state"
+          grep -Fq 'tool-meeting-scheduler (' <<<"$principal_state"
+          grep -Fq 'static ZOOM_ACCESS_TOKEN' <<<"$principal_state"
+
+          zoom_state="$(kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            secrets show tool-meeting-scheduler-zoom-access-token)"
+          grep -Fq '"source_type": "token_broker"' <<<"$zoom_state"
+          grep -Fq '"credential_id": "zoom-orbie-general-oauth"' <<<"$zoom_state"
 
           role_state="$(kubectl --namespace "$HELM_NAMESPACE" exec \
             deployment/centaur-centaur-api-rs -- \

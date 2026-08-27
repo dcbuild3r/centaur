@@ -21,6 +21,10 @@ apiRs:
   opVault: Centaur
   sandboxReadyTimeoutSecs: 240
   sandboxWarmPoolSize: 3
+  meetingScheduler:
+    enabled: true
+    zoomHostUserId: orbie-automation@world.org
+    zoomScheduleForUsers: "{}"
   extraEnv:
     MEETING_OPS_SCHEDULER_ENABLED: "true"
     MEETING_OPS_SCHEDULER_CRON: "*/15 * * * *"
