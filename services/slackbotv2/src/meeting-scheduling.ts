@@ -13,6 +13,7 @@ export type PendingMeetingBooking = {
   durationMinutes: number
   expiresAtMs: number
   occurrenceKey: string
+  organizerCalendarKey: string
   organizerEmail: string
   start: string
   timeZone: string
@@ -30,7 +31,8 @@ export function isMeetingConfirmation(text: string): boolean {
 export function parseFixedTimeMeetingRequest(
   text: string,
   requesterEmail: string,
-  now = new Date()
+  now = new Date(),
+  organizerCalendarKey = process.env.MEETING_MANUAL_ORGANIZER_CALENDAR_KEY ?? ''
 ): PendingMeetingBooking | null {
   const clean = text.replace(/^\s*(?:<@[A-Z0-9]+(?:\|[^>]*)?>|@orbie)\s*/i, '').trim()
   if (!/^(?:schedule|book|create)\b/i.test(clean) || !/\bmeeting\b/i.test(clean)) return null
@@ -59,6 +61,8 @@ export function parseFixedTimeMeetingRequest(
 
   const emails = Array.from(clean.matchAll(EMAIL), match => match[0].toLowerCase())
   const organizerEmail = requesterEmail.trim().toLowerCase()
+  organizerCalendarKey = organizerCalendarKey.trim()
+  if (!organizerCalendarKey) return null
   const attendeeEmails = Array.from(new Set([organizerEmail, ...emails]))
   if (!attendeeEmails.every(email => /^[^@\s]+@world\.org$/i.test(email))) return null
   return {
@@ -66,6 +70,7 @@ export function parseFixedTimeMeetingRequest(
     durationMinutes,
     expiresAtMs: now.getTime() + BOOKING_TTL_MS,
     occurrenceKey: `slack:${randomUUID()}`,
+    organizerCalendarKey,
     organizerEmail,
     start,
     timeZone,
@@ -78,7 +83,8 @@ export function meetingBookingPreview(booking: PendingMeetingBooking): string {
     'Please confirm this real meeting booking:',
     `• ${booking.title}`,
     `• ${booking.start} (${booking.timeZone}), ${booking.durationMinutes} minutes`,
-    `• Owner: ${booking.organizerEmail}`,
+    `• Requested by: ${booking.organizerEmail}`,
+    '• Organizer: Orbie Automation',
     `• Attendees: ${booking.attendeeEmails.join(', ')}`,
     '• World Foundation Zoom with automatic cloud recording',
     '',
@@ -119,7 +125,7 @@ function slotConfirmationToken(booking: PendingMeetingBooking): string {
   const payload = JSON.stringify({
     attendees: [...new Set(booking.attendeeEmails)].sort(),
     duration: booking.durationMinutes,
-    organizer: booking.organizerEmail,
+    organizer: booking.organizerCalendarKey,
     start: booking.start,
     time_zone: booking.timeZone
   })
