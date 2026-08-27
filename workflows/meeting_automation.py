@@ -1089,6 +1089,11 @@ async def _ensure_document_editors(
 ) -> list[str]:
     """Grant and verify writer access through Orbie's authenticated GSuite tool."""
 
+    # Shared Drives report members who can edit content as ``fileOrganizer``
+    # (Content manager) or ``organizer`` (Manager), rather than ``writer``.
+    # All four roles below have sufficient access to edit a Google document.
+    editor_roles = {"writer", "fileOrganizer", "organizer", "owner"}
+
     requested = list(
         dict.fromkeys(email.strip().lower() for email in emails if email.strip())
     )
@@ -1104,12 +1109,12 @@ async def _ensure_document_editors(
         .strip()
         .lower()
         for permission in before
-        if str(permission.get("role") or "").strip() in {"writer", "owner"}
+        if str(permission.get("role") or "").strip() in editor_roles
     }
     writer_domains = {
         str(permission.get("domain") or "").strip().lower()
         for permission in before
-        if str(permission.get("role") or "").strip() in {"writer", "owner"}
+        if str(permission.get("role") or "").strip() in editor_roles
         and str(permission.get("type") or "").strip() == "domain"
     }
     for email in requested:
@@ -1129,12 +1134,12 @@ async def _ensure_document_editors(
         .strip()
         .lower()
         for permission in after
-        if str(permission.get("role") or "").strip() in {"writer", "owner"}
+        if str(permission.get("role") or "").strip() in editor_roles
     }
     verified_domains = {
         str(permission.get("domain") or "").strip().lower()
         for permission in after
-        if str(permission.get("role") or "").strip() in {"writer", "owner"}
+        if str(permission.get("role") or "").strip() in editor_roles
         and str(permission.get("type") or "").strip() == "domain"
     }
     missing = [
