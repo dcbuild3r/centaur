@@ -135,14 +135,16 @@ class FakeContext:
     def __init__(self):
         self.step_names = []
         self.posts = []
+        self.post_details = []
 
     async def step(self, name, fn, **_kwargs):
         self.step_names.append(name)
         value = fn()
         return await value if inspect.isawaitable(value) else value
 
-    async def post_to_slack(self, channel, text, **_kwargs):
+    async def post_to_slack(self, channel, text, **kwargs):
         self.posts.append((channel, text))
+        self.post_details.append((channel, text, kwargs))
         return {"sent": True, "channel": channel}
 
 
@@ -682,7 +684,7 @@ def test_private_cadence_delivers_and_acknowledges_only_callers_item(monkeypatch
     result = asyncio.run(meeting_automation.handler(_input("private-ai"), context))
 
     assert result["visibility"] == "private"
-    assert context.posts == [("D123456", "Agenda ready")]
+    assert context.posts[-1:] == [("D123456", "Agenda ready")]
     assert [call[0] for call in client.calls] == [
         "authorized_cadences",
         "slack_users",
@@ -699,6 +701,43 @@ def test_private_cadence_delivers_and_acknowledges_only_callers_item(monkeypatch
     ) < context.step_names.index(
         next(name for name in context.step_names if name.startswith("ack_private"))
     )
+
+
+def test_manual_cadence_posts_idempotent_progress_in_request_thread(monkeypatch):
+    client = FakeClient(
+        [{"id": "private-ai", "title": "AI Workstream", "visibility": "private"}],
+        run_result=None,
+        notifications=[],
+    )
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+    context = FakeContext()
+
+    asyncio.run(
+        meeting_automation.handler(
+            _input(
+                "private-ai",
+                slack_channel_id="C123456",
+                slack_conversation_kind="channel",
+                slack_thread_ts="1700000000.000001",
+            ),
+            context,
+        )
+    )
+
+    assert [text for _, text, _ in context.post_details[:3]] == [
+        "Resolving the cadence and checking your access…",
+        "Cadence found: *AI Workstream*. Creating or reusing the agenda document…",
+        "Document ready. Verifying editor access and sending notifications…",
+    ]
+    assert all(
+        kwargs == {"thread_ts": "1700000000.000001"}
+        for _, _, kwargs in context.post_details
+    )
+    assert [name for name in context.step_names if name.startswith("progress:")] == [
+        "progress:1700000000.000001:resolving",
+        "progress:1700000000.000001:creating_document",
+        "progress:1700000000.000001:verifying_delivery",
+    ]
 
 
 def test_private_mpim_shares_document_with_all_active_human_members(monkeypatch):
@@ -890,7 +929,10 @@ def test_unverified_editor_grant_prevents_success_delivery(monkeypatch):
     with pytest.raises(ValueError, match="did not verify Editor access"):
         asyncio.run(meeting_automation.handler(_input("private-ai"), context))
 
-    assert context.posts == []
+    assert context.posts[-1][1] == (
+        "Document ready. Verifying editor access and sending notifications…"
+    )
+    assert not any("complete" in text for _, text in context.posts)
 
 
 def test_domain_writer_permission_verifies_world_member_editors():
@@ -1002,7 +1044,7 @@ def test_public_cadence_posts_one_mrkdwn_notification_to_configured_channel(
     assert result["visibility"] == "public"
     assert client.sent[0][0] == "C0B5Y44QRED"
     assert "<https://docs/doc-2|Open document>" in client.sent[0][1]
-    assert context.posts == [
+    assert context.posts[-1:] == [
         (
             "D123456",
             "Meeting automation complete for *AI Workstream Weekly*.\nDocument: <https://docs.google.com/document/d/doc-2/edit|Open document>",
@@ -1042,7 +1084,7 @@ def test_handler_hides_unknown_and_unauthorized_cadence_names(monkeypatch):
 
     assert result["status"] == "rejected"
     assert [call[0] for call in client.calls] == ["authorized_cadences"]
-    assert context.posts == [
+    assert context.posts[-1:] == [
         (
             "D123456",
             "I couldn't find one cadence you are allowed to run with that name. "
@@ -1063,7 +1105,7 @@ def test_private_cadence_without_due_notification_reports_noop(monkeypatch):
     result = asyncio.run(meeting_automation.handler(_input("private-ai"), context))
 
     assert result["acknowledged"] == []
-    assert context.posts == [
+    assert context.posts[-1:] == [
         (
             "D123456",
             "Meeting automation ran for *AI Workstream*, but no document was created.",

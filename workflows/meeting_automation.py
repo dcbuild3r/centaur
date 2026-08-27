@@ -2371,6 +2371,21 @@ def _slack_post_args(inp: Input) -> dict[str, str]:
     )
 
 
+async def _post_manual_progress(
+    inp: Input, ctx: WorkflowContext, stage: str, text: str
+) -> Any:
+    """Post an idempotent, predefined status update to the requesting thread."""
+
+    return await ctx.step(
+        _step_name("progress", inp.request_message_id, stage),
+        lambda: ctx.post_to_slack(
+            inp.slack_channel_id,
+            text,
+            **_slack_post_args(inp),
+        ),
+    )
+
+
 async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     if _is_scheduled(inp):
         return await _scheduled_handler(inp, ctx)
@@ -2380,6 +2395,13 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     client = _client(ctx)
     user_id = inp.requester_slack_user_id
     team_id = inp.requester_slack_team_id
+
+    await _post_manual_progress(
+        inp,
+        ctx,
+        "resolving",
+        "Resolving the cadence and checking your access…",
+    )
 
     cadences = await ctx.step(
         _step_name("list_authorized_cadences", inp.request_message_id),
@@ -2408,6 +2430,14 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     cadence_id = str(cadence.get("id") or "")
     if not cadence_id:
         raise ValueError("authorized cadence has no id")
+
+    cadence_title = str(cadence.get("title") or cadence_id)
+    await _post_manual_progress(
+        inp,
+        ctx,
+        "creating_document",
+        f"Cadence found: *{cadence_title}*. Creating or reusing the agenda document…",
+    )
 
     run_arguments: dict[str, Any] = {
         "requester_slack_user_id": user_id,
@@ -2487,6 +2517,12 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                 **run_arguments,
             ),
         )
+    await _post_manual_progress(
+        inp,
+        ctx,
+        "verifying_delivery",
+        "Document ready. Verifying editor access and sending notifications…",
+    )
     verified_editors = (
         await _ensure_document_editors(
             ctx,

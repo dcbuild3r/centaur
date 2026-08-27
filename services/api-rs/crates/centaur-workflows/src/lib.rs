@@ -64,6 +64,7 @@ const MAX_LIST_RUNS_LIMIT: i64 = 1_000;
 const WORKFLOW_REAP_REMOVED_AFTER_TICKS_ENV: &str = "WORKFLOW_REAP_REMOVED_AFTER_TICKS";
 const DEFAULT_WORKFLOW_REAP_REMOVED_AFTER_TICKS: u32 = 3;
 const ABSURD_TERMINAL_TASK_STATES: &str = "('completed', 'failed', 'cancelled')";
+const MEETING_AUTOMATION_MAX_ATTEMPTS: i32 = 3;
 
 pub fn python_workflow_event_name(event_type: &str, correlation_id: &str) -> String {
     // JSON string encoding is unambiguous even when either component contains a delimiter.
@@ -2605,20 +2606,122 @@ async fn run_centaur_workflow(
 ) -> absurd::Result<WorkflowResult> {
     let mut cleanup_guard =
         WorkflowSandboxCleanupGuard::new(session_runtime.clone(), ctx.run_id().to_owned());
+    let failure_notification = meeting_automation_failure_notification(&input, &ctx);
     let result = run_centaur_workflow_inner(
         input,
-        ctx,
+        ctx.clone(),
         session_runtime,
         workflow_host_sandbox,
         workflow_clients,
     )
     .await;
+    if should_post_terminal_meeting_automation_failure(&result, ctx.attempt())
+        && let Some(notification) = failure_notification
+        && let Err(error) = post_terminal_meeting_automation_failure(notification).await
+    {
+        warn!(
+            workflow_run_id = %ctx.run_id(),
+            %error,
+            "failed to post terminal meeting automation failure to Slack"
+        );
+    }
     if let Some(reason) = workflow_cleanup_reason(&result) {
         cleanup_guard.cleanup(reason).await;
     } else {
         cleanup_guard.disarm();
     }
     result
+}
+
+fn should_post_terminal_meeting_automation_failure(
+    result: &absurd::Result<WorkflowResult>,
+    attempt: i32,
+) -> bool {
+    result.is_err() && attempt >= MEETING_AUTOMATION_MAX_ATTEMPTS
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MeetingAutomationFailureNotification {
+    channel: String,
+    thread_ts: Option<String>,
+    client_msg_id: String,
+    text: String,
+}
+
+fn meeting_automation_failure_notification(
+    input: &WorkflowTaskInput,
+    ctx: &TaskContext,
+) -> Option<MeetingAutomationFailureNotification> {
+    meeting_automation_failure_notification_for(input, ctx.task_id(), ctx.run_id())
+}
+
+fn meeting_automation_failure_notification_for(
+    input: &WorkflowTaskInput,
+    task_id: &str,
+    run_id: &str,
+) -> Option<MeetingAutomationFailureNotification> {
+    if input.workflow_name != "meeting_automation"
+        || input
+            .input
+            .get("cadence_query")
+            .and_then(Value::as_str)
+            .is_none_or(|value| value.trim().is_empty())
+        || input
+            .input
+            .get("scheduling_operation")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    {
+        return None;
+    }
+    let channel = input
+        .input
+        .get("slack_channel_id")
+        .and_then(Value::as_str)?
+        .trim();
+    if channel.is_empty() {
+        return None;
+    }
+    let thread_ts = input
+        .input
+        .get("slack_thread_ts")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let short_run_id: String = run_id.chars().take(8).collect();
+    Some(MeetingAutomationFailureNotification {
+        channel: channel.to_owned(),
+        thread_ts,
+        client_msg_id: format!("meeting-automation-terminal:{task_id}"),
+        text: format!(
+            "Meeting automation failed after automatic retries. Stage: running the cadence workflow. Nothing else will run for this request. Reference: {short_run_id}."
+        ),
+    })
+}
+
+async fn post_terminal_meeting_automation_failure(
+    notification: MeetingAutomationFailureNotification,
+) -> Result<(), WorkflowRuntimeError> {
+    let token = env::var("SLACK_BOT_TOKEN")
+        .or_else(|_| env::var("SLACK_BOT_TOKEN_OVERRIDE"))
+        .map_err(|_| {
+            WorkflowRuntimeError::BadRequest(
+                "SLACK_BOT_TOKEN or SLACK_BOT_TOKEN_OVERRIDE must be set".to_owned(),
+            )
+        })?;
+    let mut args = json!({});
+    if let Some(thread_ts) = notification.thread_ts {
+        args["thread_ts"] = json!(thread_ts);
+    }
+    let payload = python_slack_message_payload(
+        &notification.channel,
+        &notification.text,
+        &notification.client_msg_id,
+        &args,
+    );
+    send_slack_message(&token, payload).await?;
+    Ok(())
 }
 
 fn workflow_cleanup_reason(result: &absurd::Result<WorkflowResult>) -> Option<&'static str> {
@@ -5551,5 +5654,76 @@ mod tests {
             select_stale_cancellations(&active, &BTreeSet::new(), &mut counts, 1),
             vec!["task-1".to_owned()]
         );
+    }
+
+    #[test]
+    fn meeting_automation_terminal_failure_is_sanitized_and_threaded() {
+        let input = WorkflowTaskInput {
+            workflow_name: "meeting_automation".to_owned(),
+            input: json!({
+                "cadence_query": "weekly all hands",
+                "slack_channel_id": "C123",
+                "slack_thread_ts": "1700000000.000001",
+            }),
+            harness_type: HarnessType::Codex,
+        };
+
+        let notification = meeting_automation_failure_notification_for(
+            &input,
+            "task-secret",
+            "12345678-aaaa-bbbb-cccc-provider-secret",
+        )
+        .expect("manual cadence run should have a failure notification");
+
+        assert_eq!(notification.channel, "C123");
+        assert_eq!(notification.thread_ts.as_deref(), Some("1700000000.000001"));
+        assert_eq!(
+            notification.client_msg_id,
+            "meeting-automation-terminal:task-secret"
+        );
+        assert!(notification.text.contains("after automatic retries"));
+        assert!(notification.text.contains("Reference: 12345678."));
+        assert!(!notification.text.contains("provider-secret"));
+    }
+
+    #[test]
+    fn meeting_automation_failure_notifier_ignores_non_cadence_runs() {
+        for input in [
+            WorkflowTaskInput {
+                workflow_name: "echo".to_owned(),
+                input: json!({"cadence_query": "weekly", "slack_channel_id": "C123"}),
+                harness_type: HarnessType::Codex,
+            },
+            WorkflowTaskInput {
+                workflow_name: "meeting_automation".to_owned(),
+                input: json!({
+                    "scheduling_operation": "book_meeting",
+                    "slack_channel_id": "C123",
+                }),
+                harness_type: HarnessType::Codex,
+            },
+        ] {
+            assert!(meeting_automation_failure_notification_for(&input, "task", "run").is_none());
+        }
+    }
+
+    #[test]
+    fn meeting_automation_failure_notifier_waits_for_final_attempt() {
+        let failed: absurd::Result<WorkflowResult> =
+            Err(absurd::Error::Timeout("private provider error".to_owned()));
+        assert!(!should_post_terminal_meeting_automation_failure(&failed, 1));
+        assert!(!should_post_terminal_meeting_automation_failure(&failed, 2));
+        assert!(should_post_terminal_meeting_automation_failure(&failed, 3));
+
+        let completed = Ok(WorkflowResult {
+            workflow_name: "meeting_automation".to_owned(),
+            run_id: "run".to_owned(),
+            task_id: "task".to_owned(),
+            steps: vec![],
+            output: json!({}),
+        });
+        assert!(!should_post_terminal_meeting_automation_failure(
+            &completed, 3
+        ));
     }
 }
