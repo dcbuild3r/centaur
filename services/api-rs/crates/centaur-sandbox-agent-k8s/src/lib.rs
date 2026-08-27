@@ -74,6 +74,15 @@ pub struct AgentSandboxConfig {
     pub tolerations: Vec<Toleration>,
     /// RuntimeClass for sandbox and iron-proxy pods (e.g. `gvisor`).
     pub runtime_class_name: Option<String>,
+    /// ServiceAccount for sandbox pods (session, warm, and workflow-host),
+    /// e.g. for cloud workload identity (EKS IRSA). Not applied to iron-proxy
+    /// pods; `automountServiceAccountToken` stays `false`.
+    pub service_account_name: Option<String>,
+    /// PriorityClass for sandbox and iron-proxy pods. A dedicated (low)
+    /// class lets the cluster scope a ResourceQuota to sandbox workloads and
+    /// makes the kubelet/scheduler sacrifice them before the control plane
+    /// under node pressure. Empty leaves the cluster default untouched.
+    pub priority_class_name: Option<String>,
     pub state_volume: Option<StateVolumeConfig>,
     pub iron_proxy: Option<IronProxyConfig>,
     pub iron_control: IronControlSettings,
@@ -130,6 +139,8 @@ impl AgentSandboxConfig {
             node_selector: BTreeMap::new(),
             tolerations: Vec::new(),
             runtime_class_name: None,
+            service_account_name: None,
+            priority_class_name: None,
             state_volume: None,
             iron_proxy: None,
             iron_control,
@@ -234,6 +245,44 @@ impl AgentSandboxBackend {
             Err(err) if is_not_found(&err) => Ok(None),
             Err(err) => Err(map_kube_error("get sandbox pod", err)),
         }
+    }
+
+    /// Stop every retained sandbox whose immutable pod service account does
+    /// not match the current backend configuration. This runs before api-rs
+    /// enables session reuse or warm-pool claims, so a rollout cannot keep an
+    /// old workload identity alive or assign it to a new session.
+    pub async fn drain_service_account_mismatches(&self) -> SandboxResult<Vec<SandboxId>> {
+        let params =
+            ListParams::default().labels(&format!("{MANAGED_BY_LABEL}={MANAGED_BY_VALUE}"));
+        let sandboxes = self.sandboxes().list(&params).await.map_err(|err| {
+            map_kube_error("list sandboxes for service account reconciliation", err)
+        })?;
+        let mut stopped = Vec::new();
+
+        for sandbox in sandboxes.items {
+            if sandbox_service_account_matches(
+                &sandbox,
+                self.config.service_account_name.as_deref(),
+            ) {
+                continue;
+            }
+            let Some(name) = sandbox.metadata.name.as_deref() else {
+                continue;
+            };
+            let id = SandboxId::new(name);
+            tracing::warn!(
+                sandbox_id = id.as_str(),
+                configured_service_account = ?normalized_name(self.config.service_account_name.as_deref()),
+                existing_service_account = ?normalized_name(
+                    sandbox.spec.pod_template.spec.service_account_name.as_deref()
+                ),
+                "stopping sandbox whose service account does not match configuration"
+            );
+            SandboxBackend::stop(self, &id).await?;
+            stopped.push(id);
+        }
+
+        Ok(stopped)
     }
 
     async fn observed_from_sandbox(
@@ -492,7 +541,15 @@ impl SandboxBackend for AgentSandboxBackend {
 
     async fn pause(&self, id: &SandboxId) -> SandboxResult<()> {
         self.patch_sandbox_merge(id, sandbox_pause_patch(jiff::Timestamp::now()))
-            .await
+            .await?;
+        // A paused sandbox has no agent pod, so its egress proxy is idle;
+        // keeping it running holds a node pod slot per suspended sandbox for
+        // the whole retention window (at ~500 pods per kubelet that starves
+        // the cluster of schedulable slots). Delete the proxy resources here:
+        // `resume()` unconditionally recreates them from the principal
+        // recorded at create, and already handles proxies deleted out from
+        // under a suspended sandbox.
+        self.delete_iron_proxy_resources(id).await
     }
 
     async fn resume(&self, id: &SandboxId) -> SandboxResult<()> {
@@ -827,6 +884,24 @@ fn build_agent_sandbox(
             .map(str::trim)
             .filter(|name| !name.is_empty()),
     );
+    insert_optional(
+        &mut pod_spec,
+        "serviceAccountName",
+        config
+            .service_account_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty()),
+    );
+    insert_optional(
+        &mut pod_spec,
+        "priorityClassName",
+        config
+            .priority_class_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty()),
+    );
 
     let mut agent_spec = json!({
         "replicas": 1,
@@ -944,6 +1019,24 @@ where
     if let Some(value) = value {
         target[key] = json!(value);
     }
+}
+
+fn normalized_name(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn sandbox_service_account_matches(
+    sandbox: &crd::Sandbox,
+    configured_service_account: Option<&str>,
+) -> bool {
+    normalized_name(
+        sandbox
+            .spec
+            .pod_template
+            .spec
+            .service_account_name
+            .as_deref(),
+    ) == normalized_name(configured_service_account)
 }
 
 /// Override-or-append an env entry, so the agent container never emits a
@@ -1116,6 +1209,7 @@ mod tests {
             ..Default::default()
         }];
         config.runtime_class_name = Some("gvisor".to_owned());
+        config.priority_class_name = Some("centaur-sandbox".to_owned());
 
         let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
         let pod_spec = &sandbox.spec.pod_template.spec;
@@ -1136,6 +1230,10 @@ mod tests {
         assert_eq!(tolerations[0].key.as_deref(), Some("example.com/sandbox"));
         assert_eq!(tolerations[0].effect.as_deref(), Some("NoSchedule"));
         assert_eq!(pod_spec.runtime_class_name.as_deref(), Some("gvisor"));
+        assert_eq!(
+            pod_spec.priority_class_name.as_deref(),
+            Some("centaur-sandbox")
+        );
     }
 
     #[test]
@@ -1149,6 +1247,71 @@ mod tests {
         assert!(pod_spec.node_selector.is_none());
         assert!(pod_spec.tolerations.is_none());
         assert!(pod_spec.runtime_class_name.is_none());
+        assert!(pod_spec.service_account_name.is_none());
+        assert!(pod_spec.priority_class_name.is_none());
+    }
+
+    #[test]
+    fn service_account_name_reaches_the_sandbox_pod_template() {
+        let spec = SandboxSpec::new("centaur-agent:latest");
+        let mut config = AgentSandboxConfig::new("centaur", test_iron_control_settings());
+        config.service_account_name = Some("centaur-sandbox".to_owned());
+
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+        let pod_spec = &sandbox.spec.pod_template.spec;
+
+        assert_eq!(
+            pod_spec.service_account_name.as_deref(),
+            Some("centaur-sandbox")
+        );
+        // The Kubernetes API token stays unmounted even with an account set.
+        assert_eq!(pod_spec.automount_service_account_token, Some(false));
+    }
+
+    #[test]
+    fn blank_service_account_name_is_omitted() {
+        let spec = SandboxSpec::new("centaur-agent:latest");
+        let mut config = AgentSandboxConfig::new("centaur", test_iron_control_settings());
+        config.service_account_name = Some("  ".to_owned());
+
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+
+        assert!(
+            sandbox
+                .spec
+                .pod_template
+                .spec
+                .service_account_name
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn service_account_reconciliation_detects_identity_changes() {
+        let spec = SandboxSpec::new("centaur-agent:latest");
+        let mut config = AgentSandboxConfig::new("centaur", test_iron_control_settings());
+        config.service_account_name = Some("old-sandbox".to_owned());
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+
+        assert!(sandbox_service_account_matches(
+            &sandbox,
+            Some("old-sandbox")
+        ));
+        assert!(!sandbox_service_account_matches(
+            &sandbox,
+            Some("new-sandbox")
+        ));
+        assert!(!sandbox_service_account_matches(&sandbox, None));
+    }
+
+    #[test]
+    fn service_account_reconciliation_treats_blank_as_unset() {
+        let spec = SandboxSpec::new("centaur-agent:latest");
+        let config = AgentSandboxConfig::new("centaur", test_iron_control_settings());
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+
+        assert!(sandbox_service_account_matches(&sandbox, None));
+        assert!(sandbox_service_account_matches(&sandbox, Some("  ")));
     }
 
     #[test]
