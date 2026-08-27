@@ -255,8 +255,6 @@ export type SlackbotV2ThreadState = {
   provider?: string | null
   /** Workflow responses keyed by the originating Slack message id. */
   meetingAutomationRuns?: Record<string, JsonObject>
-  /** Confirmed-write guard for a fixed-time ad-hoc meeting request. */
-  pendingMeetingBooking?: JsonObject | null
   renderObligation?: SlackbotV2RenderObligation | null
 }
 
