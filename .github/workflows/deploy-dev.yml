@@ -220,6 +220,7 @@ jobs:
             '{
               stringData: {
                 IRON_CONTROL_DATABASE_URL: $database_url,
+                CENTAUR_POSTGRES_DSN: $database_url,
                 IRON_CONTROL_INITIAL_API_KEY: $api_key,
                 IRON_CONTROL_INITIAL_USER_EMAIL: $email,
                 IRON_CONTROL_INITIAL_USER_PASSWORD: $password,
@@ -471,6 +472,14 @@ jobs:
           grep -Fq '  MEETING_OPS_SCRIPT_ID' <<<"$principal_state"
           grep -Fq 'tool-meeting-scheduler (' <<<"$principal_state"
           grep -Fq 'static ZOOM_ACCESS_TOKEN' <<<"$principal_state"
+
+          postgres_state="$(kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            secrets show centaur-postgres)"
+          grep -Fq '"source_type": "env"' <<<"$postgres_state"
+          grep -Fq '"var": "CENTAUR_POSTGRES_DSN"' <<<"$postgres_state"
 
           zoom_state="$(kubectl --namespace "$HELM_NAMESPACE" exec \
             deployment/centaur-centaur-api-rs -- \
