@@ -206,8 +206,18 @@ jobs:
           print(urlunsplit((parsed.scheme, userinfo + "@" + host, "", parsed.query, parsed.fragment)))
           PY
           )"
+          scheduler_database_url="$(
+            DATABASE_URL="$iron_control_database_url" python3 - <<'PY'
+          import os
+          from urllib.parse import urlsplit, urlunsplit
+
+          parsed = urlsplit(os.environ["DATABASE_URL"])
+          print(urlunsplit((parsed.scheme, parsed.netloc, "/ai_v2", parsed.query, parsed.fragment)))
+          PY
+          )"
           jq --null-input \
             --arg database_url "$iron_control_database_url" \
+            --arg scheduler_database_url "$scheduler_database_url" \
             --arg api_key "$IRON_CONTROL_INITIAL_API_KEY" \
             --arg email "$IRON_CONTROL_INITIAL_USER_EMAIL" \
             --arg password "$IRON_CONTROL_INITIAL_USER_PASSWORD" \
@@ -220,7 +230,7 @@ jobs:
             '{
               stringData: {
                 IRON_CONTROL_DATABASE_URL: $database_url,
-                CENTAUR_POSTGRES_DSN: $database_url,
+                CENTAUR_POSTGRES_DSN: $scheduler_database_url,
                 IRON_CONTROL_INITIAL_API_KEY: $api_key,
                 IRON_CONTROL_INITIAL_USER_EMAIL: $email,
                 IRON_CONTROL_INITIAL_USER_PASSWORD: $password,
