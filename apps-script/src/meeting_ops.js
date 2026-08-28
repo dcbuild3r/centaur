@@ -233,10 +233,21 @@ function processAgenda_(meeting, now, requesterSlackUserId, options) {
     };
     if (customInstructions) record.customInstructions = customInstructions;
   } else {
-    try {
-      assertTemplateCopyReady_(record.docId, meeting, false);
-    } catch (error) {
-      supersedeMalformedDocument_(DriveApp.getFileById(record.docId));
+    var recordedFile = DriveApp.getFileById(record.docId);
+    var replaceRecordedDocument = recordedFile.isTrashed();
+    if (!replaceRecordedDocument && recordedFile.getName() !== docName) {
+      supersedeMalformedDocument_(recordedFile);
+      replaceRecordedDocument = true;
+    }
+    if (!replaceRecordedDocument) {
+      try {
+        assertTemplateCopyReady_(record.docId, meeting, false);
+      } catch (error) {
+        supersedeMalformedDocument_(recordedFile);
+        replaceRecordedDocument = true;
+      }
+    }
+    if (replaceRecordedDocument) {
       var replacement = createDocumentFromTemplate_(
         meeting,
         docName,

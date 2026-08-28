@@ -568,6 +568,58 @@ test('manual public runs by an owner do not require a channel allowlist', () => 
   expect(executionProperty('ALLOWED_WF_CHANNEL_IDS')).toBeNull()
 })
 
+test('manual public runs replace a trashed agenda and queue its notification again', () => {
+  prepareManualTemplate()
+  global.getMeetingConfig_ = () => [manualCadence({
+    visibility: 'public',
+    notifyChannel: 'C069VHQEJEQ',
+    notifyChannelName: '#wf-all',
+    notificationRecipients: [],
+  })]
+  const request = manualRequest('2026-08-10T14:00:00Z')
+
+  const first = runCadenceJob(request)
+  files.get(first.docId).setTrashed(true)
+  executionProperties.delete('ORBIE_OUTBOX:agenda:manual-cadence:2026-08-10')
+
+  const replacement = runCadenceJob(request)
+
+  expect(replacement.docId).not.toBe(first.docId)
+  expect(files.get(first.docId).isTrashed()).toBe(true)
+  expect(files.get(replacement.docId).isTrashed()).toBe(false)
+  const notification = JSON.parse(
+    executionProperty('ORBIE_OUTBOX:agenda:manual-cadence:2026-08-10'),
+  )
+  expect(notification.channelId).toBe('C069VHQEJEQ')
+  expect(notification.docId).toBe(replacement.docId)
+})
+
+test('manual public runs replace an agenda whose saved title is stale', () => {
+  prepareManualTemplate()
+  global.getMeetingConfig_ = () => [manualCadence({
+    visibility: 'public',
+    notifyChannel: 'C069VHQEJEQ',
+    notifyChannelName: '#wf-all',
+    notificationRecipients: [],
+  })]
+  const request = manualRequest('2026-08-10T14:00:00Z')
+
+  const first = runCadenceJob(request)
+  files.get(first.docId).setName('Manual Meeting — {calendar_week}')
+  executionProperties.delete('ORBIE_OUTBOX:agenda:manual-cadence:2026-08-10')
+
+  const replacement = runCadenceJob(request)
+
+  expect(replacement.docId).not.toBe(first.docId)
+  expect(files.get(first.docId).getName()).toContain('superseded malformed copy')
+  expect(files.get(replacement.docId).getName()).toBe('Manual Meeting — 2026-08-10')
+  const notification = JSON.parse(
+    executionProperty('ORBIE_OUTBOX:agenda:manual-cadence:2026-08-10'),
+  )
+  expect(notification.channelId).toBe('C069VHQEJEQ')
+  expect(notification.docId).toBe(replacement.docId)
+})
+
 test('manual runs reject callers who are not cadence owners', () => {
   prepareManualTemplate()
   const request = manualRequest('2026-08-10T14:00:00Z')
