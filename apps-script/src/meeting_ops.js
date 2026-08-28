@@ -232,12 +232,20 @@ function processAgenda_(meeting, now, requesterSlackUserId, options) {
       notesNotified: false
     };
     if (customInstructions) record.customInstructions = customInstructions;
+    // Reserve the document for this cadence occurrence before permissions or
+    // notification work. Those downstream operations can be retried without
+    // cloning another template copy if they fail after Drive creation.
+    writeJsonProperty_(properties, recordKey, record);
   } else {
     var recordedFile = DriveApp.getFileById(record.docId);
     var replaceRecordedDocument = recordedFile.isTrashed();
     if (!replaceRecordedDocument && recordedFile.getName() !== docName) {
-      supersedeMalformedDocument_(recordedFile);
-      replaceRecordedDocument = true;
+      // A title edit does not make a structurally valid occurrence document
+      // disposable. Restore the configured title in place so retries keep the
+      // same durable document identity instead of producing another copy.
+      recordedFile.setName(docName);
+      record.docName = docName;
+      writeJsonProperty_(properties, recordKey, record);
     }
     if (!replaceRecordedDocument) {
       try {
@@ -266,6 +274,9 @@ function processAgenda_(meeting, now, requesterSlackUserId, options) {
       } else {
         delete record.customInstructions;
       }
+      // Persist the replacement before later validation and notification work
+      // for the same reason as the first-copy reservation above.
+      writeJsonProperty_(properties, recordKey, record);
     }
   }
   assertTemplateCopyReady_(record.docId, meeting, false);

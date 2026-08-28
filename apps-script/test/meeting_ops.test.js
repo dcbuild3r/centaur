@@ -594,7 +594,7 @@ test('manual public runs replace a trashed agenda and queue its notification aga
   expect(notification.docId).toBe(replacement.docId)
 })
 
-test('manual public runs replace an agenda whose saved title is stale', () => {
+test('manual public runs rename a valid stale-title agenda without cloning it', () => {
   prepareManualTemplate()
   global.getMeetingConfig_ = () => [manualCadence({
     visibility: 'public',
@@ -608,16 +608,12 @@ test('manual public runs replace an agenda whose saved title is stale', () => {
   files.get(first.docId).setName('Manual Meeting — {calendar_week}')
   executionProperties.delete('ORBIE_OUTBOX:agenda:manual-cadence:2026-08-10')
 
-  const replacement = runCadenceJob(request)
+  const reused = runCadenceJob(request)
 
-  expect(replacement.docId).not.toBe(first.docId)
-  expect(files.get(first.docId).getName()).toContain('superseded malformed copy')
-  expect(files.get(replacement.docId).getName()).toBe('Manual Meeting — 2026-08-10')
-  const notification = JSON.parse(
-    executionProperty('ORBIE_OUTBOX:agenda:manual-cadence:2026-08-10'),
-  )
-  expect(notification.channelId).toBe('C069VHQEJEQ')
-  expect(notification.docId).toBe(replacement.docId)
+  expect(reused.docId).toBe(first.docId)
+  expect(files.get(reused.docId).getName()).toBe('Manual Meeting — 2026-08-10')
+  expect(executionProperty('ORBIE_OUTBOX:agenda:manual-cadence:2026-08-10'))
+    .toBeNull()
 })
 
 test('manual runs reject callers who are not cadence owners', () => {
@@ -663,6 +659,29 @@ test('scheduled entrypoint creates the requested occurrence and queues recipient
   })
 
   expect(result.docUrl).toContain('https://docs.example/manual-template-copy-')
+  expect(Object.keys(Object.fromEntries(executionProperties.entries())).filter((key) => (
+    key.startsWith('ORBIE_OUTBOX:')
+  ))).toEqual(['ORBIE_OUTBOX:agenda:manual-cadence:2026-08-14:U1'])
+})
+
+test('scheduled retries keep one document for the same cadence occurrence', () => {
+  prepareManualTemplate()
+  const request = {
+    scheduledByOrbie: true,
+    requesterSlackTeamId: 'TL1HM8UUU',
+    cadence: manualCadence(),
+    occurrenceAt: '2026-08-14T12:00:00Z',
+    now: '2026-08-14T07:15:00Z',
+  }
+
+  const first = runScheduledCadenceJob(request)
+  const second = runScheduledCadenceJob(request)
+  const third = runScheduledCadenceJob(request)
+
+  expect(second.docId).toBe(first.docId)
+  expect(third.docId).toBe(first.docId)
+  expect([...files.keys()].filter((id) => id.startsWith('manual-template-copy-')))
+    .toEqual([first.docId])
   expect(Object.keys(Object.fromEntries(executionProperties.entries())).filter((key) => (
     key.startsWith('ORBIE_OUTBOX:')
   ))).toEqual(['ORBIE_OUTBOX:agenda:manual-cadence:2026-08-14:U1'])
