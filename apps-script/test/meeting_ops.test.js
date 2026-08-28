@@ -594,7 +594,7 @@ test('manual public runs replace a trashed agenda and queue its notification aga
   expect(notification.docId).toBe(replacement.docId)
 })
 
-test('manual public runs rename a valid stale-title agenda without cloning it', () => {
+test('manual public runs preserve a user-edited agenda title without cloning it', () => {
   prepareManualTemplate()
   global.getMeetingConfig_ = () => [manualCadence({
     visibility: 'public',
@@ -605,13 +605,16 @@ test('manual public runs rename a valid stale-title agenda without cloning it', 
   const request = manualRequest('2026-08-10T14:00:00Z')
 
   const first = runCadenceJob(request)
-  files.get(first.docId).setName('Manual Meeting — {calendar_week}')
+  const fileCount = files.size
+  files.get(first.docId).setName('Manual Meeting — 2026-08-10 (Orbie test)')
   executionProperties.delete('ORBIE_OUTBOX:agenda:manual-cadence:2026-08-10')
 
   const reused = runCadenceJob(request)
 
   expect(reused.docId).toBe(first.docId)
-  expect(files.get(reused.docId).getName()).toBe('Manual Meeting — 2026-08-10')
+  expect(files.get(reused.docId).getName())
+    .toBe('Manual Meeting — 2026-08-10 (Orbie test)')
+  expect(files.size).toBe(fileCount)
   expect(executionProperty('ORBIE_OUTBOX:agenda:manual-cadence:2026-08-10'))
     .toBeNull()
 })

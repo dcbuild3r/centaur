@@ -98,9 +98,10 @@ scheduled-windowed for any scheduled caller.
   them into an existing copy, and attendee-entered notes are not overwritten.
 - Retries reuse the recorded occurrence document and verify only that its
   required tabs remain available. They do not compare its body with the
-  evolving source template or replace attendee-edited content. A missing
-  required tab fails closed without creating another document; only an
-  explicitly trashed occurrence document is replaced.
+  evolving source template, replace attendee-edited content, or reset a
+  human-edited Drive title. A missing required tab fails closed without
+  creating another document; only an explicitly trashed occurrence document
+  is replaced.
 - If template copying, tab validation, or safe date replacement fails, the
   newly created file is trashed and the occurrence is not advanced.
 - Public outbox entries are keyed by cadence, occurrence, and notification

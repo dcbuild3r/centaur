@@ -239,14 +239,6 @@ function processAgenda_(meeting, now, requesterSlackUserId, options) {
   } else {
     var recordedFile = DriveApp.getFileById(record.docId);
     var replaceRecordedDocument = recordedFile.isTrashed();
-    if (!replaceRecordedDocument && recordedFile.getName() !== docName) {
-      // A title edit does not make a structurally valid occurrence document
-      // disposable. Restore the configured title in place so retries keep the
-      // same durable document identity instead of producing another copy.
-      recordedFile.setName(docName);
-      record.docName = docName;
-      writeJsonProperty_(properties, recordKey, record);
-    }
     if (!replaceRecordedDocument) {
       // Existing occurrence documents are attendee-owned working artifacts.
       // The source template can evolve and attendees can remove or reshape
