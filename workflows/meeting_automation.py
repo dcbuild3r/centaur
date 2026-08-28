@@ -1541,9 +1541,6 @@ def _scheduled_message(cadence: dict[str, Any], notification: dict[str, Any]) ->
     date_label = str(
         notification.get("occurrenceAt") or cadence.get("_meeting_date", "")
     )[:10]
-    mentions = " ".join(
-        f"<@{user_id}>" for user_id in cadence.get("notificationRecipients", [])
-    )
     if notification.get("kind") == "notes":
         prefix = f"✅ Notes from {title}"
         request = "Please review the notes and add any follow-up items."
@@ -1556,9 +1553,37 @@ def _scheduled_message(cadence: dict[str, Any], notification: dict[str, Any]) ->
     meeting_url = str(cadence.get("bookedMeetingUrl") or "").strip()
     if meeting_url:
         parts.append(f"Join meeting: <{meeting_url}|World Foundation Zoom>")
-    if mentions:
-        parts.append(f"Owners: {mentions}")
     return "\n".join(parts)
+
+
+def _cadence_owner_ids(cadence: dict[str, Any]) -> list[str]:
+    return list(
+        dict.fromkeys(
+            str(user_id).strip()
+            for user_id in [
+                cadence.get("ownerSlackUserId"),
+                *cadence.get("accessSlackUserIds", []),
+            ]
+            if str(user_id or "").strip()
+        )
+    )
+
+
+def _owner_run_success_message(
+    cadence: dict[str, Any], notification: dict[str, Any]
+) -> str:
+    title = str(cadence.get("title") or cadence.get("id") or "Meeting")
+    date_label = str(
+        notification.get("occurrenceAt") or cadence.get("_meeting_date", "")
+    )[:10]
+    doc_url = str(notification.get("docUrl") or "").strip()
+    document = f"<{doc_url}|Open document>" if doc_url else "the meeting document"
+    channel_id = str(notification.get("channelId") or "").strip()
+    channel = f" in <#{channel_id}>" if channel_id else ""
+    return (
+        f"✅ *{title}* ran successfully for {date_label}{channel}.\n"
+        f"Document: {document}"
+    )
 
 
 def _manual_notification_message(notification: dict[str, Any]) -> str:
@@ -2556,6 +2581,24 @@ async def _scheduled_handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]
                     )
                 ),
             )
+            if notification.get("kind") == "agenda":
+                owner_text = _owner_run_success_message(cadence, notification)
+                for owner_id in _cadence_owner_ids(cadence):
+                    owner_delivery = await ctx.step(
+                        f"scheduled:deliver-owner:{notification_id}:{owner_id}",
+                        lambda owner_id=owner_id, owner_text=owner_text, notification_id=notification_id: (
+                            client.send_slack_dm(
+                                owner_id,
+                                owner_text,
+                                client_msg_id=_notification_client_id(
+                                    f"{notification_id}:owner:{owner_id}"
+                                ),
+                            )
+                        ),
+                    )
+                    _validated_delivery(
+                        owner_delivery, f"{notification_id}:owner:{owner_id}"
+                    )
         else:
             delivery = await ctx.step(
                 f"scheduled:deliver:{notification_id}",
@@ -2841,6 +2884,30 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                 ),
             )
             delivered.append(_validated_delivery(delivery, notification_id))
+            if notification.get("kind") == "agenda":
+                owner_text = _owner_run_success_message(cadence, notification)
+                for owner_id in _cadence_owner_ids(cadence):
+                    owner_delivery = await ctx.step(
+                        _step_name(
+                            "deliver_public_owner_dm",
+                            inp.request_message_id,
+                            f"{notification_id}:{owner_id}",
+                        ),
+                        lambda owner_id=owner_id, owner_text=owner_text, notification_id=notification_id: (
+                            client.send_slack_dm(
+                                owner_id,
+                                owner_text,
+                                client_msg_id=_notification_client_id(
+                                    f"{notification_id}:owner:{owner_id}"
+                                ),
+                            )
+                        ),
+                    )
+                    delivered.append(
+                        _validated_delivery(
+                            owner_delivery, f"{notification_id}:owner:{owner_id}"
+                        )
+                    )
             acknowledged_result = await ctx.step(
                 _step_name(
                     "ack_public_notification", inp.request_message_id, notification_id

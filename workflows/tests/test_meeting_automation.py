@@ -93,6 +93,11 @@ class FakeClient:
         self.sent.append((channel, text, kwargs))
         return {"sent": True, "ts": "1785153461.533159"}
 
+    async def send_slack_dm(self, user_id, text, **kwargs):
+        self.calls.append(("send_dm", user_id, text, kwargs))
+        self.sent.append((user_id, text, kwargs))
+        return {"sent": True, "ts": "1785153461.533159"}
+
     async def slack_users(self):
         self.calls.append(("slack_users",))
         return self.slack_user_data
@@ -1075,6 +1080,8 @@ def test_public_cadence_posts_one_mrkdwn_notification_to_configured_channel(
                 "visibility": "public",
                 "notifyChannel": "C0B5Y44QRED",
                 "notifyChannelName": "#ai-agents",
+                "ownerSlackUserId": "UOWNER",
+                "accessSlackUserIds": ["UACCESS"],
             }
         ],
         run_result={
@@ -1082,9 +1089,10 @@ def test_public_cadence_posts_one_mrkdwn_notification_to_configured_channel(
             "docUrl": "https://docs.google.com/document/d/doc-2/edit",
         },
         notifications=[
-            {
-                "notificationId": "agenda:public-ai:2026-08-10:channel",
-                "meetingId": "public-ai",
+                {
+                    "notificationId": "agenda:public-ai:2026-08-10:channel",
+                    "kind": "agenda",
+                    "meetingId": "public-ai",
                 "visibility": "public",
                 "channelId": "C0B5Y44QRED",
                 "recipientSlackUserId": None,
@@ -1101,6 +1109,14 @@ def test_public_cadence_posts_one_mrkdwn_notification_to_configured_channel(
     assert result["visibility"] == "public"
     assert client.sent[0][0] == "C0B5Y44QRED"
     assert "<https://docs/doc-2|Open document>" in client.sent[0][1]
+    assert "Owners:" not in client.sent[0][1]
+    assert "<@" not in client.sent[0][1]
+    assert [item[0] for item in client.sent[1:]] == ["UOWNER", "UACCESS"]
+    assert all("ran successfully" in item[1] for item in client.sent[1:])
+    assert all(
+        "<https://docs/doc-2|Open document>" in item[1]
+        for item in client.sent[1:]
+    )
     assert context.posts[-1:] == [
         (
             "D123456",
@@ -1117,6 +1133,8 @@ def test_public_cadence_posts_one_mrkdwn_notification_to_configured_channel(
         "drive_permissions",
         "pending_all",
         "send",
+        "send_dm",
+        "send_dm",
         "ack_all",
     ]
     assert "deliver_public_result:1700000000.000001:public-ai" in context.step_names
@@ -1690,7 +1708,13 @@ def test_scheduled_handler_delivers_channel_message_and_advances_notion_date(
     assert result["due"] == ["weekly-sync"]
     assert client.sent[0][0:2] == ("channel", "C069VHQEJEQ")
     assert "newly created document from the template" in client.sent[0][2]
-    assert "<@U0BEQ8M7QSK>" in client.sent[0][2]
+    assert "<@" not in client.sent[0][2]
+    assert client.sent[1][0:2] == ("dm", "U0BEQ8M7QSK")
+    assert "ran successfully" in client.sent[1][2]
+    assert (
+        "<https://docs.google.com/document/d/weekly-sync-2026-08-17/edit|Open document>"
+        in client.sent[1][2]
+    )
     assert client.advanced == [("notion-page-1", "2026-08-24")]
 
 
