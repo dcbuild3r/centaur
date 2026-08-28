@@ -142,6 +142,11 @@ jobs:
           file: ${{ matrix.dockerfile }}
           target: ${{ matrix.target }}
           push: true
+          # ECR caps referrer artifacts per image subject. These internal Dev
+          # images do not consume BuildKit provenance/SBOM attestations, so do
+          # not create referrers that eventually block otherwise valid pushes.
+          provenance: false
+          sbom: false
           tags: ${{ env.ECR_REGISTRY }}/${{ matrix.repository }}:${{ matrix.tagPrefix }}${{ github.sha }}
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=${{ matrix.cache-mode || 'max' }},scope=${{ matrix.image }}
@@ -171,6 +176,24 @@ jobs:
 
       - name: Configure kubeconfig
         run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER_NAME" --alias "$EKS_CLUSTER_NAME"
+
+      - name: Load Zoom webhook secret from 1Password
+        uses: 1password/load-secrets-action@dafbe7cb03502b260e2b2893c753c352eee545bf # v3
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          ZOOM_WEBHOOK_SECRET: op://Centaur/ZOOM_WEBHOOK_SECRET/credential
+
+      - name: Configure Zoom webhook secret
+        run: |
+          test -n "$ZOOM_WEBHOOK_SECRET"
+          jq --null-input \
+            --arg zoom_webhook_secret "$ZOOM_WEBHOOK_SECRET" \
+            '{stringData: {ZOOM_WEBHOOK_SECRET: $zoom_webhook_secret}}' \
+            | kubectl --namespace "$HELM_NAMESPACE" patch secret centaur-infra-env \
+                --type merge \
+                --patch-file /dev/stdin
 
       - name: Configure Console secrets
         env:

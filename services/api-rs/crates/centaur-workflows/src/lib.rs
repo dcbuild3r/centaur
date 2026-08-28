@@ -453,6 +453,9 @@ pub enum WorkflowWebhookAuth {
     Github {
         secret_ref: String,
     },
+    Zoom {
+        secret_ref: String,
+    },
     StandardWebhooks {
         secret_ref: String,
     },
@@ -1272,6 +1275,7 @@ fn normalize_webhook(webhook: &mut RegisteredWorkflowWebhook) -> Result<(), Work
             }
         }
         WorkflowWebhookAuth::Github { secret_ref }
+        | WorkflowWebhookAuth::Zoom { secret_ref }
         | WorkflowWebhookAuth::StandardWebhooks { secret_ref }
         | WorkflowWebhookAuth::Bearer { secret_ref } => {
             if secret_ref.trim().is_empty() {

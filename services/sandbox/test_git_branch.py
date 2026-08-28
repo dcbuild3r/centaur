@@ -91,6 +91,10 @@ class GitBranchTest(unittest.TestCase):
                 "CENTAUR_GIT_USER_NAME": "Release Bot",
                 "CENTAUR_GIT_USER_EMAIL": "release@example.com",
                 "GITHUB_TOKEN": "foundation-placeholder",
+                # The CI job disables the ambient global Git config. Point the
+                # fixture at its own rewrite explicitly so the uncached clone
+                # remains local and hermetic there as well.
+                "GIT_CONFIG_GLOBAL": str(self.home / ".gitconfig"),
                 "GIT_ALLOW_PROTOCOL": "file:https",
             }
         )

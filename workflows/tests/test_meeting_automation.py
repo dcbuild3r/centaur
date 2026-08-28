@@ -1017,6 +1017,26 @@ def test_shared_drive_permission_id_verifies_editor_when_email_is_omitted():
     assert ("drive_share", "doc-1", "dc.builder@world.org") in client.calls
 
 
+def test_domain_writer_permission_verifies_world_member_editors():
+    client = FakeClient([])
+    client.drive_permissions = [
+        {"type": "domain", "domain": "world.org", "role": "writer"}
+    ]
+
+    verified = asyncio.run(
+        meeting_automation._ensure_document_editors(
+            FakeContext(),
+            client,
+            step_prefix="domain-access",
+            run_result={"docId": "doc-1"},
+            emails=["dc.builder@world.org", "piotr.piwowarczyk@world.org"],
+        )
+    )
+
+    assert verified == ["dc.builder@world.org", "piotr.piwowarczyk@world.org"]
+    assert [call for call in client.calls if call[0] == "drive_share"] == []
+
+
 def test_manual_private_delivery_rejects_malformed_acknowledgement(monkeypatch):
     client = MalformedAcknowledgementClient(
         [{"id": "private-ai", "title": "AI Workstream", "visibility": "private"}],

@@ -847,12 +847,19 @@ class MeetingSchedulerClient:
         except MeetingSchedulerError as error:
             errors.append(str(error))
         summary_text = str(summary.get("meeting_summary") or summary.get("summary") or "").strip()
+        raw_action_items = summary.get("next_steps") or summary.get("action_items") or ""
+        action_items = (
+            "\n".join(str(item) for item in raw_action_items)
+            if isinstance(raw_action_items, list)
+            else str(raw_action_items or "").strip()
+        )
         return {
             "meeting_id": str(meeting_id),
             "ready": recording.get("transcript_status") == "ready" and bool(summary_text),
             "transcript": recording.get("transcript"),
             "transcript_status": recording.get("transcript_status", "pending"),
             "recording_files": recording.get("recording_files", []),
+            "action_items": action_items,
             "summary": summary,
             "summary_text": summary_text,
             "processing_errors": errors,

@@ -792,17 +792,19 @@ async fn append_messages(
 
 async fn execute_session(
     State(state): State<AppState>,
+    Extension(caller): Extension<AuthenticatedCaller>,
     Path(raw_thread_key): Path<String>,
     Json(request): Json<ExecuteSessionRequest>,
 ) -> Result<Json<ExecuteSessionResponse>, ApiError> {
     let thread_key = ThreadKey::try_from(raw_thread_key)?;
+    let metadata = sanitize_execute_metadata(caller.class(), request.metadata);
     let execution = state
         .runtime()?
         .enqueue_session_execution(
             &thread_key,
             ExecuteSessionInput {
                 idempotency_key: request.idempotency_key,
-                metadata: request.metadata,
+                metadata,
                 input_lines: request.input_lines,
                 idle_timeout_ms: request.idle_timeout_ms,
                 max_duration_ms: request.max_duration_ms,
@@ -815,6 +817,22 @@ async fn execute_session(
         thread_key: execution.thread_key,
         status: execution.status.to_string(),
     }))
+}
+
+/// `requester_principal_foreign_id` is an identity assertion made by the
+/// authenticated Console service, not ordinary caller-controlled metadata.
+/// Strip it from every other caller class before the execution is persisted so
+/// the runtime can safely honor Console requesters on any thread namespace.
+fn sanitize_execute_metadata(
+    caller_class: CallerClass,
+    mut metadata: Option<Value>,
+) -> Option<Value> {
+    if caller_class != CallerClass::Console
+        && let Some(Value::Object(fields)) = metadata.as_mut()
+    {
+        fields.remove("requester_principal_foreign_id");
+    }
+    metadata
 }
 
 async fn interrupt_session_execution(
@@ -917,7 +935,11 @@ fn principal_subject_owns_session(subject: Option<&str>, session_principal: Opti
 
 #[cfg(test)]
 mod session_authorization_tests {
-    use super::{principal_subject_owns_session, thread_key_matches_platform};
+    use super::{
+        CallerClass, principal_subject_owns_session, sanitize_execute_metadata,
+        thread_key_matches_platform,
+    };
+    use serde_json::json;
 
     #[test]
     fn ingress_scope_covers_every_family_the_bot_mints() {
@@ -960,6 +982,29 @@ mod session_authorization_tests {
             Some("prn_owner")
         ));
         assert!(!principal_subject_owns_session(Some("prn_owner"), None));
+    }
+
+    #[test]
+    fn only_console_callers_may_assert_a_requester_principal_foreign_id() {
+        let metadata = json!({
+            "source": "console",
+            "requester_principal_foreign_id": "console-user-ada"
+        });
+
+        assert_eq!(
+            sanitize_execute_metadata(CallerClass::Console, Some(metadata.clone())),
+            Some(metadata.clone())
+        );
+        for caller_class in [
+            CallerClass::Admin,
+            CallerClass::Ingress,
+            CallerClass::Principal,
+        ] {
+            assert_eq!(
+                sanitize_execute_metadata(caller_class, Some(metadata.clone())),
+                Some(json!({ "source": "console" }))
+            );
+        }
     }
 }
 
@@ -3518,9 +3563,10 @@ mod meeting_scheduling_request_tests {
     }
 
     #[test]
-    fn rejects_unallowlisted_public_channel_and_provider_credentials() {
+    fn rejects_channel_without_thread_and_provider_credentials() {
         let mut public_request = request();
         public_request.slack_channel_id = Some("C123ABC".to_owned());
+        public_request.slack_thread_ts = None;
         assert!(matches!(
             validate_meeting_scheduling_request(public_request, true),
             Err(ApiError::BadRequest(_))
@@ -3744,6 +3790,15 @@ async fn invoke_workflow_webhook(
         ));
     }
     verify_webhook_auth(spec, &headers, &raw_body)?;
+
+    // Zoom validates a newly configured event-subscription endpoint with a
+    // synchronous challenge. Do this only after the request signature has
+    // been verified, and do not create a durable workflow run for it.
+    if matches!(spec.auth, WorkflowWebhookAuth::Zoom { .. })
+        && let Some(response) = zoom_endpoint_validation_response(spec, &raw_body)?
+    {
+        return Ok((StatusCode::OK, Json(response)));
+    }
 
     let raw_body_sha256 = hex::encode(Sha256::digest(&raw_body));
     let body = parse_webhook_body(&headers, &raw_body)?;
@@ -4717,6 +4772,9 @@ fn verify_webhook_auth(
             headers,
             raw_body,
         ),
+        WorkflowWebhookAuth::Zoom { secret_ref } => {
+            verify_zoom_webhook_signature(secret_ref, headers, raw_body)
+        }
         WorkflowWebhookAuth::StandardWebhooks { secret_ref } => {
             verify_standard_webhook_signature(secret_ref, headers, raw_body)
         }
@@ -4735,6 +4793,73 @@ fn verify_webhook_auth(
             raw_body,
         ),
     }
+}
+
+fn verify_zoom_webhook_signature(
+    secret_ref: &str,
+    headers: &HeaderMap,
+    raw_body: &[u8],
+) -> Result<(), ApiError> {
+    let timestamp = header_value(headers, "X-Zm-Request-Timestamp")
+        .ok_or_else(|| ApiError::Unauthorized("missing Zoom webhook timestamp".to_owned()))?;
+    let timestamp_seconds = timestamp
+        .parse::<i64>()
+        .map_err(|_| ApiError::Unauthorized("invalid Zoom webhook timestamp".to_owned()))?;
+    if (OffsetDateTime::now_utc().unix_timestamp() - timestamp_seconds).abs() > 300 {
+        return Err(ApiError::Unauthorized(
+            "stale Zoom webhook timestamp".to_owned(),
+        ));
+    }
+    let signature = header_value(headers, "X-Zm-Signature")
+        .ok_or_else(|| ApiError::Unauthorized("missing Zoom webhook signature".to_owned()))?;
+    let secret = env::var(secret_ref).map_err(|_| {
+        ApiError::Internal(format!(
+            "webhook auth secret {secret_ref} is not configured"
+        ))
+    })?;
+    let message = [b"v0:".as_slice(), timestamp.as_bytes(), b":", raw_body].concat();
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.trim().as_bytes())
+        .map_err(|_| ApiError::Internal("invalid Zoom webhook secret".to_owned()))?;
+    mac.update(&message);
+    let expected = format!("v0={}", hex::encode(mac.finalize().into_bytes()));
+    if constant_time_eq(signature.trim().as_bytes(), expected.as_bytes()) {
+        Ok(())
+    } else {
+        Err(ApiError::Unauthorized(
+            "invalid Zoom webhook signature".to_owned(),
+        ))
+    }
+}
+
+fn zoom_endpoint_validation_response(
+    spec: &WorkflowWebhookSpec,
+    raw_body: &[u8],
+) -> Result<Option<Value>, ApiError> {
+    let payload: Value = serde_json::from_slice(raw_body)
+        .map_err(|_| ApiError::BadRequest("invalid Zoom webhook JSON".to_owned()))?;
+    if payload.get("event").and_then(Value::as_str) != Some("endpoint.url_validation") {
+        return Ok(None);
+    }
+    let plain_token = payload
+        .pointer("/payload/plainToken")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError::BadRequest("missing Zoom plainToken".to_owned()))?;
+    let WorkflowWebhookAuth::Zoom { secret_ref } = &spec.auth else {
+        return Ok(None);
+    };
+    let secret = env::var(secret_ref).map_err(|_| {
+        ApiError::Internal(format!(
+            "webhook auth secret {secret_ref} is not configured"
+        ))
+    })?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.trim().as_bytes())
+        .map_err(|_| ApiError::Internal("invalid Zoom webhook secret".to_owned()))?;
+    mac.update(plain_token.as_bytes());
+    Ok(Some(json!({
+        "plainToken": plain_token,
+        "encryptedToken": hex::encode(mac.finalize().into_bytes()),
+    })))
 }
 
 fn verify_standard_webhook_signature(
@@ -4815,6 +4940,7 @@ fn signature_header_name(auth: &WorkflowWebhookAuth) -> Option<&str> {
     match auth {
         WorkflowWebhookAuth::None | WorkflowWebhookAuth::Bearer { .. } => None,
         WorkflowWebhookAuth::Github { .. } => Some("X-Hub-Signature-256"),
+        WorkflowWebhookAuth::Zoom { .. } => Some("X-Zm-Signature"),
         WorkflowWebhookAuth::StandardWebhooks { .. } => Some("webhook-signature"),
         WorkflowWebhookAuth::Hmac {
             signature_header, ..
@@ -5252,6 +5378,75 @@ mod webhook_tests {
             raw_body,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn verifies_zoom_signature_and_validation_challenge() {
+        let secret_ref = "CENTAUR_TEST_ZOOM_WEBHOOK_SECRET";
+        unsafe {
+            env::set_var(secret_ref, "zoom-test-secret");
+        }
+        let raw_body =
+            br#"{"event":"endpoint.url_validation","payload":{"plainToken":"plain-123"}}"#;
+        let timestamp = OffsetDateTime::now_utc().unix_timestamp().to_string();
+        let message = [b"v0:".as_slice(), timestamp.as_bytes(), b":", raw_body].concat();
+        let mut mac = Hmac::<Sha256>::new_from_slice(b"zoom-test-secret").unwrap();
+        mac.update(&message);
+        let signature = format!("v0={}", hex::encode(mac.finalize().into_bytes()));
+        let mut headers = HeaderMap::new();
+        headers.insert("x-zm-request-timestamp", timestamp.parse().unwrap());
+        headers.insert("x-zm-signature", signature.parse().unwrap());
+
+        verify_zoom_webhook_signature(secret_ref, &headers, raw_body).unwrap();
+
+        let spec = WorkflowWebhookSpec {
+            slug: "zoom-post-meeting".to_owned(),
+            provider: Some("zoom".to_owned()),
+            auth: WorkflowWebhookAuth::Zoom {
+                secret_ref: secret_ref.to_owned(),
+            },
+            trigger_key: None,
+            allowed_methods: vec!["POST".to_owned()],
+            allowed_content_types: vec!["application/json".to_owned()],
+            filter: None,
+        };
+        let response = zoom_endpoint_validation_response(&spec, raw_body)
+            .unwrap()
+            .unwrap();
+        assert_eq!(response["plainToken"], "plain-123");
+
+        let mut challenge_mac = Hmac::<Sha256>::new_from_slice(b"zoom-test-secret").unwrap();
+        challenge_mac.update(b"plain-123");
+        assert_eq!(
+            response["encryptedToken"],
+            hex::encode(challenge_mac.finalize().into_bytes())
+        );
+    }
+
+    #[test]
+    fn rejects_zoom_signature_for_modified_body() {
+        let secret_ref = "CENTAUR_TEST_ZOOM_WEBHOOK_TAMPER_SECRET";
+        unsafe {
+            env::set_var(secret_ref, "zoom-test-secret");
+        }
+        let signed_body = br#"{"event":"recording.completed"}"#;
+        let timestamp = OffsetDateTime::now_utc().unix_timestamp().to_string();
+        let message = [b"v0:".as_slice(), timestamp.as_bytes(), b":", signed_body].concat();
+        let mut mac = Hmac::<Sha256>::new_from_slice(b"zoom-test-secret").unwrap();
+        mac.update(&message);
+        let signature = format!("v0={}", hex::encode(mac.finalize().into_bytes()));
+        let mut headers = HeaderMap::new();
+        headers.insert("x-zm-request-timestamp", timestamp.parse().unwrap());
+        headers.insert("x-zm-signature", signature.parse().unwrap());
+
+        assert!(
+            verify_zoom_webhook_signature(
+                secret_ref,
+                &headers,
+                br#"{"event":"meeting.summary_completed"}"#,
+            )
+            .is_err()
+        );
     }
 
     fn standard_webhook_headers(
