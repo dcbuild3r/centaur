@@ -44,6 +44,16 @@ spec:
                 name: {{ include "centaur.componentName" (dict "root" . "component" "api-rs") }}
                 port:
                   number: {{ .Values.apiRs.port }}
+          # Zoom validates and delivers post-meeting events directly to the
+          # durable workflow webhook edge in API-RS. Keep this more specific
+          # than Slackbot's shared-origin catch-all below.
+          - path: /api/webhooks/zoom-post-meeting
+            pathType: Exact
+            backend:
+              service:
+                name: {{ include "centaur.componentName" (dict "root" . "component" "api-rs") }}
+                port:
+                  number: {{ .Values.apiRs.port }}
 {{- end }}
 {{- if $console.publicUrl }}
           # Console UI, authentication, OAuth, PWA, and static-asset paths must
