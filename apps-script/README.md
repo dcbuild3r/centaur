@@ -96,10 +96,11 @@ scheduled-windowed for any scheduled caller.
 - When supplied, custom instructions are inserted as plain text immediately
   after the date in a newly created `Meeting Notes` tab. Retries never insert
   them into an existing copy, and attendee-entered notes are not overwritten.
-- Retries validate the existing copy without replacing attendee-entered notes.
-  If an older generated document has lost the source tab structure, it is
-  renamed as a superseded malformed copy and a fresh native clone is created;
-  the old document is retained for recovery instead of being deleted.
+- Retries reuse the recorded occurrence document and verify only that its
+  required tabs remain available. They do not compare its body with the
+  evolving source template or replace attendee-edited content. A missing
+  required tab fails closed without creating another document; only an
+  explicitly trashed occurrence document is replaced.
 - If template copying, tab validation, or safe date replacement fails, the
   newly created file is trashed and the occurrence is not advanced.
 - Public outbox entries are keyed by cadence, occurrence, and notification

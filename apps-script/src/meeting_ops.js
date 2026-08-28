@@ -248,12 +248,12 @@ function processAgenda_(meeting, now, requesterSlackUserId, options) {
       writeJsonProperty_(properties, recordKey, record);
     }
     if (!replaceRecordedDocument) {
-      try {
-        assertTemplateCopyReady_(record.docId, meeting, false);
-      } catch (error) {
-        supersedeMalformedDocument_(recordedFile);
-        replaceRecordedDocument = true;
-      }
+      // Existing occurrence documents are attendee-owned working artifacts.
+      // The source template can evolve and attendees can remove or reshape
+      // body elements after creation, so retry validation must never compare
+      // body structure or replace the file. Missing required tabs fail closed
+      // without creating another document.
+      assertTemplateCopyReady_(record.docId, meeting, false, false);
     }
     if (replaceRecordedDocument) {
       var replacement = createDocumentFromTemplate_(
@@ -279,7 +279,7 @@ function processAgenda_(meeting, now, requesterSlackUserId, options) {
       writeJsonProperty_(properties, recordKey, record);
     }
   }
-  assertTemplateCopyReady_(record.docId, meeting, false);
+  assertTemplateCopyReady_(record.docId, meeting, false, false);
   ensureDocumentEditors_(record.docId, meeting);
 
   if (!MeetingOpsPure.wasNotificationDelivered(
@@ -702,7 +702,12 @@ function findTabByTitle_(tabs, title) {
   return null;
 }
 
-function assertTemplateCopyReady_(documentId, meeting, compareSourceTopology) {
+function assertTemplateCopyReady_(
+  documentId,
+  meeting,
+  compareSourceTopology,
+  compareSourceStructure
+) {
   var target = DocumentApp.openById(documentId);
   var source = DocumentApp.openById(meeting.sourceDocId);
   if (compareSourceTopology !== false) {
@@ -720,11 +725,13 @@ function assertTemplateCopyReady_(documentId, meeting, compareSourceTopology) {
   if (!findTabByTitle_(target.getTabs(), formatTitle)) {
     throw new Error('Template copy has no ' + formatTitle + ' tab');
   }
-  [notesTitle, formatTitle].forEach(function (title) {
-    var sourceTab = findTabByTitle_(source.getTabs(), title);
-    var targetTab = findTabByTitle_(target.getTabs(), title);
-    assertTabStructurePreserved_(sourceTab, targetTab, title);
-  });
+  if (compareSourceStructure !== false) {
+    [notesTitle, formatTitle].forEach(function (title) {
+      var sourceTab = findTabByTitle_(source.getTabs(), title);
+      var targetTab = findTabByTitle_(target.getTabs(), title);
+      assertTabStructurePreserved_(sourceTab, targetTab, title);
+    });
+  }
 }
 
 function assertTabStructurePreserved_(sourceTab, targetTab, title) {

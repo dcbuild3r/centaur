@@ -687,6 +687,30 @@ test('scheduled retries keep one document for the same cadence occurrence', () =
   ))).toEqual(['ORBIE_OUTBOX:agenda:manual-cadence:2026-08-14:U1'])
 })
 
+test('scheduled retries do not replace a document after the template structure changes', () => {
+  prepareManualTemplate()
+  const request = {
+    scheduledByOrbie: true,
+    requesterSlackTeamId: 'TL1HM8UUU',
+    cadence: manualCadence(),
+    occurrenceAt: '2026-08-14T12:00:00Z',
+    now: '2026-08-14T07:15:00Z',
+  }
+
+  const first = runScheduledCadenceJob(request)
+  documents.get('manual-template').tabs[0].body.children.push(
+    new FakeElement('New template-only table', 'TABLE'),
+  )
+  documents.get(first.docId).tabs[0].body.children.splice(2, 1)
+
+  const retry = runScheduledCadenceJob(request)
+
+  expect(retry.docId).toBe(first.docId)
+  expect(files.get(first.docId).getName()).toBe('Manual Meeting — 2026-08-14')
+  expect([...files.keys()].filter((id) => id.startsWith('manual-template-copy-')))
+    .toEqual([first.docId])
+})
+
 test('owner-triggered Notion cadence bypasses scheduled channel allowlist', () => {
   prepareManualTemplate()
   const result = runScheduledCadenceJob({
