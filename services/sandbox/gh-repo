@@ -1,20 +1,48 @@
 #!/bin/bash
-# Run gh with the token placeholder selected for the current checkout's owner.
+# Run gh with the token placeholder selected for the target repository's owner.
 
 set -euo pipefail
 
 remote_url="$(git config --get remote.origin.url 2>/dev/null || true)"
-owner=""
+remote_repo=""
 case "$remote_url" in
     https://github.com/*/*|http://github.com/*/*)
-        owner="${remote_url#*github.com/}"
-        owner="${owner%%/*}"
+        remote_repo="${remote_url#*github.com/}"
         ;;
     git@github.com:*/*|ssh://git@github.com/*/*)
-        owner="${remote_url#*github.com[:/]}"
-        owner="${owner%%/*}"
+        remote_repo="${remote_url#*github.com[:/]}"
         ;;
 esac
+remote_repo="${remote_repo%.git}"
+
+repo=""
+previous=""
+for argument in "$@"; do
+    if [ "$previous" = "repo" ]; then
+        repo="$argument"
+        previous=""
+        continue
+    fi
+    case "$argument" in
+        --repo=*) repo="${argument#--repo=}" ;;
+        -R=*) repo="${argument#-R=}" ;;
+        --repo|-R) previous="repo" ;;
+    esac
+done
+repo="${repo%.git}"
+
+# An issue URL carries its own repository and must participate in owner-aware
+# token selection before we execute the command.
+if [ "${1:-}" = "issue" ] && [ "${2:-}" = "edit" ] && [[ "${3:-}" =~ ^https://github\.com/([^/]+)/([^/]+)/issues/([0-9]+)$ ]]; then
+    repo="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    owner="${BASH_REMATCH[1]}"
+fi
+
+owner="${repo%%/*}"
+if [ -z "$repo" ]; then
+    repo="$remote_repo"
+    owner="${remote_repo%%/*}"
+fi
 
 token_env="GITHUB_TOKEN"
 if [ "$owner" = "worldfnd" ]; then
@@ -24,6 +52,215 @@ fi
 if [ -z "${!token_env:-}" ]; then
     echo "Error: $token_env is not configured for ${owner:-the current repository}" >&2
     exit 1
+fi
+
+if [ "${1:-}" = "issue" ] && [ "${2:-}" = "create" ]; then
+    if [ -z "$owner" ] || [ "$owner" = "$repo" ]; then
+        echo "Error: could not determine the GitHub repository owner; run inside a GitHub checkout or pass --repo OWNER/REPO" >&2
+        exit 1
+    fi
+    shift 2
+    title=""
+    body=""
+    body_file=""
+    labels=()
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --repo|-R)
+                [ "$#" -ge 2 ] || { echo "Error: $1 requires a value" >&2; exit 2; }
+                repo="$2"
+                shift 2
+                ;;
+            --repo=*|-R=*) repo="${1#*=}"; shift ;;
+            --title|-t)
+                [ "$#" -ge 2 ] || { echo "Error: $1 requires a value" >&2; exit 2; }
+                title="$2"
+                shift 2
+                ;;
+            --title=*|-t=*) title="${1#*=}"; shift ;;
+            --body|-b)
+                [ "$#" -ge 2 ] || { echo "Error: $1 requires a value" >&2; exit 2; }
+                body="$2"
+                shift 2
+                ;;
+            --body=*|-b=*) body="${1#*=}"; shift ;;
+            --body-file|-F)
+                [ "$#" -ge 2 ] || { echo "Error: $1 requires a value" >&2; exit 2; }
+                body_file="$2"
+                shift 2
+                ;;
+            --body-file=*|-F=*) body_file="${1#*=}"; shift ;;
+            --label|-l)
+                [ "$#" -ge 2 ] || { echo "Error: $1 requires a value" >&2; exit 2; }
+                IFS=',' read -r -a parsed_labels <<< "$2"
+                labels+=("${parsed_labels[@]}")
+                shift 2
+                ;;
+            --label=*|-l=*)
+                IFS=',' read -r -a parsed_labels <<< "${1#*=}"
+                labels+=("${parsed_labels[@]}")
+                shift
+                ;;
+            *)
+                echo "Error: unsupported gh-repo issue create argument: $1" >&2
+                echo "Supported arguments: --repo/-R, --title/-t, --body/-b, --body-file/-F, --label/-l" >&2
+                exit 2
+                ;;
+        esac
+    done
+
+    repo="${repo%.git}"
+    if [ -z "$title" ]; then
+        echo "Error: --title is required for non-interactive issue creation" >&2
+        exit 2
+    fi
+    if [ -n "$body" ] && [ -n "$body_file" ]; then
+        echo "Error: use only one of --body and --body-file" >&2
+        exit 2
+    fi
+    if [ -n "$body_file" ]; then
+        if [ "$body_file" = "-" ]; then
+            body="$(cat)"
+        elif [ -r "$body_file" ]; then
+            body="$(<"$body_file")"
+        else
+            echo "Error: cannot read body file: $body_file" >&2
+            exit 2
+        fi
+    fi
+
+    labels_json="[]"
+    if [ "${#labels[@]}" -gt 0 ]; then
+        labels_json="$(printf '%s\n' "${labels[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')"
+    fi
+    payload="$(jq -cn --arg title "$title" --arg body "$body" --argjson labels "$labels_json" \
+        '{title: $title, body: $body, labels: $labels}')"
+    created="$(GH_TOKEN="${!token_env}" gh api --method POST "repos/$repo/issues" --input - <<< "$payload")"
+    issue_number="$(jq -er '.number' <<< "$created")" || {
+        echo "Error: GitHub issue creation response did not include an issue number" >&2
+        exit 1
+    }
+    verified="$(GH_TOKEN="${!token_env}" gh api "repos/$repo/issues/$issue_number")"
+    jq -er '.html_url' <<< "$verified"
+    exit
+fi
+
+if [ "${1:-}" = "issue" ] && [ "${2:-}" = "edit" ]; then
+    if [ -z "$owner" ] || [ "$owner" = "$repo" ]; then
+        echo "Error: could not determine the GitHub repository owner; run inside a GitHub checkout, pass --repo OWNER/REPO, or use an issue URL" >&2
+        exit 1
+    fi
+    [ "$#" -ge 3 ] || { echo "Error: issue number or URL is required" >&2; exit 2; }
+    issue_ref="$3"
+    shift 3
+    if [[ "$issue_ref" =~ ^https://github\.com/([^/]+)/([^/]+)/issues/([0-9]+)$ ]]; then
+        repo="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+        issue_number="${BASH_REMATCH[3]}"
+    elif [[ "$issue_ref" =~ ^[0-9]+$ ]]; then
+        issue_number="$issue_ref"
+    else
+        echo "Error: issue must be a number or a full GitHub issue URL: $issue_ref" >&2
+        exit 2
+    fi
+
+    title=""
+    body=""
+    body_file=""
+    title_set=false
+    body_set=false
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --repo|-R)
+                [ "$#" -ge 2 ] || { echo "Error: $1 requires a value" >&2; exit 2; }
+                repo="$2"
+                shift 2
+                ;;
+            --repo=*|-R=*) repo="${1#*=}"; shift ;;
+            --title|-t)
+                [ "$#" -ge 2 ] || { echo "Error: $1 requires a value" >&2; exit 2; }
+                title="$2"
+                title_set=true
+                shift 2
+                ;;
+            --title=*|-t=*) title="${1#*=}"; title_set=true; shift ;;
+            --body|-b)
+                [ "$#" -ge 2 ] || { echo "Error: $1 requires a value" >&2; exit 2; }
+                body="$2"
+                body_set=true
+                shift 2
+                ;;
+            --body=*|-b=*) body="${1#*=}"; body_set=true; shift ;;
+            --body-file|-F)
+                [ "$#" -ge 2 ] || { echo "Error: $1 requires a value" >&2; exit 2; }
+                body_file="$2"
+                shift 2
+                ;;
+            --body-file=*|-F=*) body_file="${1#*=}"; shift ;;
+            *)
+                echo "Error: unsupported gh-repo issue edit argument: $1" >&2
+                echo "Supported arguments: ISSUE_NUMBER_OR_URL, --repo/-R, --title/-t, --body/-b, --body-file/-F" >&2
+                exit 2
+                ;;
+        esac
+    done
+
+    repo="${repo%.git}"
+    owner="${repo%%/*}"
+    token_env="GITHUB_TOKEN"
+    if [ "$owner" = "worldfnd" ]; then
+        token_env="GITHUB_TOKEN_WORLDFND"
+    fi
+    if [ -z "${!token_env:-}" ]; then
+        echo "Error: $token_env is not configured for ${owner:-the current repository}" >&2
+        exit 1
+    fi
+    if [ -n "$body_file" ] && [ "$body_set" = true ]; then
+        echo "Error: use only one of --body and --body-file" >&2
+        exit 2
+    fi
+    if [ -n "$body_file" ]; then
+        if [ "$body_file" = "-" ]; then
+            body="$(cat)"
+        elif [ -r "$body_file" ]; then
+            body="$(<"$body_file")"
+        else
+            echo "Error: cannot read body file: $body_file" >&2
+            exit 2
+        fi
+        body_set=true
+    fi
+    if [ "$title_set" = false ] && [ "$body_set" = false ]; then
+        echo "Error: at least one of --title, --body, or --body-file is required" >&2
+        exit 2
+    fi
+
+    payload="{}"
+    if [ "$title_set" = true ]; then
+        payload="$(jq -cn --argjson current "$payload" --arg title "$title" '$current + {title: $title}')"
+    fi
+    if [ "$body_set" = true ]; then
+        payload="$(jq -cn --argjson current "$payload" --arg body "$body" '$current + {body: $body}')"
+    fi
+    updated="$(GH_TOKEN="${!token_env}" gh api --method PATCH "repos/$repo/issues/$issue_number" --input - <<< "$payload")"
+    updated_number="$(jq -er '.number' <<< "$updated")" || {
+        echo "Error: GitHub issue update response did not include an issue number" >&2
+        exit 1
+    }
+    verified="$(GH_TOKEN="${!token_env}" gh api "repos/$repo/issues/$updated_number")"
+    if ! jq -e \
+        --arg title "$title" \
+        --arg body "$body" \
+        --argjson title_set "$title_set" \
+        --argjson body_set "$body_set" \
+        '((($title_set | not) or .title == $title) and (($body_set | not) or (.body // "") == $body))' \
+        <<< "$verified" >/dev/null; then
+        echo "Error: GitHub issue read-back did not match the requested update" >&2
+        exit 1
+    fi
+    jq -er '.html_url' <<< "$verified"
+    exit
 fi
 
 GH_TOKEN="${!token_env}" exec gh "$@"

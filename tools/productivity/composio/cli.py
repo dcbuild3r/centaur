@@ -1,4 +1,4 @@
-"""CLI for Execute tools from 1000+ services via Composio (GitHub, Gmail, Slack, Notion, etc.)."""
+"""CLI for executing non-GitHub tools via Composio."""
 
 from dotenv import load_dotenv
 
@@ -9,7 +9,7 @@ import typer
 
 app = typer.Typer(
     name="composio",
-    help="Execute tools from 1000+ services via Composio (GitHub, Gmail, Slack, Notion, etc.)",
+    help="Execute non-GitHub tools from services such as Gmail, Slack, and Notion via Composio",
 )
 
 
@@ -25,7 +25,7 @@ def health():
 
     client = _client()
     try:
-        details = client.list_tools("github")
+        details = client.list_tools("hackernews")
         payload = {"ok": True, "tool": "composio", "error": None, "details": details}
     except Exception as exc:
         payload = {"ok": False, "tool": "composio", "error": str(exc), "details": {}}

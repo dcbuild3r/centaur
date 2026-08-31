@@ -12,9 +12,13 @@ transforms:
           replace:
             proxy_value: GITHUB_TOKEN
             match_headers: ["Authorization"]
-          rules: [{ host: github.com }, { host: api.github.com }]
+          rules:
+            - { host: github.com, http_methods: [GET, HEAD, POST] }
+            - { host: api.github.com, http_methods: [GET, HEAD, POST, PUT, PATCH, DELETE] }
         - id: GITHUB_TOKEN_WORLDFND_AUTHORIZATION
           replace:
             proxy_value: GITHUB_TOKEN_WORLDFND
             match_headers: ["Authorization"]
-          rules: [{ host: github.com }, { host: api.github.com }]
+          rules:
+            - { host: github.com, http_methods: [GET, HEAD, POST] }
+            - { host: api.github.com, http_methods: [GET, HEAD, POST, PUT, PATCH, DELETE] }

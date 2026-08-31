@@ -1,7 +1,7 @@
 [project]
 name = "centaur-composio-tool"
 version = "0.1.0"
-description = "Execute tools from 1000+ services via Composio (GitHub, Gmail, Slack, Notion, etc.)"
+description = "Execute non-GitHub tools from services via Composio"
 requires-python = ">=3.11"
 dependencies = [
     "python-dotenv>=1.0.0",

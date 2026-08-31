@@ -31,6 +31,10 @@ class SystemPromptTest(unittest.TestCase):
         self.assertIn("run `git-branch <org/repo> <branch-slug>`", prompt)
         self.assertIn("use `gh-repo` instead of plain `gh`", prompt)
         self.assertIn("Git pushes use the same owner-aware selection automatically", prompt)
+        self.assertIn("Create issues only with `gh-repo issue create`", prompt)
+        self.assertIn("edit issues only with `gh-repo issue edit`", prompt)
+        self.assertIn("uses GitHub's REST API", prompt)
+        self.assertIn("Do not use a generic issue create/edit tool", prompt)
 
     def test_granola_share_links_require_direct_retrieval(self) -> None:
         prompt = SYSTEM_PROMPT.read_text()

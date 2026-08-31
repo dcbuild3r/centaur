@@ -12,6 +12,32 @@ log = logging.getLogger(__name__)
 # share this default scope; pass a distinct user_id when connected accounts
 # must be isolated per user or per thread.
 _DEFAULT_USER_ID = "centaur"
+_BLOCKED_TOOLKITS = frozenset({"github"})
+_BLOCKED_ACTION_PREFIXES = ("GITHUB_",)
+_GITHUB_BLOCKED_ERROR = (
+    "GitHub is disabled in the generic Composio tool. "
+    "Use the dedicated GitHub integration instead."
+)
+
+
+def _blocked_result() -> dict:
+    return {"error": _GITHUB_BLOCKED_ERROR, "successful": False}
+
+
+def _is_blocked_toolkit(toolkit: str) -> bool:
+    return toolkit.strip().casefold() in _BLOCKED_TOOLKITS
+
+
+def _is_blocked_action(tool_slug: str) -> bool:
+    normalized = tool_slug.strip().upper()
+    return normalized.startswith(_BLOCKED_ACTION_PREFIXES)
+
+
+def _is_blocked_tool(raw: object) -> bool:
+    if not isinstance(raw, dict):
+        return False
+    function = raw.get("function", {})
+    return isinstance(function, dict) and _is_blocked_action(str(function.get("name", "")))
 
 
 def _extract_tools(raw: list) -> list[dict]:
@@ -45,9 +71,11 @@ class ComposioClient:
         return self._composio
 
     def list_tools(self, toolkit: str, user_id: str = _DEFAULT_USER_ID) -> dict:
-        """List available tools for a toolkit (e.g. 'github', 'gmail', 'slack', 'notion')."""
+        """List available tools for a toolkit (e.g. 'gmail', 'slack', 'notion')."""
         if not toolkit or not toolkit.strip():
             return {"error": "toolkit is required", "successful": False}
+        if _is_blocked_toolkit(toolkit):
+            return _blocked_result()
         try:
             c = self._get_client()
             raw = c.tools.get(user_id, toolkits=[toolkit.strip()])
@@ -64,7 +92,11 @@ class ComposioClient:
         try:
             c = self._get_client()
             raw = c.tools.get(user_id, search=query.strip())
-            items = raw[:20] if isinstance(raw, list) else []
+            items = (
+                [item for item in raw if not _is_blocked_tool(item)][:20]
+                if isinstance(raw, list)
+                else []
+            )
             tools = _extract_tools(items)
             return {"query": query, "tools": tools, "count": len(tools)}
         except Exception as exc:
@@ -84,6 +116,8 @@ class ComposioClient:
         """
         if not tool_slug or not tool_slug.strip():
             return {"error": "tool_slug is required", "successful": False}
+        if _is_blocked_action(tool_slug):
+            return _blocked_result()
         try:
             c = self._get_client()
             # Version check requires per-toolkit version pinning which is
@@ -113,6 +147,8 @@ class ComposioClient:
         """Get the input/output schema for a specific tool."""
         if not tool_slug or not tool_slug.strip():
             return {"error": "tool_slug is required", "successful": False}
+        if _is_blocked_action(tool_slug):
+            return _blocked_result()
         try:
             c = self._get_client()
             raw = c.tools.get(user_id, search=tool_slug.strip())

@@ -75,6 +75,15 @@ fn harness_auth_fragments_are_baked_in() {
         placeholders.get("SLACK_BOT_TOKEN").map(String::as_str),
         None
     );
+
+    let infra = infra_fragment().unwrap();
+    for secret in &infra.transforms[0].config.secrets[..2] {
+        assert_eq!(
+            secret.rules[1]["http_methods"],
+            serde_yaml::to_value(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]).unwrap(),
+            "GitHub API credential rules must explicitly permit issue mutations"
+        );
+    }
 }
 
 #[test]
