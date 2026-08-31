@@ -132,7 +132,9 @@ jobs:
 
   harness-server-checks:
     name: Harness server fmt, clippy, and tests
-    runs-on: depot-ubuntu-24.04-16
+    # Keep pull-request validation independent of external Depot capacity.
+    # Main and merge-queue runs retain the larger managed runner.
+    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || 'depot-ubuntu-24.04-16' }}
     needs: ci_changes
     if: needs.ci_changes.outputs.harness_server_checks == 'true'
     steps:
@@ -148,6 +150,9 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: crates/harness-server
+          # PR runners only need cache restore. Saving the compiled target tree
+          # after tests can exhaust the runner disk and fail an otherwise green job.
+          save-if: ${{ github.event_name != 'pull_request' }}
 
       - name: Format
         working-directory: crates/harness-server
@@ -191,6 +196,9 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: services/api-rs
+          # PR runners only need cache restore. Saving the compiled target tree
+          # after tests can exhaust the runner disk and fail an otherwise green job.
+          save-if: ${{ github.event_name != 'pull_request' }}
 
       - name: Format
         working-directory: services/api-rs

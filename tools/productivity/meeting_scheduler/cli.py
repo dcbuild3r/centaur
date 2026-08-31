@@ -58,11 +58,32 @@ def post_meeting_candidates(
     _print(_client().post_meeting_candidates(**json.loads(payload)))
 
 
+@app.command("post-meeting-candidate-by-zoom-id")
+def post_meeting_candidate_by_zoom_id(
+    payload: str = typer.Argument(..., help="JSON Zoom meeting ID request"),
+) -> None:
+    _print(_client().post_meeting_candidate_by_zoom_id(**json.loads(payload)))
+
+
 @app.command("collect-post-meeting-artifacts")
 def collect_post_meeting_artifacts(
     payload: str = typer.Argument(..., help="JSON artifact request"),
 ) -> None:
     _print(_client().collect_post_meeting_artifacts(**json.loads(payload)))
+
+
+@app.command("record-post-meeting-processing")
+def record_post_meeting_processing(
+    payload: str = typer.Argument(..., help="JSON processing state request"),
+) -> None:
+    _print(_client().record_post_meeting_processing(**json.loads(payload)))
+
+
+@app.command("claim-post-meeting-processing")
+def claim_post_meeting_processing(
+    payload: str = typer.Argument(..., help="JSON processing lease request"),
+) -> None:
+    _print(_client().claim_post_meeting_processing(**json.loads(payload)))
 
 
 @app.command("mark-post-meeting-delivered")

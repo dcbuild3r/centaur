@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import hashlib
 import importlib
 import inspect
 import sys
@@ -132,9 +133,14 @@ class UnverifiedDriveClient(FakeClient):
 
 
 class FakeContext:
-    def __init__(self):
+    def __init__(self, agent_result=None, agent_error=None):
+        self.run_id = "test-workflow-run"
         self.step_names = []
         self.posts = []
+        self.agent_prompts = []
+        self.agent_result = agent_result
+        self.agent_error = agent_error
+        self.logs = []
 
     async def step(self, name, fn, **_kwargs):
         self.step_names.append(name)
@@ -144,6 +150,15 @@ class FakeContext:
     async def post_to_slack(self, channel, text, **_kwargs):
         self.posts.append((channel, text))
         return {"sent": True, "channel": channel}
+
+    async def agent_turn(self, prompt, **_kwargs):
+        self.agent_prompts.append(prompt)
+        if self.agent_error:
+            raise self.agent_error
+        return self.agent_result
+
+    def log(self, event, **fields):
+        self.logs.append((event, fields))
 
 
 class RecordingToolContext:
@@ -1373,6 +1388,7 @@ class ScheduledFakeClient:
         self.bookings = []
         self.booking_updates = []
         self.post_candidates = []
+        self.post_candidates_by_zoom_id = {}
         self.post_operations = []
         self.post_publications = []
 
@@ -1462,12 +1478,20 @@ class ScheduledFakeClient:
         self.post_operations.append((operation, args))
         if operation == "post_meeting_candidates":
             return list(self.post_candidates)
+        if operation == "post_meeting_candidate_by_zoom_id":
+            candidate = self.post_candidates_by_zoom_id.get(args["meeting_id"])
+            return candidate
         if operation == "collect_post_meeting_artifacts":
             return {
                 "ready": True,
+                "transcript_status": "ready",
                 "summary_text": "Decisions were made.",
                 "transcript": "WEBVTT\nHello world.",
             }
+        if operation == "claim_post_meeting_processing":
+            return {"claimed": True, "lease_token": "lease-123"}
+        if operation == "record_post_meeting_processing":
+            return {"status": "processing", **args}
         if operation == "mark_post_meeting_delivered":
             return {"status": "completed", "occurrenceKey": args["occurrence_key"]}
         raise AssertionError(operation)
@@ -1475,6 +1499,329 @@ class ScheduledFakeClient:
     async def publish_notion_meeting_summary(self, page_id, **kwargs):
         self.post_publications.append((page_id, kwargs))
         return {"page_id": page_id, "created": True}
+
+
+def _zoom_webhook(
+    event="recording.transcript_completed", meeting_id="123", uuid="u-123"
+):
+    return {
+        "body": {
+            "event": event,
+            "payload": {"object": {"id": meeting_id, "uuid": uuid}},
+        }
+    }
+
+
+def _post_candidate(meeting_id="123", occurrence_key="weekly-sync:2026-08-10"):
+    return {
+        "occurrence_key": occurrence_key,
+        "cadence_id": "weekly-sync",
+        "title": "Weekly Sync",
+        "actual_start": "2026-08-10T08:00:00+00:00",
+        "zoom_meeting_id": meeting_id,
+        "attendee_emails": ["mandy.payne@world.org"],
+    }
+
+
+def test_zoom_webhook_parser_reads_event_and_object_id_or_uuid():
+    parsed = meeting_automation._zoom_webhook_input(
+        meeting_automation.Input(webhook=_zoom_webhook(meeting_id=456))
+    )
+
+    assert parsed == {
+        "event": "recording.transcript_completed",
+        "meeting_id": "456",
+    }
+    uuid_only = _zoom_webhook(meeting_id=None, uuid="occurrence-uuid")
+    del uuid_only["body"]["payload"]["object"]["id"]
+    assert (
+        meeting_automation._zoom_webhook_input(
+            meeting_automation.Input(webhook=uuid_only)
+        )["meeting_id"]
+        == "occurrence-uuid"
+    )
+
+
+def test_zoom_webhook_processes_target_occurrence_without_reconciliation_polling(
+    monkeypatch,
+):
+    client = ScheduledFakeClient(_published_row())
+    client.post_candidates = [_post_candidate("decoy")]
+    client.post_candidates_by_zoom_id["123"] = _post_candidate("123")
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+
+    result = asyncio.run(
+        meeting_automation.handler(
+            meeting_automation.Input(webhook=_zoom_webhook()), FakeContext()
+        )
+    )
+
+    assert result["status"] == "delivered"
+    assert result["meeting_id"] == "123"
+    claim_args = next(
+        args
+        for operation, args in client.post_operations
+        if operation == "claim_post_meeting_processing"
+    )
+    assert claim_args["force"] is False
+    assert claim_args["lease_seconds"] == 3600
+    assert (
+        claim_args["owner_token"]
+        == hashlib.sha256(b"test-workflow-run:weekly-sync:2026-08-10").hexdigest()
+    )
+    assert not any(
+        operation == "post_meeting_candidates"
+        for operation, _args in client.post_operations
+    )
+    assert client.post_publications[0][1]["meeting_id"] == "123"
+
+
+def test_transcript_only_runs_durable_orbie_summary_and_publishes_fallback(monkeypatch):
+    client = ScheduledFakeClient(_published_row())
+    client.post_candidates_by_zoom_id["123"] = _post_candidate("123")
+    client.artifact_result = {
+        "ready": False,
+        "transcript_status": "ready",
+        "transcript": "WEBVTT\nThe team will ship the fix on Friday.",
+        "summary_text": "",
+        "action_items": "",
+    }
+
+    async def scheduling_operation(operation, args):
+        client.post_operations.append((operation, args))
+        if operation == "post_meeting_candidate_by_zoom_id":
+            return client.post_candidates_by_zoom_id[args["meeting_id"]]
+        if operation == "collect_post_meeting_artifacts":
+            return client.artifact_result
+        if operation == "claim_post_meeting_processing":
+            return {"claimed": True, "lease_token": "lease-123"}
+        if operation == "record_post_meeting_processing":
+            return {"status": "processing", **args}
+        if operation == "mark_post_meeting_delivered":
+            return {"status": "completed", "occurrenceKey": args["occurrence_key"]}
+        raise AssertionError(operation)
+
+    client.scheduling_operation = scheduling_operation
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+    context = FakeContext(
+        agent_result='{"summary":"Ship the fix Friday.","action_items":["Ship the fix Friday"]}'
+    )
+
+    result = asyncio.run(
+        meeting_automation.handler(
+            meeting_automation.Input(post_meeting_zoom_id="123"), context
+        )
+    )
+
+    assert result["status"] == "delivered"
+    assert len(context.agent_prompts) == 1
+    assert "The team will ship the fix on Friday." in context.agent_prompts[0]
+    publication = client.post_publications[0][1]
+    assert publication["summary"] == "Ship the fix Friday."
+    assert publication["action_items"] == "Ship the fix Friday"
+    processing = next(
+        args
+        for operation, args in client.post_operations
+        if operation == "record_post_meeting_processing"
+    )
+    assert processing["summary_source"] == "orbie"
+
+
+def test_agent_failure_publishes_transcript_derived_fallback(monkeypatch):
+    client = ScheduledFakeClient(_published_row())
+    client.post_candidates_by_zoom_id["123"] = _post_candidate("123")
+    client.artifact_result = {
+        "ready": False,
+        "transcript_status": "ready",
+        "transcript": "WEBVTT\nAlice: Confirmed the launch date is Friday.",
+        "summary_text": "",
+    }
+    original = client.scheduling_operation
+
+    async def collect_with_transcript(operation, args):
+        if operation == "collect_post_meeting_artifacts":
+            client.post_operations.append((operation, args))
+            return client.artifact_result
+        return await original(operation, args)
+
+    client.scheduling_operation = collect_with_transcript
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+
+    result = asyncio.run(
+        meeting_automation.handler(
+            meeting_automation.Input(post_meeting_zoom_id="123"),
+            FakeContext(agent_error=RuntimeError("agent unavailable")),
+        )
+    )
+
+    assert result["status"] == "delivered"
+    assert "Transcript-derived fallback" in client.post_publications[0][1]["summary"]
+    assert any(
+        operation == "record_post_meeting_processing"
+        and args.get("summary_source") == "transcript_fallback"
+        for operation, args in client.post_operations
+    )
+
+
+def test_pending_transcript_is_observable_and_not_delivered(monkeypatch):
+    client = ScheduledFakeClient(_published_row())
+    client.post_candidates_by_zoom_id["123"] = _post_candidate("123")
+    client.artifact_result = {
+        "ready": False,
+        "transcript_status": "pending",
+        "transcript": "",
+        "summary_text": "",
+    }
+    original = client.scheduling_operation
+
+    async def pending_artifacts(operation, args):
+        if operation == "collect_post_meeting_artifacts":
+            client.post_operations.append((operation, args))
+            return client.artifact_result
+        return await original(operation, args)
+
+    client.scheduling_operation = pending_artifacts
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+
+    result = asyncio.run(
+        meeting_automation.handler(
+            meeting_automation.Input(post_meeting_zoom_id="123"), FakeContext()
+        )
+    )
+
+    assert result["status"] == "pending_transcript"
+    assert not client.post_publications
+    assert not any(
+        operation == "mark_post_meeting_delivered"
+        for operation, _args in client.post_operations
+    )
+
+
+def test_active_post_meeting_lease_prevents_duplicate_publication(monkeypatch):
+    client = ScheduledFakeClient(_published_row())
+    client.post_candidates_by_zoom_id["123"] = _post_candidate("123")
+    original = client.scheduling_operation
+
+    async def busy_claim(operation, args):
+        if operation == "claim_post_meeting_processing":
+            client.post_operations.append((operation, args))
+            return {"claimed": False, "reason": "active_lease"}
+        return await original(operation, args)
+
+    client.scheduling_operation = busy_claim
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+
+    result = asyncio.run(
+        meeting_automation.handler(
+            meeting_automation.Input(webhook=_zoom_webhook()), FakeContext()
+        )
+    )
+
+    assert result["status"] == "processing"
+    assert result["reason"] == "active_lease"
+    assert not client.post_publications
+    assert not any(
+        operation == "collect_post_meeting_artifacts"
+        for operation, _ in client.post_operations
+    )
+
+
+def test_operator_replay_is_idempotent_after_delivery(monkeypatch):
+    client = ScheduledFakeClient(_published_row())
+    client.post_candidates_by_zoom_id["123"] = _post_candidate("123")
+    original = client.scheduling_operation
+
+    async def deliver_once(operation, args):
+        if operation == "mark_post_meeting_delivered":
+            client.post_operations.append((operation, args))
+            client.post_candidates_by_zoom_id.pop("123", None)
+            return {"status": "completed", "occurrenceKey": args["occurrence_key"]}
+        return await original(operation, args)
+
+    client.scheduling_operation = deliver_once
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+
+    first = asyncio.run(
+        meeting_automation.handler(
+            meeting_automation.Input(post_meeting_zoom_id="123"), FakeContext()
+        )
+    )
+    second = asyncio.run(
+        meeting_automation.handler(
+            meeting_automation.Input(post_meeting_zoom_id="123"), FakeContext()
+        )
+    )
+
+    assert first["status"] == "delivered"
+    assert second == {
+        "status": "skipped",
+        "reason": "meeting_occurrence_not_found",
+        "meeting_id": "123",
+        "source": "operator_replay",
+    }
+    assert len(client.post_publications) == 1
+    assert sum(kind == "dm" for kind, *_ in client.sent) == 1
+    claim_args = next(
+        args
+        for operation, args in client.post_operations
+        if operation == "claim_post_meeting_processing"
+    )
+    assert claim_args["force"] is False
+
+
+def test_notion_failure_records_retryable_state_before_retry(monkeypatch):
+    client = ScheduledFakeClient(_published_row())
+    client.post_candidates_by_zoom_id["123"] = _post_candidate("123")
+
+    async def fail_publication(_page_id, **_kwargs):
+        raise RuntimeError("notion unavailable")
+
+    client.publish_notion_meeting_summary = fail_publication
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+
+    with pytest.raises(RuntimeError, match="notion unavailable"):
+        asyncio.run(
+            meeting_automation.handler(
+                meeting_automation.Input(post_meeting_zoom_id="123"), FakeContext()
+            )
+        )
+
+    assert any(
+        operation == "record_post_meeting_processing"
+        and args.get("state") == "failed_retryable"
+        and args.get("error") == "notion:RuntimeError"
+        and args.get("lease_token") == "lease-123"
+        for operation, args in client.post_operations
+    )
+
+
+def test_artifact_failure_records_retryable_state_before_retry(monkeypatch):
+    client = ScheduledFakeClient(_published_row())
+    client.post_candidates_by_zoom_id["123"] = _post_candidate("123")
+    original = client.scheduling_operation
+
+    async def fail_artifacts(operation, args):
+        if operation == "collect_post_meeting_artifacts":
+            raise TimeoutError("zoom unavailable")
+        return await original(operation, args)
+
+    client.scheduling_operation = fail_artifacts
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+
+    with pytest.raises(TimeoutError, match="zoom unavailable"):
+        asyncio.run(
+            meeting_automation.handler(
+                meeting_automation.Input(post_meeting_zoom_id="123"), FakeContext()
+            )
+        )
+
+    assert any(
+        operation == "record_post_meeting_processing"
+        and args.get("state") == "failed_retryable"
+        and args.get("error") == "artifacts:TimeoutError"
+        and args.get("lease_token") == "lease-123"
+        for operation, args in client.post_operations
+    )
 
 
 class ManualNotionFakeClient(FakeClient):

@@ -46,6 +46,10 @@ SCHEDULER_STATUSES = {"pending", "booked", "blocked", "completed", "cancelled"}
 EMAIL_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
 WRITABLE_CALENDAR_ACCESS_ROLES = frozenset({"writer", "owner"})
 MAX_TRANSCRIPT_BYTES = 10 * 1024 * 1024
+MAX_MEETING_ID_LENGTH = 128
+MAX_POST_MEETING_ERROR_LENGTH = 2000
+MAX_POST_MEETING_STATE_LENGTH = 64
+MAX_POST_MEETING_EVENT_LENGTH = 128
 
 
 class MeetingSchedulerError(RuntimeError):
@@ -265,6 +269,24 @@ def _require_occurrence_key(value: Any) -> str:
     if not key or len(key) > 240 or any(char.isspace() for char in key):
         raise MeetingSchedulerError("occurrence_key must be a non-empty, bounded token")
     return key
+
+
+def _require_zoom_meeting_id(value: Any) -> str:
+    meeting_id = str(value or "").strip()
+    if (
+        not meeting_id
+        or len(meeting_id) > MAX_MEETING_ID_LENGTH
+        or any(char.isspace() for char in meeting_id)
+    ):
+        raise MeetingSchedulerError("meeting_id must be a non-empty, bounded token")
+    return meeting_id
+
+
+def _require_post_meeting_text(value: Any, *, field: str, limit: int) -> str:
+    text = str(value or "").strip()
+    if not text or len(text) > limit or any(ord(char) < 32 for char in text):
+        raise MeetingSchedulerError(f"{field} must be non-empty and bounded")
+    return text
 
 
 def _slot_confirmation_token(
@@ -743,13 +765,7 @@ class MeetingSchedulerClient:
         """Return recording metadata and the bounded VTT transcript, when ready."""
 
         _require_enabled()
-        normalized_id = str(meeting_id or "").strip()
-        if (
-            not normalized_id
-            or len(normalized_id) > 128
-            or any(char.isspace() for char in normalized_id)
-        ):
-            raise MeetingSchedulerError("meeting_id must be a non-empty, bounded token")
+        normalized_id = _require_zoom_meeting_id(meeting_id)
         recording = self._zoom_request(
             "GET", f"/meetings/{quote(normalized_id, safe='')}/recordings"
         )
@@ -790,13 +806,7 @@ class MeetingSchedulerClient:
         """Return Zoom AI Companion's processed meeting summary, when available."""
 
         _require_enabled()
-        normalized_id = str(meeting_id or "").strip()
-        if (
-            not normalized_id
-            or len(normalized_id) > 128
-            or any(char.isspace() for char in normalized_id)
-        ):
-            raise MeetingSchedulerError("meeting_id must be a non-empty, bounded token")
+        normalized_id = _require_zoom_meeting_id(meeting_id)
         summary = self._zoom_request(
             "GET", f"/meetings/{quote(normalized_id, safe='')}/meeting_summary"
         )
@@ -823,6 +833,11 @@ class MeetingSchedulerClient:
                   and coalesce(actual_start, requested_start)
                       + make_interval(mins => duration_minutes) <= $1
                   and coalesce(metadata->>'post_meeting_status', '') <> 'delivered'
+                  and coalesce(metadata->>'post_meeting_status', '') <> 'failed_terminal'
+                  and (
+                    coalesce(metadata->>'post_meeting_next_retry_at', '') = ''
+                    or (metadata->>'post_meeting_next_retry_at')::timestamptz <= $1
+                  )
                 order by coalesce(actual_start, requested_start), occurrence_key
                 limit $2
                 """,
@@ -832,6 +847,313 @@ class MeetingSchedulerClient:
             return [_serialize_row(row) for row in rows]
 
         return asyncio.run(_with_connection(query))
+
+    def post_meeting_candidate_by_zoom_id(self, meeting_id: str) -> dict[str, Any] | None:
+        """Return the one ended, booked, and not-yet-delivered Zoom occurrence."""
+
+        _require_enabled()
+        normalized_id = _require_zoom_meeting_id(meeting_id)
+
+        async def query(connection: asyncpg.Connection) -> dict[str, Any] | None:
+            row = await connection.fetchrow(
+                """
+                select * from orbie_meeting_occurrences
+                where status = 'booked'
+                  and zoom_meeting_id = $1
+                  and coalesce(actual_start, requested_start)
+                      + make_interval(mins => duration_minutes) <= now()
+                  and coalesce(metadata->>'post_meeting_status', '') <> 'delivered'
+                order by coalesce(actual_start, requested_start), occurrence_key
+                limit 1
+                """,
+                normalized_id,
+            )
+            return _serialize_row(row)
+
+        return asyncio.run(_with_connection(query))
+
+    def record_post_meeting_processing(
+        self,
+        occurrence_key: str,
+        *,
+        state: str,
+        event: str,
+        error: str | None = None,
+        attempt: int | None = None,
+        meeting_id: str | None = None,
+        transcript_status: str | None = None,
+        summary_source: str | None = None,
+        lease_token: str,
+    ) -> dict[str, Any]:
+        """Record retryable post-meeting processing metadata without delivery."""
+
+        _require_enabled()
+        key = _require_occurrence_key(occurrence_key)
+        normalized_state = _require_post_meeting_text(
+            state, field="state", limit=MAX_POST_MEETING_STATE_LENGTH
+        )
+        if normalized_state.lower() == "delivered":
+            raise MeetingSchedulerError("state cannot mark a meeting delivered")
+        normalized_event = _require_post_meeting_text(
+            event, field="event", limit=MAX_POST_MEETING_EVENT_LENGTH
+        )
+        safe_error = str(error or "").strip()[:MAX_POST_MEETING_ERROR_LENGTH]
+        if any(ord(char) < 32 for char in safe_error):
+            raise MeetingSchedulerError("error must not contain control characters")
+        normalized_attempt = _positive_int(attempt, "attempt") if attempt is not None else None
+        observed_at = dt.datetime.now(dt.UTC)
+        timestamp = _rfc3339(observed_at)
+        normalized_meeting_id = (
+            _require_zoom_meeting_id(meeting_id) if meeting_id is not None else ""
+        )
+        normalized_transcript_status = str(transcript_status or "").strip()[:64]
+        normalized_summary_source = str(summary_source or "").strip()[:64]
+        normalized_lease_token = str(lease_token or "").strip()
+        if not normalized_lease_token:
+            raise MeetingSchedulerError("lease_token is required")
+        if len(normalized_lease_token) > 128 or any(
+            char.isspace() for char in normalized_lease_token
+        ):
+            raise MeetingSchedulerError("lease_token must be a bounded token")
+
+        async def update(connection: asyncpg.Connection) -> dict[str, Any]:
+            async with connection.transaction():
+                current_row = await connection.fetchrow(
+                    "select * from orbie_meeting_occurrences where occurrence_key = $1 for update",
+                    key,
+                )
+                current = _serialize_row(current_row)
+                if current is None:
+                    raise MeetingSchedulerError("meeting occurrence does not exist")
+                if str(current.get("status") or "").lower() != "booked":
+                    raise MeetingSchedulerError(
+                        "meeting occurrence is no longer eligible for post-meeting processing"
+                    )
+                metadata = current.get("metadata")
+                metadata = metadata if isinstance(metadata, dict) else {}
+                if str(metadata.get("post_meeting_status") or "").lower() == "delivered":
+                    raise MeetingSchedulerError("meeting occurrence is already delivered")
+                if not secrets.compare_digest(
+                    str(metadata.get("post_meeting_lease_token") or ""),
+                    normalized_lease_token,
+                ):
+                    raise MeetingSchedulerError("post-meeting processing lease was lost")
+                raw_lease_until = str(metadata.get("post_meeting_lease_until") or "").strip()
+                try:
+                    lease_until = _parse_rfc3339(raw_lease_until, field="post_meeting_lease_until")
+                except MeetingSchedulerError as error:
+                    raise MeetingSchedulerError(
+                        "post-meeting processing lease is invalid"
+                    ) from error
+                if lease_until <= observed_at:
+                    raise MeetingSchedulerError("post-meeting processing lease expired")
+                try:
+                    previous_attempt = max(0, int(metadata.get("post_meeting_attempt") or 0))
+                except (TypeError, ValueError):
+                    previous_attempt = 0
+                # The atomic claim owns attempt increments. State updates made by
+                # the claimed worker preserve that attempt number.
+                next_attempt = normalized_attempt or max(previous_attempt, 1)
+                retryable = normalized_state.lower() in {
+                    "pending_transcript",
+                    "error",
+                    "failed_retryable",
+                }
+                terminal = retryable and next_attempt >= 12
+                retry_minutes = min(15 * (2 ** max(next_attempt - 1, 0)), 120)
+                active_states = {
+                    "processing",
+                    "summarizing",
+                    "publishing_notion",
+                    "notifying_participants",
+                }
+                patch = {
+                    "post_meeting_status": "failed_terminal" if terminal else normalized_state,
+                    "post_meeting_event": normalized_event,
+                    "post_meeting_error": safe_error,
+                    "post_meeting_attempt": next_attempt,
+                    "post_meeting_attempted_at": timestamp,
+                    "post_meeting_updated_at": timestamp,
+                    "post_meeting_lease_until": ""
+                    if normalized_state not in active_states
+                    else _rfc3339(observed_at + dt.timedelta(hours=1)),
+                    "post_meeting_lease_token": ""
+                    if normalized_state not in active_states
+                    else str(metadata.get("post_meeting_lease_token") or ""),
+                    "post_meeting_next_retry_at": (
+                        _rfc3339(observed_at + dt.timedelta(minutes=retry_minutes))
+                        if retryable and not terminal
+                        else ""
+                    ),
+                }
+                if normalized_meeting_id:
+                    patch["post_meeting_zoom_id"] = normalized_meeting_id
+                if normalized_transcript_status:
+                    patch["post_meeting_transcript_status"] = normalized_transcript_status
+                if normalized_summary_source:
+                    patch["post_meeting_summary_source"] = normalized_summary_source
+                row = await connection.fetchrow(
+                    """
+                    update orbie_meeting_occurrences
+                    set metadata = metadata || $2::jsonb,
+                        version = version + 1, updated_at = now()
+                    where occurrence_key = $1
+                    returning *
+                    """,
+                    key,
+                    json.dumps(patch),
+                )
+                if row is None:
+                    raise MeetingSchedulerError("meeting occurrence does not exist")
+                return _serialize_row(row) or {}
+
+        return asyncio.run(_with_connection(update))
+
+    def claim_post_meeting_processing(
+        self,
+        occurrence_key: str,
+        *,
+        event: str,
+        lease_seconds: int = 600,
+        force: bool = False,
+        owner_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically lease one occurrence so concurrent Zoom events cannot duplicate work."""
+
+        _require_enabled()
+        key = _require_occurrence_key(occurrence_key)
+        normalized_event = _require_post_meeting_text(
+            event, field="event", limit=MAX_POST_MEETING_EVENT_LENGTH
+        )
+        bounded_lease_seconds = max(60, min(int(lease_seconds), 3600))
+        normalized_owner_token = str(owner_token or "").strip()
+        if normalized_owner_token and not re.fullmatch(r"[0-9a-f]{64}", normalized_owner_token):
+            raise MeetingSchedulerError("owner_token must be a SHA-256 token")
+        now = dt.datetime.now(dt.UTC)
+        lease_until = now + dt.timedelta(seconds=bounded_lease_seconds)
+
+        async def claim(connection: asyncpg.Connection) -> dict[str, Any]:
+            async with connection.transaction():
+                current_row = await connection.fetchrow(
+                    "select * from orbie_meeting_occurrences where occurrence_key = $1 for update",
+                    key,
+                )
+                current = _serialize_row(current_row)
+                if current is None:
+                    raise MeetingSchedulerError("meeting occurrence does not exist")
+                if str(current.get("status") or "").lower() != "booked":
+                    return {"claimed": False, "reason": "not_booked"}
+                metadata = current.get("metadata")
+                metadata = metadata if isinstance(metadata, dict) else {}
+                status = str(metadata.get("post_meeting_status") or "").lower()
+                if status == "delivered" or str(current.get("status") or "").lower() == "completed":
+                    return {"claimed": False, "reason": "already_delivered"}
+                if status == "failed_terminal" and not force:
+                    return {"claimed": False, "reason": "failed_terminal"}
+                raw_next_retry = str(metadata.get("post_meeting_next_retry_at") or "").strip()
+                retry_override_events = {
+                    "recording.transcript_completed",
+                    "meeting.summary_completed",
+                }
+                if (
+                    status in {"pending_transcript", "failed_retryable", "error"}
+                    and raw_next_retry
+                    and not force
+                    and not (
+                        status == "pending_transcript" and normalized_event in retry_override_events
+                    )
+                ):
+                    try:
+                        next_retry = _parse_rfc3339(
+                            raw_next_retry, field="post_meeting_next_retry_at"
+                        )
+                    except MeetingSchedulerError:
+                        next_retry = now
+                    if next_retry > now:
+                        return {"claimed": False, "reason": "retry_not_due"}
+                raw_lease_until = str(metadata.get("post_meeting_lease_until") or "").strip()
+                if raw_lease_until:
+                    try:
+                        active_until = _parse_rfc3339(
+                            raw_lease_until, field="post_meeting_lease_until"
+                        )
+                    except MeetingSchedulerError:
+                        active_until = now
+                    if (
+                        status
+                        in {
+                            "processing",
+                            "summarizing",
+                            "publishing_notion",
+                            "notifying_participants",
+                        }
+                        and active_until > now
+                    ):
+                        active_token = str(metadata.get("post_meeting_lease_token") or "")
+                        if normalized_owner_token and secrets.compare_digest(
+                            active_token, normalized_owner_token
+                        ):
+                            patch = {
+                                "post_meeting_updated_at": _rfc3339(now),
+                                "post_meeting_lease_until": _rfc3339(lease_until),
+                            }
+                            await connection.fetchrow(
+                                """
+                                update orbie_meeting_occurrences
+                                set metadata = metadata || $2::jsonb,
+                                    version = version + 1, updated_at = now()
+                                where occurrence_key = $1
+                                returning *
+                                """,
+                                key,
+                                json.dumps(patch),
+                            )
+                            return {
+                                "claimed": True,
+                                "occurrence_key": key,
+                                "lease_token": active_token,
+                                "lease_until": patch["post_meeting_lease_until"],
+                                "attempt": max(
+                                    1,
+                                    int(metadata.get("post_meeting_attempt") or 1),
+                                ),
+                                "resumed": True,
+                            }
+                        return {"claimed": False, "reason": "active_lease"}
+                try:
+                    previous_attempt = max(0, int(metadata.get("post_meeting_attempt") or 0))
+                except (TypeError, ValueError):
+                    previous_attempt = 0
+                lease_token = normalized_owner_token or secrets.token_hex(32)
+                patch = {
+                    "post_meeting_status": "processing",
+                    "post_meeting_event": normalized_event,
+                    "post_meeting_attempt": previous_attempt + 1,
+                    "post_meeting_attempted_at": _rfc3339(now),
+                    "post_meeting_updated_at": _rfc3339(now),
+                    "post_meeting_lease_until": _rfc3339(lease_until),
+                    "post_meeting_lease_token": lease_token,
+                }
+                row = await connection.fetchrow(
+                    """
+                    update orbie_meeting_occurrences
+                    set metadata = metadata || $2::jsonb,
+                        version = version + 1, updated_at = now()
+                    where occurrence_key = $1
+                    returning *
+                    """,
+                    key,
+                    json.dumps(patch),
+                )
+                if row is None:
+                    raise MeetingSchedulerError("meeting occurrence does not exist")
+                return {
+                    "claimed": True,
+                    "lease_token": lease_token,
+                    "occurrence": _serialize_row(row),
+                }
+
+        return asyncio.run(_with_connection(claim))
 
     def collect_post_meeting_artifacts(self, meeting_id: str) -> dict[str, Any]:
         """Collect processed Zoom artifacts without failing while Zoom is still processing."""
@@ -855,13 +1177,14 @@ class MeetingSchedulerClient:
         )
         return {
             "meeting_id": str(meeting_id),
-            "ready": recording.get("transcript_status") == "ready" and bool(summary_text),
+            "ready": recording.get("transcript_status") == "ready",
             "transcript": recording.get("transcript"),
             "transcript_status": recording.get("transcript_status", "pending"),
             "recording_files": recording.get("recording_files", []),
             "action_items": action_items,
             "summary": summary,
             "summary_text": summary_text,
+            "summary_source": "zoom" if summary_text else "unavailable",
             "processing_errors": errors,
         }
 
@@ -871,14 +1194,24 @@ class MeetingSchedulerClient:
         *,
         notion_page_id: str | None = None,
         delivered_to: list[str] | None = None,
+        lease_token: str,
     ) -> dict[str, Any]:
         """Persist the terminal idempotency marker after publication and delivery."""
         key = _require_occurrence_key(occurrence_key)
+        normalized_lease_token = str(lease_token or "").strip()
+        if not normalized_lease_token:
+            raise MeetingSchedulerError("lease_token is required")
+        if len(normalized_lease_token) > 128 or any(
+            char.isspace() for char in normalized_lease_token
+        ):
+            raise MeetingSchedulerError("lease_token must be a bounded token")
         patch = {
             "post_meeting_status": "delivered",
             "post_meeting_notion_page_id": str(notion_page_id or ""),
             "post_meeting_delivered_to": sorted(set(delivered_to or [])),
             "post_meeting_delivered_at": dt.datetime.now(dt.UTC).isoformat(),
+            "post_meeting_lease_until": "",
+            "post_meeting_lease_token": "",
         }
 
         async def update(connection: asyncpg.Connection) -> dict[str, Any]:
@@ -888,13 +1221,19 @@ class MeetingSchedulerClient:
                 set status = 'completed', metadata = metadata || $2::jsonb,
                     last_error = '', version = version + 1, updated_at = now()
                 where occurrence_key = $1
+                  and status = 'booked'
+                  and metadata->>'post_meeting_lease_token' = $3
+                  and nullif(metadata->>'post_meeting_lease_until', '')::timestamptz > now()
                 returning *
                 """,
                 key,
                 json.dumps(patch),
+                normalized_lease_token,
             )
             if row is None:
-                raise MeetingSchedulerError("meeting occurrence does not exist")
+                raise MeetingSchedulerError(
+                    "meeting occurrence does not exist or processing lease was lost"
+                )
             return _serialize_row(row)
 
         return asyncio.run(_with_connection(update))
@@ -1773,7 +2112,16 @@ class MeetingSchedulerClient:
         self, *, key: str, organizer_calendar_key: str
     ) -> dict[str, Any] | _OperationFailure:
         async def operation(connection: asyncpg.Connection) -> dict[str, Any] | _OperationFailure:
-            state = await self._get_occurrence(connection, key)
+            state = _serialize_row(
+                await connection.fetchrow(
+                    """
+                    select * from orbie_meeting_occurrences
+                    where occurrence_key = $1
+                    for update
+                    """,
+                    key,
+                )
+            )
             if not state:
                 return {"status": "not_found", "occurrenceKey": key}
             if str(state.get("organizer_calendar_key") or "") != organizer_calendar_key:
@@ -1781,6 +2129,12 @@ class MeetingSchedulerClient:
             if state.get("status") == "cancelled":
                 return {
                     "status": "cancelled",
+                    "occurrenceKey": key,
+                    "cadence_id": state.get("cadence_id"),
+                }
+            if state.get("status") != "booked":
+                return {
+                    "status": state.get("status"),
                     "occurrenceKey": key,
                     "cadence_id": state.get("cadence_id"),
                 }
@@ -1802,8 +2156,23 @@ class MeetingSchedulerClient:
                         if getattr(getattr(error, "resp", None), "status", None) != 404:
                             raise
                 await connection.execute(
-                    "update orbie_meeting_occurrences set status = 'cancelled', version = version + 1, last_error = '', updated_at = now() where occurrence_key = $1",
+                    """
+                    update orbie_meeting_occurrences
+                    set status = 'cancelled',
+                        metadata = metadata || $2::jsonb,
+                        version = version + 1,
+                        last_error = '',
+                        updated_at = now()
+                    where occurrence_key = $1
+                    """,
                     key,
+                    json.dumps(
+                        {
+                            "post_meeting_status": "cancelled",
+                            "post_meeting_lease_until": "",
+                            "post_meeting_lease_token": "",
+                        }
+                    ),
                 )
                 return {
                     "status": "cancelled",

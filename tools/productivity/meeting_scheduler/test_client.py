@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from meeting_scheduler import client
+from meeting_scheduler import cli, client
 
 
 async def _async_value(value):
@@ -152,10 +152,11 @@ def test_collect_post_meeting_artifacts_is_ready_with_transcript_and_summary(mon
     assert result["ready"] is True
     assert result["transcript"] == "WEBVTT\nHello world."
     assert result["summary_text"] == "Decisions were made."
+    assert result["summary_source"] == "zoom"
     assert result["processing_errors"] == []
 
 
-def test_collect_post_meeting_artifacts_waits_for_both_artifacts(monkeypatch):
+def test_collect_post_meeting_artifacts_is_ready_without_zoom_summary(monkeypatch):
     monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
     scheduler = client.MeetingSchedulerClient()
     monkeypatch.setattr(
@@ -169,7 +170,35 @@ def test_collect_post_meeting_artifacts_waits_for_both_artifacts(monkeypatch):
     )
     monkeypatch.setattr(scheduler, "get_summary", lambda _meeting_id: {})
 
-    assert scheduler.collect_post_meeting_artifacts("123")["ready"] is False
+    result = scheduler.collect_post_meeting_artifacts("123")
+
+    assert result["ready"] is True
+    assert result["summary_source"] == "unavailable"
+    assert result["summary_text"] == ""
+    assert result["processing_errors"] == []
+
+
+def test_collect_post_meeting_artifacts_keeps_summary_processing_error_when_transcript_ready(
+    monkeypatch,
+):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+    monkeypatch.setattr(
+        scheduler,
+        "get_recording",
+        lambda _meeting_id: {"transcript_status": "ready", "transcript": "WEBVTT\n"},
+    )
+
+    def missing_summary(_meeting_id):
+        raise client.MeetingSchedulerError("Zoom summary is still processing")
+
+    monkeypatch.setattr(scheduler, "get_summary", missing_summary)
+
+    result = scheduler.collect_post_meeting_artifacts("123")
+
+    assert result["ready"] is True
+    assert result["summary_source"] == "unavailable"
+    assert result["processing_errors"] == ["Zoom summary is still processing"]
 
 
 def test_collect_post_meeting_artifacts_retries_provider_processing(monkeypatch):
@@ -186,7 +215,478 @@ def test_collect_post_meeting_artifacts_retries_provider_processing(monkeypatch)
 
     assert result["ready"] is False
     assert result["transcript_status"] == "pending"
+    assert result["summary_source"] == "unavailable"
     assert len(result["processing_errors"]) == 2
+
+
+def test_post_meeting_candidate_by_zoom_id_returns_one_ended_booked_undelivered_row(
+    monkeypatch,
+):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+    calls = []
+    row = {
+        "occurrence_key": "weekly-sync:2026-08-17",
+        "status": "booked",
+        "zoom_meeting_id": "123",
+        "metadata": {"post_meeting_status": "processing"},
+    }
+
+    class Connection:
+        async def fetchrow(self, query, *args):
+            calls.append((query, args))
+            return row
+
+    async def with_connection(operation):
+        return await operation(Connection())
+
+    monkeypatch.setattr(client, "_with_connection", with_connection)
+
+    result = scheduler.post_meeting_candidate_by_zoom_id("123")
+
+    assert result == row
+    assert calls[0][1] == ("123",)
+    assert "status = 'booked'" in calls[0][0]
+    assert "zoom_meeting_id = $1" in calls[0][0]
+    assert "<= now()" in calls[0][0]
+    assert "post_meeting_status" in calls[0][0]
+
+
+@pytest.mark.parametrize("meeting_id", ["", "   ", "x" * 129, "one two"])
+def test_post_meeting_candidate_by_zoom_id_validates_bounded_id(monkeypatch, meeting_id):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+
+    with pytest.raises(client.MeetingSchedulerError, match="meeting_id"):
+        client.MeetingSchedulerClient().post_meeting_candidate_by_zoom_id(meeting_id)
+
+
+def test_post_meeting_candidate_by_zoom_id_is_exposed_by_cli(monkeypatch, capsys):
+    calls = []
+
+    class FakeClient:
+        def post_meeting_candidate_by_zoom_id(self, **kwargs):
+            calls.append(kwargs)
+            return {"occurrence_key": "occurrence:1"}
+
+    monkeypatch.setattr(cli, "_client", lambda: FakeClient())
+
+    cli.post_meeting_candidate_by_zoom_id('{"meeting_id":"123"}')
+
+    assert calls == [{"meeting_id": "123"}]
+    assert '"occurrence_key": "occurrence:1"' in capsys.readouterr().out
+
+
+def test_record_post_meeting_processing_records_metadata_without_delivering(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+    calls = []
+    row = {
+        "occurrence_key": "occurrence:1",
+        "status": "booked",
+        "metadata": {"post_meeting_status": "processing"},
+    }
+
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Connection:
+        def transaction(self):
+            return Transaction()
+
+        async def fetchrow(self, query, *args):
+            calls.append((query, args))
+            if query.lstrip().startswith("select"):
+                return {
+                    "occurrence_key": "occurrence:1",
+                    "status": "booked",
+                    "metadata": {
+                        "post_meeting_attempt": 2,
+                        "post_meeting_lease_token": "lease-owner",
+                        "post_meeting_lease_until": "2999-01-01T00:00:00Z",
+                    },
+                }
+            return row
+
+    async def with_connection(operation):
+        return await operation(Connection())
+
+    monkeypatch.setattr(client, "_with_connection", with_connection)
+
+    result = scheduler.record_post_meeting_processing(
+        "occurrence:1",
+        state="pending_transcript",
+        event="artifact_poll",
+        error="Zoom summary is still processing",
+        lease_token="lease-owner",
+    )
+
+    patch = json.loads(calls[1][1][1])
+    assert result == row
+    assert calls[0][1] == ("occurrence:1",)
+    assert patch["post_meeting_status"] == "pending_transcript"
+    assert patch["post_meeting_event"] == "artifact_poll"
+    assert patch["post_meeting_error"] == "Zoom summary is still processing"
+    assert patch["post_meeting_attempt"] == 2
+    assert patch["post_meeting_attempted_at"].endswith("Z")
+    assert patch["post_meeting_updated_at"].endswith("Z")
+    assert patch["post_meeting_next_retry_at"] > patch["post_meeting_attempted_at"]
+    assert patch["post_meeting_lease_until"] == ""
+    assert "set status = 'completed'" not in calls[1][0]
+    assert "post_meeting_status = 'delivered'" not in calls[1][0]
+
+
+def test_record_post_meeting_processing_accepts_explicit_attempt_and_bounds_error(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+    calls = []
+
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Connection:
+        def transaction(self):
+            return Transaction()
+
+        async def fetchrow(self, query, *args):
+            calls.append((query, args))
+            return {
+                "status": "booked",
+                "metadata": {
+                    "post_meeting_lease_token": "lease-owner",
+                    "post_meeting_lease_until": "2999-01-01T00:00:00Z",
+                },
+            }
+
+    async def with_connection(operation):
+        return await operation(Connection())
+
+    monkeypatch.setattr(client, "_with_connection", with_connection)
+
+    scheduler.record_post_meeting_processing(
+        "occurrence:1",
+        state="failed",
+        event="artifact_poll",
+        error="x" * 3000,
+        attempt=7,
+        lease_token="lease-owner",
+    )
+
+    patch = json.loads(calls[1][1][1])
+    assert patch["post_meeting_attempt"] == 7
+    assert len(patch["post_meeting_error"]) == 2000
+
+
+def test_record_post_meeting_processing_rejects_delivery_state(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+
+    with pytest.raises(client.MeetingSchedulerError, match="cannot mark"):
+        client.MeetingSchedulerClient().record_post_meeting_processing(
+            "occurrence:1",
+            state="delivered",
+            event="delivery_complete",
+            lease_token="lease-owner",
+        )
+
+
+def test_record_post_meeting_processing_becomes_terminal_after_retry_budget(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+    patches = []
+
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Connection:
+        def transaction(self):
+            return Transaction()
+
+        async def fetchrow(self, query, *args):
+            if query.lstrip().startswith("select"):
+                return {
+                    "occurrence_key": "occurrence:1",
+                    "status": "booked",
+                    "metadata": {
+                        "post_meeting_attempt": 12,
+                        "post_meeting_lease_token": "lease-owner",
+                        "post_meeting_lease_until": "2999-01-01T00:00:00Z",
+                    },
+                }
+            patches.append(json.loads(args[1]))
+            return {"occurrence_key": "occurrence:1", "status": "booked", "metadata": patches[-1]}
+
+    async def with_connection(operation):
+        return await operation(Connection())
+
+    monkeypatch.setattr(client, "_with_connection", with_connection)
+
+    scheduler.record_post_meeting_processing(
+        "occurrence:1",
+        state="pending_transcript",
+        event="artifact_poll",
+        lease_token="lease-owner",
+    )
+
+    assert patches[0]["post_meeting_status"] == "failed_terminal"
+    assert patches[0]["post_meeting_next_retry_at"] == ""
+
+
+def test_claim_post_meeting_processing_atomically_leases_occurrence(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+    calls = []
+
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Connection:
+        def transaction(self):
+            return Transaction()
+
+        async def fetchrow(self, query, *args):
+            calls.append((query, args))
+            if query.lstrip().startswith("select"):
+                return {
+                    "occurrence_key": "occurrence:1",
+                    "status": "booked",
+                    "metadata": {"post_meeting_attempt": 2},
+                }
+            return {
+                "occurrence_key": "occurrence:1",
+                "status": "booked",
+                "metadata": json.loads(args[1]),
+            }
+
+    async def with_connection(operation):
+        return await operation(Connection())
+
+    monkeypatch.setattr(client, "_with_connection", with_connection)
+
+    result = scheduler.claim_post_meeting_processing(
+        "occurrence:1", event="recording.transcript_completed", lease_seconds=600
+    )
+
+    assert result["claimed"] is True
+    patch = json.loads(calls[1][1][1])
+    assert result["lease_token"] == patch["post_meeting_lease_token"]
+    assert patch["post_meeting_status"] == "processing"
+    assert patch["post_meeting_attempt"] == 3
+    assert patch["post_meeting_lease_until"] > patch["post_meeting_attempted_at"]
+
+
+@pytest.mark.parametrize(
+    "active_state",
+    ["processing", "summarizing", "publishing_notion", "notifying_participants"],
+)
+def test_claim_post_meeting_processing_rejects_active_lease(monkeypatch, active_state):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Connection:
+        def transaction(self):
+            return Transaction()
+
+        async def fetchrow(self, _query, *_args):
+            return {
+                "occurrence_key": "occurrence:1",
+                "status": "booked",
+                "metadata": {
+                    "post_meeting_status": active_state,
+                    "post_meeting_lease_until": "2999-01-01T00:00:00Z",
+                },
+            }
+
+    async def with_connection(operation):
+        return await operation(Connection())
+
+    monkeypatch.setattr(client, "_with_connection", with_connection)
+
+    result = scheduler.claim_post_meeting_processing("occurrence:1", event="recording.completed")
+
+    assert result == {"claimed": False, "reason": "active_lease"}
+
+
+def test_claim_post_meeting_processing_resumes_same_durable_owner(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+    owner_token = "a" * 64
+    calls = []
+
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Connection:
+        def transaction(self):
+            return Transaction()
+
+        async def fetchrow(self, query, *args):
+            calls.append((query, args))
+            return {
+                "occurrence_key": "occurrence:1",
+                "status": "booked",
+                "metadata": {
+                    "post_meeting_status": "publishing_notion",
+                    "post_meeting_attempt": 3,
+                    "post_meeting_lease_token": owner_token,
+                    "post_meeting_lease_until": "2999-01-01T00:00:00Z",
+                },
+            }
+
+    async def with_connection(operation):
+        return await operation(Connection())
+
+    monkeypatch.setattr(client, "_with_connection", with_connection)
+    result = scheduler.claim_post_meeting_processing(
+        "occurrence:1",
+        event="recording.transcript_completed",
+        lease_seconds=3600,
+        owner_token=owner_token,
+    )
+
+    assert result["claimed"] is True
+    assert result["resumed"] is True
+    assert result["lease_token"] == owner_token
+    assert result["attempt"] == 3
+    assert len(calls) == 2
+
+
+def test_record_post_meeting_processing_rejects_stale_lease_owner(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Connection:
+        def transaction(self):
+            return Transaction()
+
+        async def fetchrow(self, _query, *_args):
+            return {
+                "occurrence_key": "occurrence:1",
+                "status": "booked",
+                "metadata": {"post_meeting_lease_token": "new-owner"},
+            }
+
+    async def with_connection(operation):
+        return await operation(Connection())
+
+    monkeypatch.setattr(client, "_with_connection", with_connection)
+
+    with pytest.raises(client.MeetingSchedulerError, match="lease was lost"):
+        scheduler.record_post_meeting_processing(
+            "occurrence:1",
+            state="publishing_notion",
+            event="artifact_poll",
+            lease_token="stale-owner",
+        )
+
+
+def test_record_post_meeting_processing_requires_live_lease(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+
+    with pytest.raises(client.MeetingSchedulerError, match="lease_token is required"):
+        scheduler.record_post_meeting_processing(
+            "occurrence:1",
+            state="processing",
+            event="artifact_poll",
+            lease_token=None,
+        )
+
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Connection:
+        def transaction(self):
+            return Transaction()
+
+        async def fetchrow(self, _query, *_args):
+            return {
+                "occurrence_key": "occurrence:1",
+                "status": "booked",
+                "metadata": {
+                    "post_meeting_lease_token": "lease-owner",
+                    "post_meeting_lease_until": "2000-01-01T00:00:00Z",
+                },
+            }
+
+    async def with_connection(operation):
+        return await operation(Connection())
+
+    monkeypatch.setattr(client, "_with_connection", with_connection)
+    with pytest.raises(client.MeetingSchedulerError, match="lease expired"):
+        scheduler.record_post_meeting_processing(
+            "occurrence:1",
+            state="processing",
+            event="artifact_poll",
+            lease_token="lease-owner",
+        )
+
+
+def test_mark_post_meeting_delivered_requires_lease(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+
+    with pytest.raises(client.MeetingSchedulerError, match="lease_token is required"):
+        client.MeetingSchedulerClient().mark_post_meeting_delivered(
+            "occurrence:1", lease_token=None
+        )
+
+
+def test_mark_post_meeting_delivered_cannot_revive_cancelled_occurrence(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    queries = []
+
+    class Connection:
+        async def fetchrow(self, query, *_args):
+            queries.append(query)
+            return None
+
+    async def with_connection(operation):
+        return await operation(Connection())
+
+    monkeypatch.setattr(client, "_with_connection", with_connection)
+
+    with pytest.raises(client.MeetingSchedulerError, match="lease was lost"):
+        client.MeetingSchedulerClient().mark_post_meeting_delivered(
+            "occurrence:1", lease_token="lease-owner"
+        )
+
+    assert "status = 'booked'" in queries[0]
 
 
 def test_find_availability_uses_freebusy_only_and_returns_slots(monkeypatch):
@@ -419,6 +919,37 @@ def test_ad_hoc_reschedule_and_cancel_require_confirmation(monkeypatch):
         scheduler.reschedule_meeting("request:1", "2026-08-17T10:00:00Z", 1, "wf", mode="ad_hoc")
     with pytest.raises(client.MeetingSchedulerError, match="explicit confirmation"):
         scheduler.cancel_meeting("request:1", "wf")
+
+
+def test_cancel_meeting_locks_row_and_does_not_overwrite_completed(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+    queries = []
+
+    class Connection:
+        async def fetchrow(self, query, *_args):
+            queries.append(query)
+            return {
+                "occurrence_key": "request:1",
+                "status": "completed",
+                "organizer_calendar_key": "wf",
+                "cadence_id": "weekly-sync",
+            }
+
+    async def lock(_key, operation):
+        return await operation(Connection())
+
+    monkeypatch.setattr(client, "_with_occurrence_lock", lock)
+    result = asyncio.run(
+        scheduler._cancel_meeting_locked(key="request:1", organizer_calendar_key="wf")
+    )
+
+    assert result == {
+        "status": "completed",
+        "occurrenceKey": "request:1",
+        "cadence_id": "weekly-sync",
+    }
+    assert "for update" in queries[0].lower()
 
 
 def test_reschedule_rejects_a_stale_expected_version(monkeypatch):

@@ -143,6 +143,7 @@ class Input:
     now: str | None = None
     scheduling_operation: str = ""
     scheduling_args: dict[str, Any] = field(default_factory=dict)
+    post_meeting_zoom_id: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
     webhook: dict[str, Any] = field(default_factory=dict)
 
@@ -255,6 +256,7 @@ class MeetingOpsClient(Protocol):
         meeting_id: str,
         meeting_url: str,
         action_items: str,
+        summary_source: str = "zoom",
     ) -> dict[str, Any]: ...
 
     async def share_drive_file(self, file_id: str, email: str) -> dict[str, Any]: ...
@@ -652,6 +654,7 @@ class MeetingOpsToolClient:
         meeting_id: str,
         meeting_url: str,
         action_items: str,
+        summary_source: str = "zoom",
     ) -> dict[str, Any]:
         marker = f"ORBiE_ZOOM_SUMMARY:{occurrence_key}"
         matches = await self._paginate_notion(
@@ -672,6 +675,8 @@ class MeetingOpsToolClient:
             _notion_heading("Meeting Summary", 1),
             _notion_heading("AI Summary", 2),
             *_notion_paragraph_chunks(summary or "Zoom summary was not available."),
+            _notion_heading("Summary Source", 2),
+            _notion_paragraph(summary_source or "zoom"),
             _notion_heading("Key Decisions", 2),
             _notion_paragraph(
                 "Review the AI summary and transcript for confirmed decisions."
@@ -748,9 +753,49 @@ def _client(ctx: WorkflowContext) -> MeetingOpsClient:
 
 
 def _is_scheduled(inp: Input) -> bool:
-    if inp.webhook:
-        return True
     return inp.metadata.get("source") == "workflow_schedule"
+
+
+def _zoom_webhook_input(inp: Input) -> dict[str, str]:
+    """Extract one Zoom occurrence from the accepted webhook envelope.
+
+    The webhook route has already authenticated and filtered the provider
+    request. Keep this parser deliberately narrow so a webhook cannot fall
+    through to the reconciliation poll and process another occurrence.
+    """
+
+    webhook = inp.webhook if isinstance(inp.webhook, dict) else {}
+    body: Any = webhook.get("body")
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except json.JSONDecodeError:
+            return {}
+    if not isinstance(body, dict):
+        return {}
+    event = str(body.get("event") or "").strip()
+    allowed_events = {
+        str(item) for item in (WEBHOOKS[0].get("filter", {}).get("values", []))
+    }
+    if event not in allowed_events:
+        return {"event": event} if event else {}
+    payload = body.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    meeting = payload.get("object")
+    meeting = meeting if isinstance(meeting, dict) else {}
+    meeting_id = str(meeting.get("id") or meeting.get("uuid") or "").strip()
+    if not meeting_id:
+        return {"event": event}
+    return {"event": event, "meeting_id": meeting_id}
+
+
+def _post_meeting_zoom_id(inp: Input) -> tuple[str, str]:
+    """Return (meeting_id, source) for a webhook or operator replay."""
+
+    if inp.webhook:
+        parsed = _zoom_webhook_input(inp)
+        return str(parsed.get("meeting_id") or "").strip(), "zoom_webhook"
+    return str(inp.post_meeting_zoom_id or "").strip(), "operator_replay"
 
 
 def _parse_now(value: str | None) -> dt.datetime:
@@ -1122,6 +1167,583 @@ def _post_meeting_message(
         suffix = "\n…" if len(transcript) > len(excerpt) else ""
         parts.append(f"*Transcript*\n```{excerpt}{suffix}```")
     return "\n\n".join(parts)[:3900]
+
+
+POST_MEETING_TRANSCRIPT_LIMIT = 12000
+
+
+def _bounded_transcript(transcript: str) -> str:
+    transcript = transcript.strip()
+    if len(transcript) <= POST_MEETING_TRANSCRIPT_LIMIT:
+        return transcript
+    return (
+        transcript[:POST_MEETING_TRANSCRIPT_LIMIT]
+        + "\n[Transcript truncated by Orbie for bounded summarization.]"
+    )
+
+
+def _summary_agent_prompt(transcript: str) -> str:
+    return f"""Summarize this meeting transcript.
+
+Return only one strict JSON object with exactly these keys:
+{{"summary":"concise factual summary","action_items":["action item"]}}
+
+Do not use Markdown fences. Do not invent facts. If no action items are clear,
+return an empty action_items array.
+
+Transcript:
+---
+{_bounded_transcript(transcript)}
+---"""
+
+
+def _agent_summary(result: Any) -> tuple[str, str] | None:
+    """Parse a strict JSON agent response while tolerating transport wrappers."""
+
+    value = _tool_output(result)
+    candidates: list[Any] = [value]
+    if isinstance(value, str):
+        text = value.strip().removeprefix("```json").removesuffix("```").strip()
+        candidates = [text]
+        decoder = json.JSONDecoder()
+        for index, character in enumerate(text):
+            if character == "{":
+                try:
+                    parsed, _ = decoder.raw_decode(text[index:])
+                except json.JSONDecodeError:
+                    continue
+                candidates.append(parsed)
+                break
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        summary = str(candidate.get("summary") or "").strip()
+        raw_items = candidate.get("action_items")
+        if isinstance(raw_items, list):
+            items = [str(item).strip() for item in raw_items if str(item).strip()]
+            action_items = "\n".join(items)
+        elif isinstance(raw_items, str):
+            action_items = raw_items.strip()
+        else:
+            action_items = ""
+        if summary:
+            return summary, action_items
+    return None
+
+
+def _transcript_fallback(transcript: str) -> tuple[str, str]:
+    excerpt = _bounded_transcript(transcript)
+    return (
+        "Transcript-derived fallback (Zoom summary unavailable):\n" + excerpt,
+        "No action items could be safely extracted; review the transcript.",
+    )
+
+
+def _candidate_meeting_id(candidate: dict[str, Any]) -> str:
+    return str(
+        candidate.get("zoom_meeting_id")
+        or candidate.get("zoomMeetingId")
+        or candidate.get("meeting_id")
+        or candidate.get("meetingId")
+        or ""
+    ).strip()
+
+
+def _candidate_occurrence_key(candidate: dict[str, Any]) -> str:
+    return str(
+        candidate.get("occurrence_key") or candidate.get("occurrenceKey") or ""
+    ).strip()
+
+
+async def _post_meeting_candidate_by_zoom_id(
+    ctx: WorkflowContext,
+    client: MeetingOpsClient,
+    meeting_id: str,
+    *,
+    step_prefix: str,
+) -> dict[str, Any] | None:
+    result = await ctx.step(
+        f"{step_prefix}:candidate:{meeting_id}",
+        lambda: client.scheduling_operation(
+            "post_meeting_candidate_by_zoom_id", {"meeting_id": meeting_id}
+        ),
+    )
+    if isinstance(result, dict):
+        candidate = result
+    elif isinstance(result, list):
+        matches = [
+            item
+            for item in result
+            if isinstance(item, dict) and _candidate_meeting_id(item) == meeting_id
+        ]
+        if len(matches) != 1:
+            return None
+        candidate = matches[0]
+    else:
+        return None
+    returned_id = _candidate_meeting_id(candidate)
+    if returned_id and returned_id != meeting_id:
+        return None
+    return candidate
+
+
+async def _mark_post_meeting_processing(
+    ctx: WorkflowContext,
+    client: MeetingOpsClient,
+    *,
+    occurrence_key: str,
+    meeting_id: str,
+    status: str,
+    transcript_status: str = "",
+    summary_source: str = "",
+    event: str = "artifact_poll",
+    error: str = "",
+    lease_token: str,
+    step_prefix: str,
+) -> Any:
+    args: dict[str, Any] = {
+        "occurrence_key": occurrence_key,
+        "meeting_id": meeting_id,
+        "state": status,
+        "event": event,
+        "lease_token": lease_token,
+    }
+    if transcript_status:
+        args["transcript_status"] = transcript_status
+    if summary_source:
+        args["summary_source"] = summary_source
+    if error:
+        args["error"] = error[:2000]
+    result = await ctx.step(
+        f"{step_prefix}:mark:{occurrence_key}:{status}",
+        lambda: client.scheduling_operation("record_post_meeting_processing", args),
+    )
+    ctx.log(
+        "zoom_post_meeting_state",
+        meeting_id=meeting_id,
+        occurrence_key=occurrence_key,
+        state=status,
+        zoom_event=event,
+        transcript_status=transcript_status or None,
+        summary_source=summary_source or None,
+        has_error=bool(error),
+    )
+    return result
+
+
+async def _process_post_meeting_candidate(
+    ctx: WorkflowContext,
+    client: MeetingOpsClient,
+    candidate: dict[str, Any],
+    *,
+    slack_users: list[dict[str, Any]],
+    cadence: dict[str, Any] | None = None,
+    event: str = "artifact_poll",
+    step_prefix: str,
+) -> dict[str, Any]:
+    occurrence_key = _candidate_occurrence_key(candidate)
+    meeting_id = _candidate_meeting_id(candidate)
+    if not occurrence_key or not meeting_id:
+        return {"status": "skipped", "reason": "incomplete_candidate"}
+    if str(candidate.get("post_meeting_status") or "").strip().lower() in {
+        "delivered",
+        "completed",
+    }:
+        return {
+            "status": "skipped",
+            "reason": "already_delivered",
+            "occurrence_key": occurrence_key,
+            "meeting_id": meeting_id,
+        }
+
+    # Do not checkpoint the claim: workflow retries must reacquire ownership
+    # instead of replaying a stale lease token. The durable run-derived owner
+    # token lets the same run resume while keeping concurrent runs excluded.
+    owner_token = hashlib.sha256(f"{ctx.run_id}:{occurrence_key}".encode()).hexdigest()
+    claim = await client.scheduling_operation(
+        "claim_post_meeting_processing",
+        {
+            "occurrence_key": occurrence_key,
+            "event": event,
+            # Workflow input is not an operator authorization boundary. Manual
+            # replay follows the same terminal and retry protections as every
+            # other trigger; privileged force remains unavailable here.
+            "force": False,
+            "lease_seconds": 3600,
+            "owner_token": owner_token,
+        },
+    )
+    if isinstance(claim, dict) and claim.get("claimed") is False:
+        return {
+            "status": "processing",
+            "reason": str(claim.get("reason") or "not_claimed"),
+            "occurrence_key": occurrence_key,
+            "meeting_id": meeting_id,
+        }
+    lease_token = str((claim or {}).get("lease_token") or "")
+    if not lease_token:
+        raise ValueError("post-meeting claim returned no lease token")
+
+    try:
+        artifacts = await ctx.step(
+            f"{step_prefix}:artifacts:{occurrence_key}",
+            lambda: client.scheduling_operation(
+                "collect_post_meeting_artifacts", {"meeting_id": meeting_id}
+            ),
+        )
+    except Exception as error:
+        await _mark_post_meeting_processing(
+            ctx,
+            client,
+            occurrence_key=occurrence_key,
+            meeting_id=meeting_id,
+            status="failed_retryable",
+            event=event,
+            error=f"artifacts:{type(error).__name__}",
+            lease_token=lease_token,
+            step_prefix=step_prefix,
+        )
+        raise
+    if not isinstance(artifacts, dict):
+        await _mark_post_meeting_processing(
+            ctx,
+            client,
+            occurrence_key=occurrence_key,
+            meeting_id=meeting_id,
+            status="error",
+            event=event,
+            error="invalid_artifacts",
+            lease_token=lease_token,
+            step_prefix=step_prefix,
+        )
+        return {
+            "status": "error",
+            "reason": "invalid_artifacts",
+            "occurrence_key": occurrence_key,
+            "meeting_id": meeting_id,
+        }
+
+    transcript = str(artifacts.get("transcript") or "").strip()
+    transcript_status = str(artifacts.get("transcript_status") or "").strip().lower()
+    transcript_ready = bool(transcript) and transcript_status not in {
+        "pending",
+        "processing",
+        "unavailable",
+    }
+    if not transcript_ready:
+        await _mark_post_meeting_processing(
+            ctx,
+            client,
+            occurrence_key=occurrence_key,
+            meeting_id=meeting_id,
+            status="pending_transcript",
+            transcript_status=transcript_status or "pending",
+            event=event,
+            error="; ".join(
+                str(item) for item in artifacts.get("processing_errors", [])
+            ),
+            lease_token=lease_token,
+            step_prefix=step_prefix,
+        )
+        return {
+            "status": "pending_transcript",
+            "occurrence_key": occurrence_key,
+            "meeting_id": meeting_id,
+            "transcript_status": transcript_status or "pending",
+        }
+
+    summary = str(artifacts.get("summary_text") or "").strip()
+    action_items = str(artifacts.get("action_items") or "").strip()
+    summary_source = "zoom"
+    if not summary:
+        summary_source = "orbie"
+        await _mark_post_meeting_processing(
+            ctx,
+            client,
+            occurrence_key=occurrence_key,
+            meeting_id=meeting_id,
+            status="summarizing",
+            transcript_status=transcript_status or "ready",
+            summary_source=summary_source,
+            event=event,
+            lease_token=lease_token,
+            step_prefix=step_prefix,
+        )
+        try:
+            agent_result = await ctx.step(
+                f"{step_prefix}:summarize:{occurrence_key}",
+                lambda: ctx.agent_turn(
+                    _summary_agent_prompt(transcript),
+                    thread_key=f"meeting-summary:{occurrence_key}",
+                    message_id=f"meeting-summary:{occurrence_key}",
+                    metadata={
+                        "source": "zoom_transcript",
+                        "meeting_id": meeting_id,
+                        "occurrence_key": occurrence_key,
+                    },
+                ),
+            )
+            parsed = _agent_summary(agent_result)
+        except Exception as error:  # noqa: BLE001 - fallback keeps transcript delivery live
+            ctx.log(
+                "zoom_post_meeting_summary_fallback",
+                meeting_id=meeting_id,
+                occurrence_key=occurrence_key,
+                error_type=type(error).__name__,
+            )
+            parsed = None
+        if parsed:
+            summary, action_items = parsed
+        else:
+            summary_source = "transcript_fallback"
+            summary, action_items = _transcript_fallback(transcript)
+
+    await _mark_post_meeting_processing(
+        ctx,
+        client,
+        occurrence_key=occurrence_key,
+        meeting_id=meeting_id,
+        status="publishing_notion",
+        transcript_status=transcript_status or "ready",
+        summary_source=summary_source,
+        event=event,
+        lease_token=lease_token,
+        step_prefix=step_prefix,
+    )
+
+    title = str(candidate.get("title") or (cadence or {}).get("title") or "Meeting")
+    start = str(
+        candidate.get("actual_start")
+        or candidate.get("actualStart")
+        or candidate.get("requested_start")
+        or candidate.get("requestedStart")
+        or ""
+    )
+    meeting_url = str(
+        candidate.get("zoom_join_url") or candidate.get("zoomJoinUrl") or ""
+    ).strip()
+    notion_page_id = str((cadence or {}).get("_page_id") or "")
+    try:
+        publication = await ctx.step(
+            f"{step_prefix}:notion:{occurrence_key}",
+            lambda: client.publish_notion_meeting_summary(
+                notion_page_id,
+                occurrence_key=occurrence_key,
+                title=title,
+                start=start,
+                summary=summary,
+                transcript=transcript,
+                meeting_id=meeting_id,
+                meeting_url=meeting_url,
+                action_items=action_items,
+                summary_source=summary_source,
+            ),
+        )
+    except Exception as error:
+        await _mark_post_meeting_processing(
+            ctx,
+            client,
+            occurrence_key=occurrence_key,
+            meeting_id=meeting_id,
+            status="failed_retryable",
+            transcript_status=transcript_status or "ready",
+            summary_source=summary_source,
+            event=event,
+            error=f"notion:{type(error).__name__}",
+            lease_token=lease_token,
+            step_prefix=step_prefix,
+        )
+        raise
+    if isinstance(publication, dict):
+        notion_page_id = str(publication.get("page_id") or notion_page_id)
+    notion_url = (
+        f"https://www.notion.so/{notion_page_id.replace('-', '')}"
+        if notion_page_id
+        else ""
+    )
+    attendee_ids, unresolved = _slack_ids_for_emails(
+        list(candidate.get("attendee_emails") or candidate.get("attendeeEmails") or []),
+        slack_users,
+    )
+    delivered_to: list[str] = []
+    message = _post_meeting_message(title, summary, transcript, notion_url)
+    await _mark_post_meeting_processing(
+        ctx,
+        client,
+        occurrence_key=occurrence_key,
+        meeting_id=meeting_id,
+        status="notifying_participants",
+        transcript_status=transcript_status or "ready",
+        summary_source=summary_source,
+        event=event,
+        lease_token=lease_token,
+        step_prefix=step_prefix,
+    )
+    for user_id in attendee_ids:
+        try:
+            await _mark_post_meeting_processing(
+                ctx,
+                client,
+                occurrence_key=occurrence_key,
+                meeting_id=meeting_id,
+                status="notifying_participants",
+                transcript_status=transcript_status or "ready",
+                summary_source=summary_source,
+                event=event,
+                lease_token=lease_token,
+                step_prefix=f"{step_prefix}:renew-dm:{user_id}",
+            )
+            await ctx.step(
+                f"{step_prefix}:dm:{occurrence_key}:{user_id}",
+                lambda user_id=user_id, message=message: client.send_slack_dm(
+                    user_id,
+                    message,
+                    client_msg_id=_notification_client_id(
+                        f"post-meeting:{occurrence_key}:{user_id}"
+                    ),
+                ),
+            )
+        except Exception as error:
+            await _mark_post_meeting_processing(
+                ctx,
+                client,
+                occurrence_key=occurrence_key,
+                meeting_id=meeting_id,
+                status="failed_retryable",
+                transcript_status=transcript_status or "ready",
+                summary_source=summary_source,
+                event=event,
+                error=f"slack_dm:{type(error).__name__}",
+                lease_token=lease_token,
+                step_prefix=step_prefix,
+            )
+            raise
+        delivered_to.append(user_id)
+    notify_channel = str(
+        candidate.get("notify_channel")
+        or candidate.get("notifyChannel")
+        or (cadence or {}).get("notifyChannel")
+        or ""
+    ).strip()
+    if (
+        notify_channel
+        and str(candidate.get("visibility") or (cadence or {}).get("visibility") or "")
+        == "public"
+    ):
+        try:
+            await _mark_post_meeting_processing(
+                ctx,
+                client,
+                occurrence_key=occurrence_key,
+                meeting_id=meeting_id,
+                status="notifying_participants",
+                transcript_status=transcript_status or "ready",
+                summary_source=summary_source,
+                event=event,
+                lease_token=lease_token,
+                step_prefix=f"{step_prefix}:renew-channel:{notify_channel}",
+            )
+            await ctx.step(
+                f"{step_prefix}:channel:{occurrence_key}:{notify_channel}",
+                lambda: client.send_slack_message(
+                    notify_channel,
+                    message,
+                    client_msg_id=_notification_client_id(
+                        f"post-meeting:{occurrence_key}:{notify_channel}"
+                    ),
+                ),
+            )
+        except Exception as error:
+            await _mark_post_meeting_processing(
+                ctx,
+                client,
+                occurrence_key=occurrence_key,
+                meeting_id=meeting_id,
+                status="failed_retryable",
+                transcript_status=transcript_status or "ready",
+                summary_source=summary_source,
+                event=event,
+                error=f"slack_channel:{type(error).__name__}",
+                lease_token=lease_token,
+                step_prefix=step_prefix,
+            )
+            raise
+        delivered_to.append(notify_channel)
+    marked = await ctx.step(
+        f"{step_prefix}:delivered:{occurrence_key}",
+        lambda: client.scheduling_operation(
+            "mark_post_meeting_delivered",
+            {
+                "occurrence_key": occurrence_key,
+                "notion_page_id": notion_page_id or None,
+                "delivered_to": delivered_to,
+                "lease_token": lease_token,
+            },
+        ),
+    )
+    return {
+        "status": "delivered",
+        "occurrence_key": occurrence_key,
+        "meeting_id": meeting_id,
+        "notion_page_id": notion_page_id or None,
+        "delivered_to": delivered_to,
+        "unresolved_attendee_emails": unresolved,
+        "summary_source": summary_source,
+        "marked": bool(marked),
+    }
+
+
+async def _post_meeting_handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
+    client = _client(ctx)
+    parsed_webhook = _zoom_webhook_input(inp) if inp.webhook else {}
+    if inp.webhook:
+        event = parsed_webhook.get("event")
+        if event not in {
+            str(item) for item in WEBHOOKS[0].get("filter", {}).get("values", [])
+        }:
+            return {
+                "status": "skipped",
+                "reason": "unsupported_zoom_event",
+                "event": event or None,
+            }
+    meeting_id, source = _post_meeting_zoom_id(inp)
+    if not meeting_id:
+        return {
+            "status": "skipped",
+            "reason": "missing_zoom_meeting_id",
+            "source": source,
+        }
+    if len(meeting_id) > 128 or any(char.isspace() for char in meeting_id):
+        raise ValueError("post_meeting_zoom_id must be a bounded token")
+    candidate = await _post_meeting_candidate_by_zoom_id(
+        ctx,
+        client,
+        meeting_id,
+        step_prefix=f"post-meeting:{source}",
+    )
+    if candidate is None:
+        return {
+            "status": "skipped",
+            "reason": "meeting_occurrence_not_found",
+            "meeting_id": meeting_id,
+            "source": source,
+        }
+    slack_users = await ctx.step(
+        f"post-meeting:{source}:slack-users:{meeting_id}",
+        lambda: client.slack_users(),
+    )
+    result = await _process_post_meeting_candidate(
+        ctx,
+        client,
+        candidate,
+        slack_users=slack_users,
+        event=str(parsed_webhook.get("event") or source),
+        step_prefix=f"post-meeting:{source}",
+    )
+    result["source"] = source
+    if parsed_webhook.get("event"):
+        result["event"] = parsed_webhook["event"]
+    return result
 
 
 def _cadence_member_editor_emails(
@@ -1722,7 +2344,7 @@ def _notification_destination(
 
 
 def _validate_input(inp: Input) -> None:
-    if _is_scheduled(inp):
+    if _is_scheduled(inp) or inp.webhook or str(inp.post_meeting_zoom_id or "").strip():
         return
     if inp.requester_slack_team_id != WORLD_SLACK_TEAM_ID:
         raise ValueError("meeting automation is only available to the World Slack team")
@@ -2338,116 +2960,18 @@ async def _scheduled_handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]
     if not isinstance(candidates, list):
         raise TypeError("meeting scheduler returned invalid post-meeting candidates")
     for candidate in (item for item in candidates if isinstance(item, dict)):
-        occurrence_key = str(
-            candidate.get("occurrence_key") or candidate.get("occurrenceKey") or ""
-        ).strip()
-        meeting_id = str(
-            candidate.get("zoom_meeting_id") or candidate.get("zoomMeetingId") or ""
-        ).strip()
-        if not occurrence_key or not meeting_id:
-            continue
-        artifacts = await ctx.step(
-            f"scheduled:post-meeting-artifacts:{occurrence_key}",
-            lambda meeting_id=meeting_id: client.scheduling_operation(
-                "collect_post_meeting_artifacts", {"meeting_id": meeting_id}
-            ),
-        )
-        if not isinstance(artifacts, dict) or not artifacts.get("ready"):
-            post_meetings.append(
-                {"occurrence_key": occurrence_key, "status": "processing"}
-            )
-            continue
-        cadence = by_id.get(str(candidate.get("cadence_id") or ""))
-        title = str(candidate.get("title") or (cadence or {}).get("title") or "Meeting")
-        start = str(
-            candidate.get("actual_start") or candidate.get("requested_start") or ""
-        )
-        summary = str(artifacts.get("summary_text") or "").strip()
-        transcript = str(artifacts.get("transcript") or "").strip()
-        meeting_url = str(candidate.get("zoom_join_url") or "")
-        action_items = str(artifacts.get("action_items") or "")
-        notion_page_id = str((cadence or {}).get("_page_id") or "")
-        notion_url = ""
-        publication = await ctx.step(
-            f"scheduled:post-meeting-notion:{occurrence_key}",
-            lambda notion_page_id=notion_page_id, occurrence_key=occurrence_key, title=title, start=start, summary=summary, transcript=transcript, meeting_id=meeting_id, meeting_url=meeting_url, action_items=action_items: (
-                client.publish_notion_meeting_summary(
-                    notion_page_id,
-                    occurrence_key=occurrence_key,
-                    title=title,
-                    start=start,
-                    summary=summary,
-                    transcript=transcript,
-                    meeting_id=meeting_id,
-                    meeting_url=meeting_url,
-                    action_items=action_items,
-                )
-            ),
-        )
-        if isinstance(publication, dict):
-            notion_page_id = str(publication.get("page_id") or "")
-        if notion_page_id:
-            notion_url = f"https://www.notion.so/{notion_page_id.replace('-', '')}"
-        attendee_ids, unresolved = _slack_ids_for_emails(
-            list(candidate.get("attendee_emails") or []), slack_users
-        )
-        delivered_to: list[str] = []
-        message = _post_meeting_message(title, summary, transcript, notion_url)
-        for user_id in attendee_ids:
-            await ctx.step(
-                f"scheduled:post-meeting-dm:{occurrence_key}:{user_id}",
-                lambda user_id=user_id, message=message, occurrence_key=occurrence_key: (
-                    client.send_slack_dm(
-                        user_id,
-                        message,
-                        client_msg_id=_notification_client_id(
-                            f"post-meeting:{occurrence_key}:{user_id}"
-                        ),
-                    )
-                ),
-            )
-            delivered_to.append(user_id)
-        if (
-            cadence
-            and cadence.get("visibility") == "public"
-            and cadence.get("notifyChannel")
-        ):
-            channel_id = str(cadence["notifyChannel"])
-            await ctx.step(
-                f"scheduled:post-meeting-channel:{occurrence_key}:{channel_id}",
-                lambda channel_id=channel_id, message=message, occurrence_key=occurrence_key: (
-                    client.send_slack_message(
-                        channel_id,
-                        message,
-                        client_msg_id=_notification_client_id(
-                            f"post-meeting:{occurrence_key}:{channel_id}"
-                        ),
-                    )
-                ),
-            )
-            delivered_to.append(channel_id)
-        marked = await ctx.step(
-            f"scheduled:post-meeting-mark:{occurrence_key}",
-            lambda occurrence_key=occurrence_key, notion_page_id=notion_page_id, delivered_to=delivered_to: (
-                client.scheduling_operation(
-                    "mark_post_meeting_delivered",
-                    {
-                        "occurrence_key": occurrence_key,
-                        "notion_page_id": notion_page_id or None,
-                        "delivered_to": delivered_to,
-                    },
-                )
-            ),
+        cadence = by_id.get(
+            str(candidate.get("cadence_id") or candidate.get("cadenceId") or "")
         )
         post_meetings.append(
-            {
-                "occurrence_key": occurrence_key,
-                "status": "delivered",
-                "notion_page_id": notion_page_id or None,
-                "delivered_to": delivered_to,
-                "unresolved_attendee_emails": unresolved,
-                "marked": bool(marked),
-            }
+            await _process_post_meeting_candidate(
+                ctx,
+                client,
+                candidate,
+                slack_users=slack_users,
+                cadence=cadence,
+                step_prefix="scheduled:post-meeting",
+            )
         )
     due = [
         cadence
@@ -2697,6 +3221,8 @@ def _slack_post_args(inp: Input) -> dict[str, str]:
 
 
 async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
+    if inp.webhook or str(inp.post_meeting_zoom_id or "").strip():
+        return await _post_meeting_handler(inp, ctx)
     if _is_scheduled(inp):
         return await _scheduled_handler(inp, ctx)
     if str(inp.scheduling_operation or "").strip():
