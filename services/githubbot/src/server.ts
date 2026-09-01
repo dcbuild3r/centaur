@@ -112,7 +112,6 @@ if (!postgresUrl) {
 
 const options: GithubbotOptions = {
   apiUrl,
-  allowedAuthorAssociations: listEnv("GITHUBBOT_ALLOWED_AUTHOR_ASSOCIATIONS"),
   apiKey: optionalEnv("GITHUBBOT_API_KEY"),
   autoMerge: boolEnv("GITHUBBOT_AUTO_MERGE", true),
   botUserId: optionalEnv("GITHUBBOT_USER_ID"),
@@ -188,16 +187,6 @@ function stringEnv(name: string, fallback: string): string {
 
 function numberEnv(name: string, fallback: number): number {
   return optionalNumberEnv(name) ?? fallback;
-}
-
-function listEnv(name: string): string[] | undefined {
-  const value = optionalEnv(name);
-  if (!value) return undefined;
-  const items = value
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-  return items.length ? items : undefined;
 }
 
 function boolEnv(name: string, fallback: boolean): boolean {

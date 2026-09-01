@@ -1,4 +1,4 @@
-import { resolveAllowedAuthorAssociations } from "./authorization";
+import { hasRepositoryWritePermission } from "./authorization";
 import { backgroundWaitUntil } from "./context";
 import { buildCommentReplyBody } from "./comment-bot";
 import type { PrManagerContext } from "./pr-manager";
@@ -51,13 +51,6 @@ export function handleBodyMention(
   const author = stringValue(isRecord(node.user) ? node.user.login : undefined);
   if (author && author.toLowerCase() === ctx.userName.toLowerCase()) return null;
 
-  // Same trust gate as the comment path, read from the issue/PR author.
-  const allowed = resolveAllowedAuthorAssociations(
-    ctx.options.allowedAuthorAssociations,
-  );
-  const association = stringValue(node.author_association)?.toUpperCase();
-  const authorized =
-    allowed.includes("*") || (!!association && allowed.includes(association));
   const { options, state } = ctx;
   const threadKey = isPr
     ? `github:${repo.owner}/${repo.repo}:${number}`
@@ -70,15 +63,21 @@ export function handleBodyMention(
     startedAtMs: nowMs(),
     threadId: threadKey,
   };
-  if (!authorized) {
-    traceLog(options, "githubbot_body_mention_unauthorized_skipped", trace, {
-      association: association ?? "unknown",
-    });
-    return null;
-  }
-
   return (async () => {
     const logger = options.logger ?? noopLogger;
+    const authorized =
+      !!author &&
+      (await hasRepositoryWritePermission(ctx.octokit, {
+        owner: repo.owner,
+        repo: repo.repo,
+        username: author,
+      }));
+    if (!authorized) {
+      traceLog(options, "githubbot_body_mention_unauthorized_skipped", trace, {
+        author: author ?? "unknown",
+      });
+      return;
+    }
     // A body mention fires at most once per subject; claim before the run so a
     // redelivery of the `opened` webhook never double-replies.
     const dedupKey = `${options.stateKeyPrefix ?? "centaur-githubbot"}:body-mention:${threadKey}`;

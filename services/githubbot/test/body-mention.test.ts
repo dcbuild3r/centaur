@@ -18,7 +18,10 @@ describe("mentionsBot", () => {
 
 type Spies = { reactions: number; comments: number };
 
-function makeCtx(spies: Spies): PrManagerContext {
+function makeCtx(
+  spies: Spies,
+  permission: string | Error = "write",
+): PrManagerContext {
   const m = new Map<string, unknown>();
   const state = {
     get: async (k: string) => m.get(k),
@@ -34,6 +37,12 @@ function makeCtx(spies: Spies): PrManagerContext {
   return {
     octokit: {
       rest: {
+        repos: {
+          getCollaboratorPermissionLevel: async () => {
+            if (permission instanceof Error) throw permission;
+            return { data: { permission } };
+          },
+        },
         reactions: {
           createForIssue: async () => {
             spies.reactions += 1;
@@ -68,14 +77,13 @@ function makeCtx(spies: Spies): PrManagerContext {
   } as unknown as PrManagerContext;
 }
 
-function openedPr(body: string, association = "MEMBER", author = "someone") {
+function openedPr(body: string, author = "someone") {
   return JSON.stringify({
     action: "opened",
     repository: { full_name: "0xSplits/centaur" },
     pull_request: {
       number: 7,
       body,
-      author_association: association,
       user: { login: author },
     },
   });
@@ -118,21 +126,30 @@ describe("handleBodyMention", () => {
       handleBodyMention(
         makeCtx({ reactions: 0, comments: 0 }),
         "pull_request",
-        openedPr("@centaur-bot do it", "MEMBER", "centaur-bot"),
+        openedPr("@centaur-bot do it", "centaur-bot"),
       ),
     ).toBeNull();
   });
 
-  test("ignores an unauthorized author", () => {
+  test("denies a read-only author before reacting or replying", async () => {
     const spies = { reactions: 0, comments: 0 };
-    expect(
-      handleBodyMention(
-        makeCtx(spies),
-        "pull_request",
-        openedPr("@centaur-bot do it", "NONE"),
-      ),
-    ).toBeNull();
+    await handleBodyMention(
+      makeCtx(spies, "read"),
+      "pull_request",
+      openedPr("@centaur-bot do it"),
+    );
     expect(spies.comments).toBe(0);
+    expect(spies.reactions).toBe(0);
+  });
+
+  test("fails closed before side effects when permission lookup errors", async () => {
+    const spies = { reactions: 0, comments: 0 };
+    await handleBodyMention(
+      makeCtx(spies, new Error("GitHub unavailable")),
+      "pull_request",
+      openedPr("@centaur-bot do it"),
+    );
+    expect(spies).toEqual({ reactions: 0, comments: 0 });
   });
 
   test("runs a turn and replies once for an authorized mention; dedups redelivery", async () => {

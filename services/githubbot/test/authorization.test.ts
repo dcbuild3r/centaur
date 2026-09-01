@@ -1,78 +1,81 @@
 import { describe, expect, test } from "bun:test";
-import {
-  authorAssociationFromRaw,
-  DEFAULT_ALLOWED_AUTHOR_ASSOCIATIONS,
-  isCommentAuthorAllowed,
-  resolveAllowedAuthorAssociations,
-} from "../src/authorization";
+import { hasRepositoryWritePermission } from "../src/authorization";
 
-function raw(association: unknown): unknown {
+function client(permission: unknown) {
   return {
-    type: "issue_comment",
-    comment: { author_association: association },
+    rest: {
+      repos: {
+        getCollaboratorPermissionLevel: async () => ({ data: { permission } }),
+      },
+    },
   };
 }
 
-describe("authorAssociationFromRaw", () => {
-  test("reads author_association from the raw comment", () => {
-    expect(authorAssociationFromRaw(raw("MEMBER"))).toBe("MEMBER");
-  });
-
-  test("undefined for a non-comment / malformed shape", () => {
-    expect(authorAssociationFromRaw({ type: "x" })).toBeUndefined();
-    expect(authorAssociationFromRaw({ comment: {} })).toBeUndefined();
-    expect(authorAssociationFromRaw(null)).toBeUndefined();
-    expect(authorAssociationFromRaw("nope")).toBeUndefined();
-  });
-});
-
-describe("resolveAllowedAuthorAssociations", () => {
-  test("defaults when unset, empty, or blank", () => {
-    const want = [...DEFAULT_ALLOWED_AUTHOR_ASSOCIATIONS];
-    expect(resolveAllowedAuthorAssociations(undefined)).toEqual(want);
-    expect(resolveAllowedAuthorAssociations([])).toEqual(want);
-    expect(resolveAllowedAuthorAssociations(["  "])).toEqual(want);
-  });
-
-  test("uppercases and trims configured values", () => {
-    expect(resolveAllowedAuthorAssociations([" owner ", "Member"])).toEqual([
-      "OWNER",
-      "MEMBER",
-    ]);
-  });
-});
-
-describe("isCommentAuthorAllowed", () => {
-  test("allows the default collaborator-and-up set", () => {
-    for (const assoc of ["OWNER", "MEMBER", "COLLABORATOR"]) {
-      expect(isCommentAuthorAllowed(raw(assoc), {})).toBe(true);
+describe("hasRepositoryWritePermission", () => {
+  test("allows effective write, maintain, and admin permission", async () => {
+    for (const permission of ["write", "maintain", "admin"]) {
+      expect(
+        await hasRepositoryWritePermission(client(permission), {
+          owner: "worldfnd",
+          repo: "provekit",
+          username: "alice",
+        }),
+      ).toBe(true);
     }
   });
 
-  test("denies contributors and outsiders by default", () => {
-    for (const assoc of ["CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "NONE"]) {
-      expect(isCommentAuthorAllowed(raw(assoc), {})).toBe(false);
+  test("denies read, triage, none, missing, and unknown permission", async () => {
+    for (const permission of ["read", "triage", "none", undefined, "future-role"]) {
+      expect(
+        await hasRepositoryWritePermission(client(permission), {
+          owner: "worldfnd",
+          repo: "provekit",
+          username: "alice",
+        }),
+      ).toBe(false);
     }
   });
 
-  test("matches case-insensitively", () => {
-    expect(isCommentAuthorAllowed(raw("member"), {})).toBe(true);
+  test("fails closed when GitHub's permission lookup fails", async () => {
+    const octokit = {
+      rest: {
+        repos: {
+          getCollaboratorPermissionLevel: async () => {
+            throw new Error("GitHub unavailable");
+          },
+        },
+      },
+    };
+    expect(
+      await hasRepositoryWritePermission(octokit, {
+        owner: "worldfnd",
+        repo: "provekit",
+        username: "alice",
+      }),
+    ).toBe(false);
   });
 
-  test("fails closed when the association can't be read", () => {
-    expect(isCommentAuthorAllowed({ comment: {} }, {})).toBe(false);
-    expect(isCommentAuthorAllowed(null, {})).toBe(false);
-  });
-
-  test("the '*' sentinel allows everyone (incl. unreadable)", () => {
-    const opts = { allowedAuthorAssociations: ["*"] };
-    expect(isCommentAuthorAllowed(raw("NONE"), opts)).toBe(true);
-    expect(isCommentAuthorAllowed(null, opts)).toBe(true);
-  });
-
-  test("honors a custom allowlist", () => {
-    const opts = { allowedAuthorAssociations: ["contributor"] };
-    expect(isCommentAuthorAllowed(raw("CONTRIBUTOR"), opts)).toBe(true);
-    expect(isCommentAuthorAllowed(raw("MEMBER"), opts)).toBe(false);
+  test("passes the exact repository and commenter to GitHub", async () => {
+    let received: unknown;
+    const octokit = {
+      rest: {
+        repos: {
+          getCollaboratorPermissionLevel: async (input: unknown) => {
+            received = input;
+            return { data: { permission: "write" } };
+          },
+        },
+      },
+    };
+    await hasRepositoryWritePermission(octokit, {
+      owner: "worldcoin-foundation",
+      repo: "centaur",
+      username: "dcbuilder",
+    });
+    expect(received).toEqual({
+      owner: "worldcoin-foundation",
+      repo: "centaur",
+      username: "dcbuilder",
+    });
   });
 });

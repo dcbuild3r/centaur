@@ -22,11 +22,9 @@ reviewer** like any other collaborator.
   PR itself. A 👀 reaction acks the triggering comment while the bot works, settling to 🚀 / 😕. The
   reply is one comment: the answer with the chain-of-thought folded into a collapsed `<details>`
   section. Mention detection is the adapter's (matches the bot account's `@username`). Only authors
-  whose GitHub `author_association` is allowed (default `OWNER` / `MEMBER` / `COLLABORATOR`) can drive
-  a turn — the agent runs in a write-capable sandbox and posts its transcript back, so untrusted
-  commenters can't steer it. Widen or open it with `GITHUBBOT_ALLOWED_AUTHOR_ASSOCIATIONS` (`*` allows
-  everyone, e.g. a fully-private repo). Lifecycle triggers (assignment, review-request) are already
-  gated by GitHub permissions, so this applies only to the comment path.
+  with effective `write`, `maintain`, or `admin` permission on that exact repository can drive a
+  turn. The check uses GitHub's collaborator-permission API and fails closed before any reaction,
+  session, or reply; `read`, `triage`, unknown permissions, and lookup errors are denied.
 - **`@`-mentioning the bot in the body of a newly-opened issue or PR** (the description, not a
   comment) → the same conversational turn runs, keyed to that issue/PR thread, with the reply posted
   as a comment. Only the `opened` event is handled — an edit that adds a mention later won't
@@ -147,7 +145,6 @@ requests**, **Pull request reviews**, **Check runs**, **Check suites**, and **Wo
 | `GITHUBBOT_ISSUE_PROMPT_FILE` | — | Path to a file holding the issue-work methodology (e.g. an overlay-mounted file). Used when the inline var is unset. |
 | `GITHUBBOT_MANAGEMENT_PROMPT` | — | Extra guidance prepended to owned-PR management turns (CI-fix / conflict / address-review), inline. The per-action preamble still rides underneath. |
 | `GITHUBBOT_MANAGEMENT_PROMPT_FILE` | — | Path to a file holding the management guidance (e.g. an overlay-mounted file). Used when the inline var is unset. |
-| `GITHUBBOT_ALLOWED_AUTHOR_ASSOCIATIONS` | — | Comma-separated `author_association` values allowed to drive the comment path. Default `OWNER,MEMBER,COLLABORATOR`; `*` allows everyone. |
 | `GITHUB_API_URL` | — | Override the GitHub REST base URL (GitHub Enterprise). |
 | `GITHUBBOT_USER_ID` | — | Bot's numeric user id for self-message detection (auto-detected otherwise). |
 | `GITHUBBOT_STATE_KEY_PREFIX` | — | Chat-SDK state key prefix, default `centaur-githubbot`. |

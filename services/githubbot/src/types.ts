@@ -165,14 +165,6 @@ export type GithubbotOptions = {
    */
   tokensByOwner?: Record<string, string>;
   userName?: string;
-  /**
-   * GitHub `author_association` values allowed to drive the conversational
-   * (comment-mention) path. Defaults to OWNER/MEMBER/COLLABORATOR; the sentinel
-   * "*" allows everyone (e.g. a fully-private repo where every commenter is
-   * already trusted). Lifecycle paths (assignment, review-request) are gated by
-   * GitHub permissions and are not affected by this.
-   */
-  allowedAuthorAssociations?: string[];
   /** Webhook signing secret configured on the GitHub repo/org webhook. */
   webhookSecret: string;
 };

@@ -138,12 +138,6 @@ spec:
             - name: GITHUBBOT_MANAGEMENT_PROMPT_FILE
               value: /etc/githubbot/prompts/management-prompt.md
 {{- end }}
-{{- if .Values.githubbot.allowedAuthorAssociations }}
-            # author_association allowlist for the comment-mention path; unset =
-            # the bot's safe default (OWNER, MEMBER, COLLABORATOR).
-            - name: GITHUBBOT_ALLOWED_AUTHOR_ASSOCIATIONS
-              value: {{ .Values.githubbot.allowedAuthorAssociations | quote }}
-{{- end }}
             # Drain budget on shutdown — kept ~10s under the grace period so the
             # final flush + exit still fit before the pod is force-killed.
             - name: GITHUBBOT_SHUTDOWN_DRAIN_MS

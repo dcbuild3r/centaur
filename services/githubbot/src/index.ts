@@ -11,10 +11,7 @@ import {
 } from "chat";
 import { Hono, type Context } from "hono";
 import pg from "pg";
-import {
-  authorAssociationFromRaw,
-  isCommentAuthorAllowed,
-} from "./authorization";
+import { hasRepositoryWritePermission } from "./authorization";
 import { handleBodyMention } from "./body-mention";
 import { backgroundWaitUntil, requestContext, waitUntil } from "./context";
 import {
@@ -253,13 +250,21 @@ async function handleMessage(
     });
     return;
   }
-  // Only sufficiently-trusted authors may drive a turn: the agent runs in a
-  // write-capable sandbox and posts its transcript back, so an untrusted
-  // commenter must not be able to steer it (or read its tool output). Gates both
-  // mentions (execute) and follow-up context (append). Fails closed.
-  if (!isCommentAuthorAllowed(message.raw, options)) {
+  // Resolve effective permission on the exact repository before any state,
+  // reaction, subscription, session, or reply side effect. author_association
+  // is too coarse: org membership does not imply write access to every repo.
+  const repository = parseGithubThreadKey(thread.id);
+  const authorized =
+    repository !== null &&
+    !!message.author.userName &&
+    (await hasRepositoryWritePermission(input.prManagerCtx.octokit, {
+      owner: repository.owner,
+      repo: repository.repo,
+      username: message.author.userName,
+    }));
+  if (!authorized) {
     traceLog(options, "githubbot_unauthorized_author_skipped", undefined, {
-      association: authorAssociationFromRaw(message.raw) ?? "unknown",
+      author: message.author.userName || "unknown",
       message_id: message.id,
       thread_id: thread.id,
     });
