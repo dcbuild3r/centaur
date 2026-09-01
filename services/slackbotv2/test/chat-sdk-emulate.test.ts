@@ -2314,6 +2314,61 @@ describe('slackbotv2', () => {
     })
   })
 
+  it('renders root-DM fallback answers as Slack-native rich text', async () => {
+    codexApi.autoRespond = false
+    const opened = await slack.conversations.open({ users: BOT_USER_ID })
+    const dmChannel = String(opened.channel?.id)
+    expect(dmChannel).toStartWith('D')
+    const messageTs = '1788266877.394249'
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-root-dm-rich-fallback',
+        event: {
+          type: 'message',
+          user: USER_ID,
+          channel: dmChannel,
+          channel_type: 'im',
+          team: TEAM_ID,
+          ts: messageTs,
+          text: 'book the meeting'
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+    expect(response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => codexApi.eventRequests.length === 1)
+
+    const commonMarkAnswer = [
+      '**Booked and verified:**',
+      '',
+      '- **Title:** Example meeting',
+      '',
+      '[Join meeting](https://meet.example.test/room)'
+    ].join('\n')
+    codexApi.emitOutputLines(
+      codexApi.executes[0]!.threadKey,
+      sampleCodexOutputLines(commonMarkAnswer)
+    )
+
+    await Promise.all(waits)
+    const fallbackPost = slackApi.calls.find(call =>
+      call.method === 'chat.postMessage'
+      && stringField(call.body.channel) === dmChannel
+      && stringField(call.body.text).includes('Booked and verified')
+    )
+    expect(fallbackPost).toBeDefined()
+    const delivered = stringField(fallbackPost?.body.text)
+    expect(delivered).toContain('*Booked and verified:*')
+    expect(delivered).toContain('• *Title:* Example meeting')
+    expect(delivered).toContain('<https://meet.example.test/room|Join meeting>')
+    expect(delivered).not.toContain('**Title:**')
+    expect(delivered).not.toContain('[Join meeting](')
+  })
+
   it('ignores non-JSON sandbox bootstrap output lines instead of ending the stream', async () => {
     codexApi.autoRespond = false
 
@@ -6431,6 +6486,7 @@ type StreamCall = {
     | 'assistant.threads.setTitle'
     | 'chat.startStream'
     | 'chat.appendStream'
+    | 'chat.postMessage'
     | 'chat.stopStream'
     | 'conversations.join'
     | 'reactions.add'
@@ -6737,6 +6793,9 @@ async function handlePatchedSlackRequest(
       )
     )
     return
+  }
+  if (path === '/api/chat.postMessage') {
+    input.calls.push({ method: 'chat.postMessage', body: await requestBody(request.clone()) })
   }
   if (path === '/api/conversations.replies') {
     const body = await requestBody(request.clone())
