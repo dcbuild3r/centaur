@@ -75,6 +75,11 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sGITHUBBOT_TOKEN" .Values.secretManager.envPrefix }}
+            - name: GITHUB_TOKEN_WORLDFND
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sGITHUBBOT_TOKEN_WORLDFND" .Values.secretManager.envPrefix }}
             # githubbot's own webhook signing secret (the GitHub repo/org webhook).
             - name: GITHUB_WEBHOOK_SECRET
               valueFrom:

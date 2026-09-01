@@ -68,6 +68,12 @@ jobs:
             context: .
             dockerfile: services/slackbotv2/Dockerfile
             target: ""
+          - image: centaur-githubbot
+            repository: centaur-githubbot
+            tagPrefix: ""
+            context: .
+            dockerfile: services/githubbot/Dockerfile
+            target: ""
           - image: centaur-console
             repository: common-app
             tagPrefix: centaur-console-
@@ -169,12 +175,16 @@ jobs:
       - name: Configure kubeconfig
         run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER_NAME" --alias "$EKS_CLUSTER_NAME"
 
-      - name: Load Zoom webhook secret from 1Password
+      - name: Load deployment secrets from 1Password
         uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
         with:
           export-env: true
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          GITHUBBOT_TOKEN: op://Centaur/oged7xfyssmixegfj3kf3piymm/credential
+          GITHUBBOT_TOKEN_WORLDFND: op://Centaur/wlsn2v5vzsr4bikftn45mfbily/credential
+          GITHUBBOT_API_KEY: op://Centaur/GITHUBBOT_API_KEY/credential
+          GITHUBBOT_WEBHOOK_SECRET: op://Centaur/GITHUBBOT_WEBHOOK_SECRET/credential
           ZOOM_WEBHOOK_SECRET: op://Centaur/ZOOM_WEBHOOK_SECRET/credential
 
       - name: Configure Zoom webhook secret
@@ -183,6 +193,29 @@ jobs:
           jq --null-input \
             --arg zoom_webhook_secret "$ZOOM_WEBHOOK_SECRET" \
             '{stringData: {ZOOM_WEBHOOK_SECRET: $zoom_webhook_secret}}' \
+            | kubectl --namespace "$HELM_NAMESPACE" patch secret centaur-infra-env \
+                --type merge \
+                --patch-file /dev/stdin
+
+      - name: Configure GitHubbot secrets
+        run: |
+          test -n "$GITHUBBOT_TOKEN"
+          test -n "$GITHUBBOT_TOKEN_WORLDFND"
+          test -n "$GITHUBBOT_API_KEY"
+          test -n "$GITHUBBOT_WEBHOOK_SECRET"
+          jq --null-input \
+            --arg token "$GITHUBBOT_TOKEN" \
+            --arg worldfnd_token "$GITHUBBOT_TOKEN_WORLDFND" \
+            --arg api_key "$GITHUBBOT_API_KEY" \
+            --arg webhook_secret "$GITHUBBOT_WEBHOOK_SECRET" \
+            '{
+              stringData: {
+                GITHUBBOT_TOKEN: $token,
+                GITHUBBOT_TOKEN_WORLDFND: $worldfnd_token,
+                GITHUBBOT_API_KEY: $api_key,
+                GITHUBBOT_WEBHOOK_SECRET: $webhook_secret
+              }
+            }' \
             | kubectl --namespace "$HELM_NAMESPACE" patch secret centaur-infra-env \
                 --type merge \
                 --patch-file /dev/stdin
@@ -348,6 +381,9 @@ jobs:
             --set "slackbotv2.enabled=true" \
             --set "slackbotv2.image.repository=$ECR_REGISTRY/centaur-slackbotv2" \
             --set "slackbotv2.image.tag=$GITHUB_SHA" \
+            --set "githubbot.enabled=true" \
+            --set "githubbot.image.repository=$ECR_REGISTRY/centaur-githubbot" \
+            --set "githubbot.image.tag=$GITHUB_SHA" \
             --wait \
             --timeout 30m
 

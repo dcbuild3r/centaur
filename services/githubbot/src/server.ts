@@ -8,6 +8,7 @@ const apiUrl = stringEnv("CENTAUR_API_URL", "http://127.0.0.1:8080");
 // Personal access token for the bot's GitHub teammate account (the bot acts as a
 // real GitHub user — it can be requested as a reviewer, @-mentioned, assigned).
 const token = requiredEnv("GITHUB_TOKEN");
+const worldfndToken = optionalEnv("GITHUB_TOKEN_WORLDFND");
 
 // Signing secret configured on the GitHub repo/org webhook. The adapter verifies
 // comment webhooks; githubbot verifies the pull_request (review-request) webhook.
@@ -131,12 +132,13 @@ const options: GithubbotOptions = {
   managementPrompt,
   stateKeyPrefix: optionalEnv("GITHUBBOT_STATE_KEY_PREFIX"),
   token,
+  tokensByOwner: worldfndToken ? { worldfnd: worldfndToken } : undefined,
   userName,
   webhookSecret,
   logger: consoleLogger,
 };
 
-const { app, chat } = createGithubbot(options);
+const { app, chats } = createGithubbot(options);
 const server = Bun.serve({ port, fetch: app.fetch });
 
 log("info", "githubbot_started", {
@@ -160,7 +162,7 @@ const shutdown = async (signal: string): Promise<void> => {
   if (drained > 0) {
     log("info", "githubbot_shutdown_drained", { signal, in_flight: drained });
   }
-  await chat.shutdown().catch(() => undefined);
+  await Promise.all(chats.map((chat) => chat.shutdown().catch(() => undefined)));
   log("info", "githubbot_shutdown_complete", { signal });
   process.exit(0);
 };

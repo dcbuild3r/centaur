@@ -133,7 +133,8 @@ requests**, **Pull request reviews**, **Check runs**, **Check suites**, and **Wo
 
 | Var | Required | Notes |
 |-----|----------|-------|
-| `GITHUB_TOKEN` | ✅ | PAT for the bot's teammate account. |
+| `GITHUB_TOKEN` | ✅ | Default PAT for the bot's teammate account. |
+| `GITHUB_TOKEN_WORLDFND` | — | PAT override for repositories owned by `worldfnd`. |
 | `GITHUB_WEBHOOK_SECRET` | ✅ | Webhook signing secret (or `GITHUBBOT_WEBHOOK_SECRET`). |
 | `GITHUB_BOT_USERNAME` | ✅ | The bot account's GitHub login — drives `@`-mention and requested-reviewer matching (or `GITHUBBOT_USER_NAME`). |
 | `GITHUBBOT_DATABASE_URL` | ✅ | Postgres for chat-SDK state (falls back to `DATABASE_URL` / `POSTGRES_URL`). |

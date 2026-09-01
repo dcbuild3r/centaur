@@ -95,5 +95,9 @@ ingress:
     alb.ingress.kubernetes.io/healthcheck-path: /health
     alb.ingress.kubernetes.io/target-type: ip
   host: centaur-dev.theworldnetwork.org
+githubbot:
+  enabled: true
+  userName: wf-orbie
+  autoMerge: false
 networkPolicy:
   enabled: false

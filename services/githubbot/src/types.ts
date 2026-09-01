@@ -158,6 +158,12 @@ export type GithubbotOptions = {
   mergeMethod?: "merge" | "squash" | "rebase";
   /** Personal access token for the bot's GitHub teammate account. */
   token: string;
+  /**
+   * Optional PAT overrides keyed by repository owner (case-insensitive).
+   * Webhooks and all follow-up API calls for that owner use the matching
+   * adapter, while every other owner uses `token`.
+   */
+  tokensByOwner?: Record<string, string>;
   userName?: string;
   /**
    * GitHub `author_association` values allowed to drive the conversational
@@ -174,6 +180,7 @@ export type GithubbotOptions = {
 export type Githubbot = {
   app: Hono;
   chat: Chat;
+  chats: Chat[];
 };
 
 export type GithubbotThreadState = {

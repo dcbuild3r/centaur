@@ -67,77 +67,70 @@ const DEDUP_WINDOW = 200;
 export function createGithubbot(options: GithubbotOptions): Githubbot {
   const userName = options.userName ?? "github-bot";
   const logger = options.logger ?? noopLogger;
-  const github = createGitHubAdapter({
-    token: options.token,
-    webhookSecret: options.webhookSecret,
-    userName,
-    ...(options.botUserId ? { botUserId: Number(options.botUserId) } : {}),
-    ...(options.githubApiUrl ? { apiUrl: options.githubApiUrl } : {}),
-    logger,
-  });
   const state = options.state ?? createDefaultState(options, logger);
-  const chat = new Chat<{ github: typeof github }, GithubbotThreadState>({
-    userName,
-    adapters: { github },
-    state,
-    // Serialize handling per thread so a redelivered or near-simultaneous comment
-    // can't run two handlers at once. The conversational dedup below claims a
-    // message id via a read-modify-write on thread state, so the deprecated
-    // onLockConflict: "force" would let two concurrent deliveries both pass the
-    // claim and double-execute/double-reply. "drop" keeps the lock (one runs, the
-    // duplicate is dropped) — matching discordbot, which migrated off "force" for
-    // exactly this reason.
-    concurrency: "drop",
-    // The GitHub adapter buffers a turn and posts one comment (it rate-limits
-    // edits), so the SDK's post+edit streaming placeholder doesn't apply — the
-    // final answer posts once when the run settles.
-    fallbackStreamingPlaceholderText: null,
-    logger,
-  });
-
-  // A comment that @-mentions the bot opens (or continues) the PR/issue thread's
-  // session and is answered in-thread. Subscribe so later non-mention replies in
-  // the same thread flow in as context.
-  chat.onNewMention(async (thread, message) => {
-    await handleMessage(thread, message, {
-      adapter: github,
-      mode: "execute",
-      options,
-      prManagerCtx,
-      subscribe: true,
+  const createRuntime = (token: string) => {
+    const github = createGitHubAdapter({
+      token,
+      webhookSecret: options.webhookSecret,
+      userName,
+      ...(options.botUserId ? { botUserId: Number(options.botUserId) } : {}),
+      ...(options.githubApiUrl ? { apiUrl: options.githubApiUrl } : {}),
+      logger,
     });
-  });
-
-  // Follow-ups in a subscribed thread: a further @-mention runs another turn; a
-  // plain comment is ingested as context for the next turn (mirrors slackbotv2).
-  chat.onSubscribedMessage(async (thread, message) => {
-    await handleMessage(thread, message, {
-      adapter: github,
-      mode: message.isMention === true ? "execute" : "append",
-      options,
-      prManagerCtx,
+    const chat = new Chat<{ github: typeof github }, GithubbotThreadState>({
+      userName,
+      adapters: { github },
+      state,
+      concurrency: "drop",
+      fallbackStreamingPlaceholderText: null,
+      logger,
     });
-  });
-
-  let chatInitialized = false;
-  const ensureChatInitialized = async (): Promise<void> => {
-    if (chatInitialized) return;
-    try {
-      await chat.initialize();
-      chatInitialized = true;
-    } catch (error) {
-      logger.warn("githubbot_chat_initialize_failed", {
-        error: errorMessage(error),
+    const prManagerCtx: PrManagerContext = {
+      octokit: github.octokit,
+      options,
+      state,
+      userName,
+    };
+    chat.onNewMention(async (thread, message) => {
+      await handleMessage(thread, message, {
+        adapter: github,
+        mode: "execute",
+        options,
+        prManagerCtx,
+        subscribe: true,
       });
+    });
+    chat.onSubscribedMessage(async (thread, message) => {
+      await handleMessage(thread, message, {
+        adapter: github,
+        mode: message.isMention === true ? "execute" : "append",
+        options,
+        prManagerCtx,
+      });
+    });
+    let initialized = false;
+    const ensureInitialized = async (): Promise<void> => {
+      if (initialized) return;
+      try {
+        await chat.initialize();
+        initialized = true;
+      } catch (error) {
+        logger.warn("githubbot_chat_initialize_failed", {
+          error: errorMessage(error),
+        });
+      }
+    };
+    return { chat, ensureInitialized, prManagerCtx };
+  };
+  const defaultRuntime = createRuntime(options.token);
+  const runtimesByOwner = new Map<string, ReturnType<typeof createRuntime>>();
+  for (const [owner, token] of Object.entries(options.tokensByOwner ?? {})) {
+    const normalizedOwner = owner.trim().toLowerCase();
+    if (normalizedOwner && token.trim()) {
+      runtimesByOwner.set(normalizedOwner, createRuntime(token));
     }
-  };
-
-  const prManagerCtx: PrManagerContext = {
-    octokit: github.octokit,
-    options,
-    state,
-    userName,
-  };
+  }
+  const runtimes = [defaultRuntime, ...new Set(runtimesByOwner.values())];
 
   const app = new Hono();
   app.get("/health", (c) => c.json({ ok: true, service: "githubbot" }));
@@ -145,7 +138,12 @@ export function createGithubbot(options: GithubbotOptions): Githubbot {
   const handleGithubWebhook = async (c: Context) => {
     const eventType = c.req.header("x-github-event") ?? "";
     const deliveryId = c.req.header("x-github-delivery") ?? "";
-    await ensureChatInitialized();
+    const rawBody = await c.req.raw.clone().text();
+    const owner = repositoryOwnerFromWebhook(rawBody);
+    const runtime = owner
+      ? (runtimesByOwner.get(owner) ?? defaultRuntime)
+      : defaultRuntime;
+    await runtime.ensureInitialized();
     const context = {
       retryableErrors: [],
       waitUntil: (p: Promise<unknown>) => waitUntil(c, p),
@@ -159,7 +157,7 @@ export function createGithubbot(options: GithubbotOptions): Githubbot {
       eventType === "pull_request_review_comment"
     ) {
       return requestContext.run(context, () =>
-        chat.webhooks.github(c.req.raw, {
+        runtime.chat.webhooks.github(c.req.raw, {
           waitUntil: (p) => waitUntil(c, p),
         }),
       );
@@ -171,7 +169,6 @@ export function createGithubbot(options: GithubbotOptions): Githubbot {
     if (!LIFECYCLE_EVENTS.has(eventType)) {
       return new globalThis.Response("ok", { status: 200 });
     }
-    const rawBody = await c.req.raw.clone().text();
     if (
       !verifyGithubSignature(
         rawBody,
@@ -187,13 +184,13 @@ export function createGithubbot(options: GithubbotOptions): Githubbot {
           botUserName: userName,
           deliveryId,
           options,
-          prManagerCtx,
+          prManagerCtx: runtime.prManagerCtx,
           state,
         }) ?? undefined,
         // Orthogonal to the lifecycle routes: an @-mention in a freshly-opened
         // issue/PR body runs a conversational turn (the adapter only sees
         // comments, so this is the only place a body mention is caught).
-        handleBodyMention(prManagerCtx, eventType, rawBody) ?? undefined,
+        handleBodyMention(runtime.prManagerCtx, eventType, rawBody) ?? undefined,
       ]),
     );
     waitUntil(c, handled);
@@ -202,10 +199,30 @@ export function createGithubbot(options: GithubbotOptions): Githubbot {
   app.post("/api/webhooks/github", handleGithubWebhook);
 
   if (options.connectStateOnStart !== false) {
-    void ensureStateConnected(state, options).then(ensureChatInitialized);
+    void ensureStateConnected(state, options).then(() =>
+      Promise.all(runtimes.map((runtime) => runtime.ensureInitialized())),
+    );
   }
 
-  return { app, chat };
+  return {
+    app,
+    chat: defaultRuntime.chat,
+    chats: runtimes.map((runtime) => runtime.chat),
+  };
+}
+
+export function repositoryOwnerFromWebhook(rawBody: string): string | undefined {
+  try {
+    const payload = JSON.parse(rawBody) as {
+      repository?: { owner?: { login?: unknown } };
+    };
+    const login = payload.repository?.owner?.login;
+    return typeof login === "string" && login.trim()
+      ? login.trim().toLowerCase()
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 type MessageHandlerInput = {
