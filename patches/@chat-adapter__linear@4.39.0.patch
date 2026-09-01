@@ -1,8 +1,8 @@
 diff --git a/dist/index.js b/dist/index.js
-index 3a13b7a581b46e5bd46120a30d423663e9adb988..2941f141ad3124e8907fbb070a9c6742a646b0c2 100644
+index 65328e73b9d7dddef05e36abbbd9edb16715ffdb..dc783d449640d879284f277f31faf5c895e25333 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -866,15 +866,20 @@ var LinearAdapter = class {
+@@ -971,15 +971,20 @@ var LinearAdapter = class {
          });
          return null;
        }
@@ -31,7 +31,7 @@ index 3a13b7a581b46e5bd46120a30d423663e9adb988..2941f141ad3124e8907fbb070a9c6742
          issueId,
          user: agentSession.creator ? {
            type: "user",
-@@ -884,10 +889,16 @@ var LinearAdapter = class {
+@@ -989,10 +994,16 @@ var LinearAdapter = class {
            email: agentSession.creator.email,
            avatarUrl: agentSession.creator.avatarUrl ?? void 0
          } : {
@@ -51,7 +51,7 @@ index 3a13b7a581b46e5bd46120a30d423663e9adb988..2941f141ad3124e8907fbb070a9c6742
            email: void 0,
            avatarUrl: void 0
          },
-@@ -1673,10 +1684,19 @@ var LinearAdapter = class {
+@@ -1870,10 +1881,19 @@ var LinearAdapter = class {
        id: raw.comment.id,
        isMention: raw.kind === "agent_session_comment",
        // Agent session comments are treated as mentions as they directly target the bot

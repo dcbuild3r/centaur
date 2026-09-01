@@ -1,76 +1,49 @@
 diff --git a/dist/index.d.ts b/dist/index.d.ts
-index 0024735d2441f1d2e3c2d5ed659fa4c4265f3922..89426551a9454df7612f0867680e8abd9ad779fd 100644
+index 8cd0ed50d2c4971cffe75dd86c12764d837ab8cc..2dcbc821e60bc59151c4b10366c679abffff1d8f 100644
 --- a/dist/index.d.ts
 +++ b/dist/index.d.ts
-@@ -20,8 +20,8 @@ import { ButtonStyle, APIEmbed, ChannelType, APIMessage, InteractionType } from
- 
- declare class DiscordFormatConverter extends BaseFormatConverter {
-     /**
--     * Convert @mentions to Discord format in plain text.
--     * @name → <@name>
-+     * Pass text through unchanged. The blanket `@word` -> `<@word>` rewrite was
-+     * removed because it mangled emails and npm scopes into broken mention syntax.
-      */
-     private convertMentionsToDiscord;
-     /**
-@@ -61,6 +61,44 @@ interface DiscordAdapterConfig {
-     publicKey?: string;
+@@ -86,6 +86,28 @@ interface DiscordAdapterConfig {
+     respondToGlobalMentions?: boolean;
      /** Override bot username (optional) */
      userName?: string;
-+    /**
-+     * Pre-dispatch gate for bot mentions. Called before any thread creation or
-+     * message dispatch when the bot is mentioned. Return false to skip the
-+     * mention entirely (no thread is created, no handler is invoked).
-+     */
++    /** Reject a bot mention before dispatching it to Chat. */
 +    shouldHandleMention?: (info: {
 +        guildId: string;
 +        channelId: string;
 +        authorId: string;
 +        authorIsBot: boolean;
 +    }) => boolean;
-+    /**
-+     * Invoked (fire-and-forget) when an incoming message is dropped because of
-+     * a concurrency lock conflict (LockError from the chat SDK).
-+     */
++    /** Observe messages dropped because the Chat lock is already held. */
 +    onMessageDropped?: (info: {
 +        channelId: string;
 +        threadId?: string;
 +        messageId: string;
 +        guildId: string;
 +    }) => void | Promise<void>;
-+    /**
-+     * Opt-in forwarding of bot-authored messages. When absent, all bot
-+     * messages are dropped (default behavior). When provided and it returns
-+     * true, the message is forwarded like a normal message. Messages authored
-+     * by this bot itself are always dropped.
-+     */
++    /** Opt selected third-party bot messages into forwarding. */
 +    shouldForwardBotMessage?: (info: {
 +        authorId: string;
 +        guildId: string;
 +        channelId: string;
 +    }) => boolean;
-+    /**
-+     * Invoked when the Gateway connection state changes. Called with true on
-+     * ready/shardReady/shardResume and false on shardDisconnect/invalidated/
-+     * shardError. Repeated same-state calls are deduped.
-+     */
++    /** Observe deduplicated Discord Gateway connectivity changes. */
 +    onGatewayStatusChange?: (connected: boolean) => void;
+     /** Custom webhook verifier used instead of Discord's Ed25519 public key. */
+     webhookVerifier?: DiscordWebhookVerifier;
  }
- /**
-  * Discord thread ID components.
-@@ -363,6 +401,11 @@ declare class DiscordAdapter implements Adapter<DiscordThreadId, unknown> {
-     protected readonly publicKey: string;
-     protected readonly applicationId: string;
+@@ -543,6 +565,11 @@ declare class DiscordAdapter implements Adapter<DiscordThreadId, unknown> {
+     protected resolvedApplicationId?: string;
+     protected pendingApplicationId?: Promise<string>;
      protected readonly mentionRoleIds: string[];
 +    protected readonly shouldHandleMention?: DiscordAdapterConfig["shouldHandleMention"];
 +    protected readonly onMessageDropped?: DiscordAdapterConfig["onMessageDropped"];
 +    protected readonly shouldForwardBotMessage?: DiscordAdapterConfig["shouldForwardBotMessage"];
 +    protected readonly onGatewayStatusChange?: DiscordAdapterConfig["onGatewayStatusChange"];
 +    private lastGatewayConnected?;
-     protected chat: ChatInstance | null;
-     protected readonly logger: Logger;
-     protected readonly formatConverter: DiscordFormatConverter;
-@@ -563,6 +606,23 @@ declare class DiscordAdapter implements Adapter<DiscordThreadId, unknown> {
+     protected readonly contentFormat: DiscordContentFormat;
+     protected readonly respondToChannelIds: string[];
+     protected readonly respondToGlobalMentions: boolean;
+@@ -752,6 +779,23 @@ declare class DiscordAdapter implements Adapter<DiscordThreadId, unknown> {
       * Handle a message received via the Gateway WebSocket.
       */
      protected handleGatewayMessage(message: Message$1, isMentioned: boolean): Promise<void>;
@@ -95,60 +68,36 @@ index 0024735d2441f1d2e3c2d5ed659fa4c4265f3922..89426551a9454df7612f0867680e8abd
       * Handle a reaction received via the Gateway WebSocket.
       */
 diff --git a/dist/index.js b/dist/index.js
-index e4f6fe07808ab3c9858fda724c36f7aef5084502..28130060557c45fc699b6bad1bfc52a4e5ff64c9 100644
+index a42b61d58aa05c553cad8544090284070973cf0a..81d369d51d9215fe42171279dd143890aa239231 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -272,11 +272,11 @@ import {
- } from "chat";
- var DiscordFormatConverter = class extends BaseFormatConverter {
-   /**
--   * Convert @mentions to Discord format in plain text.
--   * @name → <@name>
-+   * Pass text through unchanged. The blanket `@word` -> `<@word>` rewrite was
-+   * removed because it mangled emails and npm scopes into broken mention syntax.
-    */
-   convertMentionsToDiscord(text) {
--    return text.replace(/@(\w+)/g, "<@$1>");
-+    return text;
-   }
-   /**
-    * Override renderPostable to convert @mentions in plain strings.
-@@ -322,7 +322,7 @@ var DiscordFormatConverter = class extends BaseFormatConverter {
-       return getNodeChildren(node).map((child) => this.nodeToDiscordMarkdown(child)).join("");
-     }
-     if (isTextNode(node)) {
--      return node.value.replace(/@(\w+)/g, "<@$1>");
-+      return node.value;
-     }
-     if (isStrongNode(node)) {
-       const content = getNodeChildren(node).map((child) => this.nodeToDiscordMarkdown(child)).join("");
-@@ -398,6 +398,11 @@ var DiscordAdapter = class _DiscordAdapter {
-   publicKey;
-   applicationId;
+@@ -835,6 +835,11 @@ var DiscordAdapter = class _DiscordAdapter {
+   resolvedApplicationId;
+   pendingApplicationId;
    mentionRoleIds;
 +  shouldHandleMention;
 +  onMessageDropped;
 +  shouldForwardBotMessage;
 +  onGatewayStatusChange;
 +  lastGatewayConnected;
-   chat = null;
-   logger;
-   formatConverter = new DiscordFormatConverter();
-@@ -432,6 +437,10 @@ var DiscordAdapter = class _DiscordAdapter {
-     this.applicationId = applicationId;
+   contentFormat;
+   respondToChannelIds;
+   respondToGlobalMentions;
+@@ -887,6 +892,10 @@ var DiscordAdapter = class _DiscordAdapter {
+     this.publicKey = publicKey?.trim().toLowerCase();
+     this.webhookVerifier = webhookVerifier;
      this.mentionRoleIds = config.mentionRoleIds ?? (process.env.DISCORD_MENTION_ROLE_IDS ? process.env.DISCORD_MENTION_ROLE_IDS.split(",").map((id) => id.trim()) : []);
-     this.botUserId = applicationId;
 +    this.shouldHandleMention = config.shouldHandleMention;
 +    this.onMessageDropped = config.onMessageDropped;
 +    this.shouldForwardBotMessage = config.shouldForwardBotMessage;
 +    this.onGatewayStatusChange = config.onGatewayStatusChange;
-     this.logger = config.logger ?? new ConsoleLogger("info").child("discord");
-     this.userName = config.userName ?? "bot";
-     if (!HEX_64_PATTERN.test(this.publicKey)) {
-@@ -927,6 +936,19 @@ var DiscordAdapter = class _DiscordAdapter {
-       (roleId) => this.mentionRoleIds.includes(roleId)
+     const contentFormat = config.contentFormat ?? "embeds" /* Embeds */;
+     if (contentFormat !== "embeds" /* Embeds */ && contentFormat !== "componentsv2" /* ComponentsV2 */) {
+       throw new ValidationError2(
+@@ -1478,6 +1487,19 @@ var DiscordAdapter = class _DiscordAdapter {
      );
-     const isMentioned = isUserMentioned || isRoleMentioned;
+     const isEveryoneMentioned = this.respondToGlobalMentions && data.mention_everyone === true;
+     const isMentioned = isUserMentioned || isRoleMentioned || isEveryoneMentioned || !data.author.bot && this.respondToChannelIds.includes(parentChannelId);
 +    if (isMentioned && this.shouldHandleMention && !this.shouldHandleMention({
 +      guildId,
 +      channelId,
@@ -165,7 +114,7 @@ index e4f6fe07808ab3c9858fda724c36f7aef5084502..28130060557c45fc699b6bad1bfc52a4
      if (!discordThreadId && isMentioned) {
        try {
          const newThread = await this.createDiscordThread(channelId, data.id);
-@@ -978,6 +1000,19 @@ var DiscordAdapter = class _DiscordAdapter {
+@@ -1536,6 +1558,19 @@ var DiscordAdapter = class _DiscordAdapter {
      try {
        await this.chat.handleIncomingMessage(this, threadId, chatMessage);
      } catch (error) {
@@ -185,29 +134,18 @@ index e4f6fe07808ab3c9858fda724c36f7aef5084502..28130060557c45fc699b6bad1bfc52a4
        this.logger.error("Error handling forwarded message", {
          error: String(error),
          messageId: data.id
-@@ -1063,7 +1098,9 @@ var DiscordAdapter = class _DiscordAdapter {
-     if (discordThreadId) {
-       channelId = discordThreadId;
-     }
+@@ -1613,7 +1648,9 @@ var DiscordAdapter = class _DiscordAdapter {
+     this.chat.processReaction(reactionEvent);
+   }
+   buildMessagePayload(message, options = {}) {
 -    const payload = {};
 +    const payload = {
 +      allowed_mentions: { parse: [] }
 +    };
-     const embeds = [];
-     const components = [];
      const card = extractCard(message);
-@@ -1318,7 +1355,9 @@ var DiscordAdapter = class _DiscordAdapter {
-   async editMessage(threadId, messageId, message) {
-     const { channelId, threadId: discordThreadId } = this.decodeThreadId(threadId);
-     const targetChannelId = discordThreadId || channelId;
--    const payload = {};
-+    const payload = {
-+      allowed_mentions: { parse: [] }
-+    };
-     const embeds = [];
-     const components = [];
-     const card = extractCard(message);
-@@ -1634,11 +1673,49 @@ var DiscordAdapter = class _DiscordAdapter {
+     if (card) {
+       const cardPayload = cardToDiscordPayload(card, {
+@@ -2296,11 +2333,49 @@ var DiscordAdapter = class _DiscordAdapter {
      if (body) {
        headers["Content-Type"] = "application/json";
      }
@@ -258,7 +196,7 @@ index e4f6fe07808ab3c9858fda724c36f7aef5084502..28130060557c45fc699b6bad1bfc52a4
      if (!response.ok) {
        const errorText = await response.text();
        this.logger.error("Discord API error", {
-@@ -1737,6 +1814,27 @@ var DiscordAdapter = class _DiscordAdapter {
+@@ -2422,6 +2497,27 @@ var DiscordAdapter = class _DiscordAdapter {
          username: client.user?.username,
          id: client.user?.id
        });
@@ -286,7 +224,7 @@ index e4f6fe07808ab3c9858fda724c36f7aef5084502..28130060557c45fc699b6bad1bfc52a4
      });
      client.on(Events.Error, (error) => {
        this.logger.error("Discord Gateway error", { error: String(error) });
-@@ -1774,6 +1872,7 @@ var DiscordAdapter = class _DiscordAdapter {
+@@ -2459,6 +2555,7 @@ var DiscordAdapter = class _DiscordAdapter {
      } finally {
        isShuttingDown = true;
        client.destroy();
@@ -294,7 +232,7 @@ index e4f6fe07808ab3c9858fda724c36f7aef5084502..28130060557c45fc699b6bad1bfc52a4
        this.logger.info("Discord Gateway listener stopped");
      }
    }
-@@ -1787,18 +1886,42 @@ var DiscordAdapter = class _DiscordAdapter {
+@@ -2472,12 +2569,20 @@ var DiscordAdapter = class _DiscordAdapter {
          return;
        }
        if (message.author.bot) {
@@ -318,15 +256,12 @@ index e4f6fe07808ab3c9858fda724c36f7aef5084502..28130060557c45fc699b6bad1bfc52a4
 +          return;
 +        }
        }
--      const isUserMentioned = message.mentions.has(client.user?.id ?? "");
-+      const isUserMentioned = message.mentions.has(client.user?.id ?? "", {
-+        ignoreEveryone: true,
-+        ignoreRoles: true
-+      });
-       const isRoleMentioned = this.mentionRoleIds.length > 0 && message.mentions.roles.some(
-         (role) => this.mentionRoleIds.includes(role.id)
+       const isUserMentioned = message.mentions.has(client.user?.id ?? "", {
+         ignoreEveryone: true
+@@ -2490,6 +2595,19 @@ var DiscordAdapter = class _DiscordAdapter {
+         message.channel.isThread() ? message.channel.parentId ?? message.channelId : message.channelId
        );
-       const isMentioned = isUserMentioned || isRoleMentioned;
+       const isMentioned = isUserMentioned || isRoleMentioned || isEveryoneMentioned || isChannelAllowlisted;
 +      if (isMentioned && this.shouldHandleMention && !this.shouldHandleMention({
 +        guildId: message.guildId ?? "@me",
 +        channelId: message.channelId,
@@ -343,8 +278,8 @@ index e4f6fe07808ab3c9858fda724c36f7aef5084502..28130060557c45fc699b6bad1bfc52a4
        this.logger.info("Discord Gateway message received", {
          channelId: message.channelId,
          guildId: message.guildId,
-@@ -1983,9 +2106,13 @@ var DiscordAdapter = class _DiscordAdapter {
-       })),
+@@ -2684,9 +2802,13 @@ var DiscordAdapter = class _DiscordAdapter {
+       ),
        raw: {
          id: message.id,
 +        type: message.type,
@@ -357,7 +292,7 @@ index e4f6fe07808ab3c9858fda724c36f7aef5084502..28130060557c45fc699b6bad1bfc52a4
          author: {
            id: message.author.id,
            username: message.author.username
-@@ -1998,6 +2125,19 @@ var DiscordAdapter = class _DiscordAdapter {
+@@ -2699,6 +2821,19 @@ var DiscordAdapter = class _DiscordAdapter {
      try {
        await this.chat.handleIncomingMessage(this, threadId, chatMessage);
      } catch (error) {
@@ -377,18 +312,7 @@ index e4f6fe07808ab3c9858fda724c36f7aef5084502..28130060557c45fc699b6bad1bfc52a4
        this.logger.error("Error handling Gateway message", {
          error: String(error),
          messageId: message.id
-@@ -2262,7 +2402,9 @@ var DiscordAdapter = class _DiscordAdapter {
-         `Invalid Discord channel ID: ${channelId}`
-       );
-     }
--    const payload = {};
-+    const payload = {
-+      allowed_mentions: { parse: [] }
-+    };
-     const embeds = [];
-     const components = [];
-     const card = extractCard(message);
-@@ -2313,6 +2455,43 @@ var DiscordAdapter = class _DiscordAdapter {
+@@ -2994,6 +3129,43 @@ var DiscordAdapter = class _DiscordAdapter {
        raw: result
      };
    }

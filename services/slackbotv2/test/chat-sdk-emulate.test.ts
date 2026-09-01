@@ -562,7 +562,7 @@ describe('slackbotv2', () => {
     expect(firstAttachment).toEqual(
       expect.objectContaining({
         attachment_type: 'image',
-        dataBase64: Buffer.from('captured-image').toString('base64'),
+        fetchError: 'Refusing to fetch an internal attachment URL',
         mimeType: 'image/png',
         name: 'captured.png',
         type: 'attachment',
@@ -582,19 +582,10 @@ describe('slackbotv2', () => {
     )
     expect(firstInputLine).toEqual(
       expect.objectContaining({
-        message: expect.objectContaining({
-          content: expect.arrayContaining([
-            expect.objectContaining({
-              attachment_type: 'image',
-              dataBase64: Buffer.from('captured-image').toString('base64'),
-              mimeType: 'image/png',
-              name: 'captured.png',
-              type: 'attachment'
-            })
-          ])
-        })
+        message: expect.objectContaining({ content: expect.any(Array) })
       })
     )
+    expect(JSON.stringify(firstInputLine)).toContain('Refusing to fetch an internal attachment URL')
     expect(JSON.stringify(firstInputLine)).not.toContain('data:image/png;base64')
 
     const secondMentionAppend = codexApi.appends[1]!
@@ -1511,7 +1502,7 @@ describe('slackbotv2', () => {
     expect(executeInput).toContain('summarize the thread so far')
   })
 
-  it('materializes Slack event files on root mentions without fetching thread replies', async () => {
+  it('rejects internal Slack event file URLs on root mentions without fetching thread replies', async () => {
     const mention = await postUserMessage(`<@${BOT_USER_ID}> inspect this root screenshot`)
     const fileUrl = `${slackApi.url}/files/captured.png`
     const waits: Promise<unknown>[] = []
@@ -1552,7 +1543,7 @@ describe('slackbotv2', () => {
     expect(appendedAttachment).toEqual(
       expect.objectContaining({
         attachment_type: 'image',
-        dataBase64: Buffer.from('captured-image').toString('base64'),
+        fetchError: 'Refusing to fetch an internal attachment URL',
         mimeType: 'image/png',
         name: 'captured.png',
         type: 'attachment',
@@ -1561,8 +1552,8 @@ describe('slackbotv2', () => {
     )
 
     const executeInput = JSON.stringify(JSON.parse(codexApi.executes[0]!.body.input_lines[0]!))
-    expect(executeInput).toContain(`"dataBase64":"${Buffer.from('captured-image').toString('base64')}"`)
-    expect(executeInput).toContain('"attachment_type":"image"')
+    expect(executeInput).toContain('Refusing to fetch an internal attachment URL')
+    expect(executeInput).not.toContain('"dataBase64"')
   })
 
   it('repairs delayed Slack Connect file-only messages as a follow-up turn', async () => {
@@ -2209,7 +2200,7 @@ describe('slackbotv2', () => {
     expect(replyExecuteInput).toContain('now use the full thread')
   })
 
-  it('stages large Slack file attachments without exceeding session input line limits', async () => {
+  it('degrades blocked large Slack file attachments without exceeding session input limits', async () => {
     const parent = await postUserMessage('Context before the video upload.')
     const mention = await postUserMessage(`<@${BOT_USER_ID}> inspect this mp4`, parent.ts)
     const fileUrl = `${slackApi.url}/files/large-upload.mp4`
@@ -2250,7 +2241,7 @@ describe('slackbotv2', () => {
     expect(appendedAttachment).toEqual(
       expect.objectContaining({
         attachment_type: 'video',
-        dataBase64Omitted: expect.stringContaining('base64 chars omitted'),
+        fetchError: 'Refusing to fetch an internal attachment URL',
         mimeType: 'video/mp4',
         name: 'large-upload.mp4'
       })
@@ -2258,18 +2249,14 @@ describe('slackbotv2', () => {
     expect(appendedAttachment).not.toHaveProperty('dataBase64')
 
     const inputLines = codexApi.executes[0]!.body.input_lines
-    expect(inputLines.length).toBeGreaterThan(1)
+    expect(inputLines).toHaveLength(1)
     for (const line of inputLines) {
       expect(line.length).toBeLessThanOrEqual(1048576)
     }
 
-    const chunkInputs = inputLines.slice(0, -1).map(line => JSON.parse(line))
-    expect(chunkInputs.every(input => input.type === 'attachment.chunk')).toBe(true)
-    expect(chunkInputs.at(-1)).toEqual(expect.objectContaining({ final: true }))
-
-    const turnInput = JSON.parse(inputLines.at(-1)!) as Record<string, unknown>
+    const turnInput = JSON.parse(inputLines[0]!) as Record<string, unknown>
     const serializedTurn = JSON.stringify(turnInput)
-    expect(serializedTurn).toContain('"stagedAttachmentId"')
+    expect(serializedTurn).toContain('Refusing to fetch an internal attachment URL')
     expect(serializedTurn).not.toContain('dataBase64')
   })
 
@@ -2314,7 +2301,7 @@ describe('slackbotv2', () => {
     })
   })
 
-  it('renders root-DM fallback answers as Slack-native rich text', async () => {
+  it('renders root-DM fallback answers as Slack-native Markdown', async () => {
     codexApi.autoRespond = false
     const opened = await slack.conversations.open({ users: BOT_USER_ID })
     const dmChannel = String(opened.channel?.id)
@@ -2358,15 +2345,13 @@ describe('slackbotv2', () => {
     const fallbackPost = slackApi.calls.find(call =>
       call.method === 'chat.postMessage'
       && stringField(call.body.channel) === dmChannel
-      && stringField(call.body.text).includes('Booked and verified')
+      && stringField(call.body.markdown_text).includes('Booked and verified')
     )
     expect(fallbackPost).toBeDefined()
-    const delivered = stringField(fallbackPost?.body.text)
-    expect(delivered).toContain('*Booked and verified:*')
-    expect(delivered).toContain('• *Title:* Example meeting')
-    expect(delivered).toContain('<https://meet.example.test/room|Join meeting>')
-    expect(delivered).not.toContain('**Title:**')
-    expect(delivered).not.toContain('[Join meeting](')
+    const delivered = stringField(fallbackPost?.body.markdown_text)
+    expect(delivered).toContain('**Booked and verified:**')
+    expect(delivered).toContain('- **Title:** Example meeting')
+    expect(delivered).toContain('[Join meeting](https://meet.example.test/room)')
   })
 
   it('ignores non-JSON sandbox bootstrap output lines instead of ending the stream', async () => {
@@ -2440,13 +2425,14 @@ describe('slackbotv2', () => {
       ) {
         return [line]
       }
+      const params = event.params
       return [
         'Completed: [Issue',
         ' #276](https://github.com/example/',
         'widgets/issues/276) was updated.'
       ].map(delta => JSON.stringify({
         ...event,
-        params: { ...event.params, delta }
+        params: { ...params, delta }
       }))
     })
     codexApi.emitOutputLines(threadKey(mention.ts), fragmentedOutput)
@@ -2459,9 +2445,8 @@ describe('slackbotv2', () => {
       .map(chunk => stringField(chunk.text))
       .join('')
     expect(delivered).toBe(
-      'Completed: <https://github.com/example/widgets/issues/276|Issue #276> was updated.'
+      'Completed: [Issue #276](https://github.com/example/widgets/issues/276) was updated.'
     )
-    expect(delivered).not.toContain('[Issue #276](')
   })
 
   it('ignores unmentioned subscribed messages during a stream, including stop', async () => {
@@ -6487,6 +6472,7 @@ type StreamCall = {
     | 'chat.startStream'
     | 'chat.appendStream'
     | 'chat.postMessage'
+    | 'chat.update'
     | 'chat.stopStream'
     | 'conversations.join'
     | 'reactions.add'
@@ -6794,8 +6780,22 @@ async function handlePatchedSlackRequest(
     )
     return
   }
-  if (path === '/api/chat.postMessage') {
-    input.calls.push({ method: 'chat.postMessage', body: await requestBody(request.clone()) })
+  if (path === '/api/chat.postMessage' || path === '/api/chat.update') {
+    const body = await requestBody(request.clone())
+    if (path === '/api/chat.postMessage') {
+      input.calls.push({ method: 'chat.postMessage', body })
+    } else {
+      input.calls.push({ method: 'chat.update', body })
+    }
+    if (typeof body.markdown_text === 'string') {
+      const posted = await postSlack(input.upstreamUrl, request, path, {
+        ...body,
+        text: body.markdown_text,
+        markdown_text: undefined
+      })
+      await sendWebResponse(res, Response.json(posted))
+      return
+    }
   }
   if (path === '/api/conversations.replies') {
     const body = await requestBody(request.clone())

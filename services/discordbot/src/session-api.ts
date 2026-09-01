@@ -348,7 +348,11 @@ export async function serializeAttachment(
       (await fetchAttachmentData(attachment.url, fetchFn));
     if (data) {
       // Re-check the actual byte count: Discord size metadata can be absent.
-      const byteLength = Buffer.isBuffer(data) ? data.length : data.size;
+      const byteLength = Buffer.isBuffer(data)
+        ? data.length
+        : data instanceof ArrayBuffer
+          ? data.byteLength
+          : data.size;
       if (byteLength > MAX_INLINE_ATTACHMENT_BYTES) {
         serialized.fetchError = attachmentTooLargeError(byteLength);
         return serialized;
@@ -381,8 +385,9 @@ function attachmentTooLargeError(bytes: number): string {
   return `attachment too large to inline (${bytes} bytes > ${MAX_INLINE_ATTACHMENT_BYTES} byte limit)`;
 }
 
-async function bytesToBase64(data: Buffer | Blob): Promise<string> {
+async function bytesToBase64(data: ArrayBuffer | Buffer | Blob): Promise<string> {
   if (Buffer.isBuffer(data)) return data.toString("base64");
+  if (data instanceof ArrayBuffer) return Buffer.from(data).toString("base64");
   const bytes = await data.arrayBuffer();
   return Buffer.from(bytes).toString("base64");
 }

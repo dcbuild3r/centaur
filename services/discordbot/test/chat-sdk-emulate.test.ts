@@ -146,10 +146,9 @@ describe("discordbot", () => {
     expect(firstAttachment).toEqual(
       expect.objectContaining({
         attachment_type: "image",
-        // The Discord adapter exposes only a signed CDN url, so discordbot
-        // downloads the bytes and inlines them as base64 (parity with
-        // slackbotv2) rather than forwarding the raw remote url.
-        dataBase64: Buffer.from("fake-binary").toString("base64"),
+        // Chat SDK 4.39 blocks the emulator's loopback CDN URL. Production
+        // Discord CDN URLs remain downloadable, while internal URLs fail safe.
+        fetchError: "Refusing to fetch an internal attachment URL",
         mimeType: "image/png",
         name: "captured.png",
         type: "attachment",
@@ -166,7 +165,10 @@ describe("discordbot", () => {
     expect(firstInputLine).toEqual(
       expect.objectContaining({ type: "user", thread_key: key }),
     );
-    expect(JSON.stringify(firstInputLine)).toContain("data:image/png;base64");
+    expect(JSON.stringify(firstInputLine)).toContain(
+      "http://127.0.0.1:4143/cdn/captured.png",
+    );
+    expect(JSON.stringify(firstInputLine)).not.toContain("data:image/png;base64");
 
     const followUpAppend = codexApi.appends[1]!;
     expect(followUpAppend.body.messages[0]?.client_message_id).toBe(followUpId);

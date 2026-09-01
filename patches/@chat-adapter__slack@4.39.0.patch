@@ -1,11 +1,20 @@
 diff --git a/dist/index.js b/dist/index.js
-index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f32ccc951 100644
+index b80888b6d87e8ad429d18cc955c4c5048a55722a..eda82ebd6d8d8017d922a4d0aa55781ecb7f5a12 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -31,6 +31,216 @@ import {
+@@ -39,6 +39,225 @@ import {
    toModalElement,
    toPlainText
  } from "chat";
++function plainTextPreservingBlocks(node) {
++  if (node.type === "root" || node.type === "blockquote") {
++    return getNodeChildren(node).map(plainTextPreservingBlocks).filter(Boolean).join(node.type === "root" ? "\n\n" : "\n");
++  }
++  if (node.type === "list" || node.type === "listItem") {
++    return getNodeChildren(node).map(plainTextPreservingBlocks).filter(Boolean).join("\n");
++  }
++  return toPlainText(node);
++}
 +var STREAM_BUFFER_SIZE = 256;
 +var STREAM_SEGMENT_LIMIT = 11500;
 +var STREAM_CHUNK_LIMIT = 256;
@@ -217,25 +226,9 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
 +  }));
 +}
  
- // src/cards.ts
- import {
-@@ -352,6 +562,15 @@ import {
- } from "chat";
- var BARE_MENTION_PATTERN = /(?<![<\w/])@(\w+)/g;
- var URL_PATTERN = /\bhttps?:\/\/[^\s<>]+/g;
-+function plainTextPreservingBlocks(node) {
-+  if (node.type === "root" || node.type === "blockquote") {
-+    return getNodeChildren(node).map(plainTextPreservingBlocks).filter(Boolean).join(node.type === "root" ? "\n\n" : "\n");
-+  }
-+  if (node.type === "list" || node.type === "listItem") {
-+    return getNodeChildren(node).map(plainTextPreservingBlocks).filter(Boolean).join("\n");
-+  }
-+  return toPlainText(node);
-+}
- var SlackFormatConverter = class extends BaseFormatConverter {
-   /**
-    * Render an AST to standard markdown. Slack accepts this directly via
-@@ -366,6 +585,17 @@ var SlackFormatConverter = class extends BaseFormatConverter {
+ // src/agent-context.ts
+ var CHANNEL_TOKEN = "slack#/types/channel_id";
+@@ -527,6 +746,17 @@ var SlackFormatConverter = class extends BaseFormatConverter {
    toAst(mrkdwn) {
      return parseMarkdown(slackMrkdwnToMarkdown(mrkdwn));
    }
@@ -253,41 +246,43 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
    /**
     * Build the Slack API payload fields for a message.
     *
-@@ -2004,7 +2234,10 @@ var SlackAdapter = class _SlackAdapter {
-       channel: event.channel,
-       threadTs
-     });
--    const isMention = event.type === "app_mention";
-+    const botMentioned = Boolean(
-+      this._botUserId && typeof event.text === "string" && (event.text.includes(`<@${this._botUserId}>`) || event.text.includes(`<@${this._botUserId}|`))
-+    );
-+    const isMention = event.type === "app_mention" || botMentioned && (event.bot_id || event.subtype === "bot_message");
-     const factory = async () => {
-       const msg = await this.parseSlackMessage(event, threadId);
-       if (isMention) {
-@@ -2520,10 +2753,10 @@ var SlackAdapter = class _SlackAdapter {
-       formatted: this.formatConverter.toAst(text),
+@@ -3622,7 +3852,7 @@ var SlackAdapter = class _SlackAdapter {
+       formatted,
        raw: event,
        author: {
 -        userId: event.user || event.bot_id || "unknown",
 +        userId: event.user || event.bot_profile?.user_id || event.bot_id || "unknown",
          userName,
          fullName,
--        isBot: !!event.bot_id,
-+        isBot: Boolean(event.bot_id || event.bot_profile || event.subtype === "bot_message"),
-         isMe
-       },
-       metadata: {
-@@ -3452,26 +3685,255 @@ var SlackAdapter = class _SlackAdapter {
+         email,
+@@ -4605,8 +4835,11 @@ var SlackAdapter = class _SlackAdapter {
+     const { channel, threadTs: rawThreadTs } = this.decodeThreadId(threadId);
+     const threadTs = rawThreadTs || void 0;
+     if (!threadTs) {
+-      this.logger.debug("Slack: using fallback stream - no thread context");
+-      return null;
++      this.logger.debug("Slack: durable fallback required - no thread context");
++      throw new ValidationError(
++        "slack",
++        "Slack structured streaming requires a valid thread context (non-empty threadTs)"
++      );
+     }
+     if (!(channel.startsWith("D") || options?.recipientUserId && options?.recipientTeamId)) {
+       this.logger.debug("Slack: using fallback stream - no recipient context");
+@@ -4621,192 +4854,404 @@ var SlackAdapter = class _SlackAdapter {
      }
      this.logger.debug("Slack: starting stream", { channel, threadTs });
      const token = await this.getToken();
 -    const streamer = this._client.chatStream({
 -      channel,
 -      thread_ts: threadTs,
--      recipient_user_id: options.recipientUserId,
--      recipient_team_id: options.recipientTeamId,
--      ...options.taskDisplayMode && {
+-      ...options?.recipientUserId && {
+-        recipient_user_id: options.recipientUserId
+-      },
+-      ...options?.recipientTeamId && {
+-        recipient_team_id: options.recipientTeamId
+-      },
+-      ...options?.taskDisplayMode && {
 -        task_display_mode: options.taskDisplayMode
 -      }
 +    const createSegment = () => ({
@@ -302,9 +297,13 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
 +      streamer: this._client.chatStream({
 +        channel,
 +        thread_ts: threadTs,
-+        recipient_user_id: options.recipientUserId,
-+        recipient_team_id: options.recipientTeamId,
-+        ...options.taskDisplayMode && {
++        ...options?.recipientUserId && {
++          recipient_user_id: options.recipientUserId
++        },
++        ...options?.recipientTeamId && {
++          recipient_team_id: options.recipientTeamId
++        },
++        ...options?.taskDisplayMode && {
 +          task_display_mode: options.taskDisplayMode
 +        },
 +        buffer_size: STREAM_BUFFER_SIZE
@@ -323,6 +322,12 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
      const renderer = new StreamingMarkdownRenderer({
        wrapTablesForAppend: false
      });
+-    let resolvedCommitted = "";
+-    let resolvedSourceDone = 0;
+-    let insideResolvedFence = false;
+-    const isFenceLine = (line) => {
+-      const trimmed = line.trimStart();
+-      return trimmed.startsWith("```") || trimmed.startsWith("~~~");
 +    const isExpired = (segment) => Date.now() - segment.startedAt >= streamSegmentMaxAgeMs();
 +    const taskIsOpen = (chunk) => chunk.type === "task_update" && (chunk.status === "in_progress" || chunk.status === "pending");
 +    const appendSegmentTaskChunk = async (segment, chunk) => {
@@ -336,7 +341,24 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
 +        segment.taskChars.set(key, size);
 +      }
 +      segment.tasks.set(key, chunk);
-+    };
+     };
+-    const resolveCommitted = async (committable) => {
+-      while (resolvedSourceDone < committable.length) {
+-        const lineStart = committable.lastIndexOf("\n", resolvedSourceDone - 1) + 1;
+-        const newlineAt = committable.indexOf("\n", resolvedSourceDone);
+-        const lineEnd = newlineAt === -1 ? committable.length : newlineAt + 1;
+-        const segment = committable.slice(resolvedSourceDone, lineEnd);
+-        const fenceLine = isFenceLine(committable.slice(lineStart, lineEnd));
+-        if (insideResolvedFence || fenceLine) {
+-          resolvedCommitted += segment;
+-        } else {
+-          resolvedCommitted += await this.resolveOutgoingMentions(
+-            segment,
+-            threadId
+-          );
+-        }
+-        if (newlineAt !== -1 && fenceLine) {
+-          insideResolvedFence = !insideResolvedFence;
 +    const completeSegmentOpenTasks = async (segment) => {
 +      if (segment.stopped) {
 +        return;
@@ -344,17 +366,29 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
 +      for (const task of Array.from(segment.tasks.values())) {
 +        if (!taskIsOpen(task)) {
 +          continue;
-+        }
+         }
+-        resolvedSourceDone = lineEnd;
 +        await appendSegmentTaskChunk(segment, {
 +          ...task,
 +          status: "complete"
 +        });
-+      }
-+    };
+       }
+     };
+-    const fallback = { message: null, mode: "native", nativeRendered: false };
+-    const updateIntervalMs = options?.updateIntervalMs ?? 1e3;
+-    let fallbackSent = "";
+-    let lastFallbackEditAt = 0;
+-    const flushFallback = async (force) => {
+-      const committable = renderer.getCommittableText();
+-      if (committable.length === 0 || committable === fallbackSent) {
+-        return;
 +    const stopSegment = async (segment, blocks, force = false, sealProgress = true) => {
 +      if (segment.stopped || !(segment.hasContent || force)) {
 +        return void 0;
-+      }
+       }
+-      const now = Date.now();
+-      if (!(force || now - lastFallbackEditAt >= updateIntervalMs)) {
+-        return;
 +      let result;
 +      try {
 +        if (sealProgress) {
@@ -367,21 +401,40 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
 +      } catch (error) {
 +        annotateSlackStreamMessage(error, segment);
 +        throw error;
-+      }
+       }
+-      if (fallback.message) {
+-        await this.editMessage(threadId, fallback.message.id, committable);
+-      } else {
+-        fallback.message = await this.postMessage(threadId, committable);
 +      segment.stopped = true;
 +      if (result) {
 +        provisionalResult = result;
-+      }
+       }
+-      fallbackSent = committable;
+-      lastFallbackEditAt = now;
 +      return result;
-+    };
+     };
+-    const switchToFallback = (error) => {
+-      fallback.mode = "fallback";
+-      const platformError = slackPlatformErrorCode(error);
+-      if (platformError && NATIVE_STREAMING_UNSUPPORTED_ERRORS.has(platformError)) {
+-        this.nativeStreamingBroken = true;
 +    const unmapSegment = (segment) => {
 +      structured.delete(segment);
 +      for (const [id, taskSegment] of taskSegments) {
 +        if (taskSegment === segment) {
 +          taskSegments.delete(id);
 +        }
-+      }
-+    };
+       }
+-      this.logger.warn(
+-        "Slack native streaming unavailable, falling back to post-and-edit",
+-        { channel, error }
+-      );
+     };
+-    const flushCommitted = async (force = false) => {
+-      if (fallback.mode === "fallback") {
+-        await flushFallback(force);
+-        return;
 +    const retireSegment = async (segment, reason) => {
 +      try {
 +        await stopSegment(segment);
@@ -400,7 +453,9 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
 +          reason,
 +          error: stopError
 +        });
-+      }
+       }
+-      await resolveCommitted(renderer.getCommittableText());
+-      const delta = resolvedCommitted.slice(lastAppended.length);
 +    };
 +    const rotateSegment = async (closing, opening) => {
 +      if (closing) {
@@ -443,20 +498,28 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
 +        current.length += opening.length;
 +      }
 +    };
-     const flushMarkdownDelta = async (delta) => {
++    const flushMarkdownDelta = async (delta) => {
        if (delta.length === 0) {
          return;
        }
--      await streamer.append({ markdown_text: delta, token });
-+      // chat.appendStream's `markdown_text` accepts Slack mrkdwn, not every
-+      // CommonMark construct emitted by models (notably labeled links).
-+      // Convert each syntactically committable delta at the transport boundary
-+      // so every Slack agent gets native rich formatting without prompt rules.
-+      let remaining = this.formatConverter.toResponseUrlText({ markdown: delta });
+-      try {
+-        const response = await streamer.append({
+-          markdown_text: delta,
+-          token
+-        });
+-        if (response) {
+-          fallback.nativeRendered = true;
++      // Slack's native `markdown_text` field accepts CommonMark. Preserve it
++      // so links, emphasis, lists, and code are rendered by Slack itself.
++      let remaining = delta;
 +      while (remaining.length > 0) {
 +        if (isExpired(current)) {
 +          await rotateCurrentForAge();
-+        }
+         }
+-        lastAppended = resolvedCommitted;
+-      } catch (error) {
+-        if (fallback.nativeRendered) {
+-          throw error;
 +        if (current.length === STREAM_SEGMENT_LIMIT || segmentMarkdownAvailable(current) === 0 && current.hasContent) {
 +          await rotateSegment(fence.closing, fence.opening);
 +        }
@@ -483,8 +546,10 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
 +        remaining = remaining.slice(text.length);
 +        if (remaining.length > 0) {
 +          await rotateSegment(fence.closing, fence.opening);
-+        }
-+      }
+         }
+-        switchToFallback(error);
+-        await flushFallback(force);
+       }
      };
      let structuredChunksSupported = true;
 +    const appendStructuredChunk = async (segment, chunk) => {
@@ -541,13 +606,25 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
 +      return current;
 +    };
      const sendStructuredChunk = async (chunk) => {
-       if (!structuredChunksSupported) {
+-      await flushCommitted();
+-      if (fallback.mode === "fallback" || !structuredChunksSupported) {
+-        this.logger.debug("Slack: structured chunk skipped", {
+-          chunkType: chunk.type,
+-          mode: fallback.mode
+-        });
++      if (!structuredChunksSupported) {
          return;
-@@ -3481,8 +3939,45 @@ var SlackAdapter = class _SlackAdapter {
-       await flushMarkdownDelta(delta);
-       lastAppended = committable;
+       }
++      const committable = renderer.getCommittableText();
++      const delta = committable.slice(lastAppended.length);
++      await flushMarkdownDelta(delta);
++      lastAppended = committable;
        try {
--        await streamer.append({ chunks: [chunk], token });
+-        await streamer.append({
+-          chunks: [chunk],
+-          token
+-        });
+-        fallback.nativeRendered = true;
 +        if (chunk.type === "plan_update") {
 +          plan = {
 +            ...chunk,
@@ -589,18 +666,22 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
 +        }
          structuredChunksSupported = false;
          this.logger.warn(
-           "Structured streaming chunk failed, falling back to text-only streaming. Ensure your Slack app manifest includes assistant_view, assistant:write scope, and @slack/web-api >= 7.14.0",
-@@ -3497,31 +3992,91 @@ var SlackAdapter = class _SlackAdapter {
-       await flushMarkdownDelta(delta);
-       lastAppended = committable;
+-          "Structured streaming chunk failed, falling back to text-only streaming. Ensure your Slack app manifest includes the agent/assistant feature and the assistant:write scope",
++          "Structured streaming chunk failed, falling back to text-only streaming. Ensure your Slack app manifest includes assistant_view, assistant:write scope, and @slack/web-api >= 7.14.0",
+           { chunkType: chunk.type, error }
+         );
+       }
      };
 -    for await (const chunk of textStream) {
--      if (typeof chunk === "string") {
--        await pushTextAndFlush(chunk);
--      } else if (chunk.type === "markdown_text") {
--        await pushTextAndFlush(chunk.text);
--      } else {
--        await sendStructuredChunk(chunk);
+-      if (options?.signal?.aborted) {
+-        break;
++    const pushTextAndFlush = async (text) => {
++      renderer.push(text);
++      const committable = renderer.getCommittableText();
++      const delta = committable.slice(lastAppended.length);
++      await flushMarkdownDelta(delta);
++      lastAppended = committable;
++    };
 +    try {
 +      for await (const chunk of textStream) {
 +        if (typeof chunk === "string") {
@@ -611,6 +692,14 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
 +          await sendStructuredChunk(chunk);
 +        }
        }
+-      if (typeof chunk === "string") {
+-        renderer.push(chunk);
+-        await flushCommitted();
+-      } else if (chunk.type === "markdown_text") {
+-        renderer.push(chunk.text);
+-        await flushCommitted();
+-      } else {
+-        await sendStructuredChunk(chunk);
 +      renderer.finish();
 +      const finalCommittable = renderer.getCommittableText();
 +      const finalDelta = finalCommittable.slice(lastAppended.length);
@@ -624,7 +713,16 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
 +        });
 +        current.hasContent = true;
 +        current.length += fence.closing.length;
-+      }
+       }
+-    }
+-    renderer.finish();
+-    await flushCommitted(true);
+-    if (fallback.mode === "fallback") {
+-      if (options?.stopBlocks || this.feedbackButtons) {
+-        this.logger.warn(
+-          "Slack: stream-end blocks (stopBlocks/feedbackButtons) skipped - post-and-edit fallback cannot attach stream blocks",
+-          { channel }
+-        );
 +      lastResult = await stopSegment(
 +        current,
 +        options?.stopBlocks,
@@ -644,8 +742,27 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
 +            error: stopError
 +          });
 +        }
-+      }
-+    } catch (error) {
+       }
+-      this.logger.debug("Slack: fallback stream complete", {
+-        messageId: fallback.message?.id
+-      });
+-      await this.endTyping(threadId, options?.sessionStatus ?? "active");
+-      return fallback.message;
+-    }
+-    const stopBlocks = [
+-      ...options?.stopBlocks ?? [],
+-      ...this.feedbackButtons ? [buildFeedbackButtonsBlock(this.feedbackButtons)] : []
+-    ];
+-    let result;
+-    try {
+-      result = await streamer.stop({
+-        token,
+-        ...this.agentView ? { session_status: options?.sessionStatus ?? "active" } : {},
+-        ...stopBlocks.length > 0 ? { blocks: stopBlocks } : {}
+-      });
+     } catch (error) {
+-      if (fallback.nativeRendered) {
+-        throw error;
 +      const segments = /* @__PURE__ */ new Set([...structured, current]);
 +      fence.finish();
 +      let answerStopFailed = false;
@@ -673,24 +790,21 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
 +            error: stopError
 +          });
 +        }
-+      }
+       }
+-      switchToFallback(error);
+-      await flushFallback(true);
+-      this.logger.debug("Slack: fallback stream complete", {
+-        messageId: fallback.message?.id
+-      });
+-      await this.endTyping(threadId, options?.sessionStatus ?? "active");
+-      return fallback.message;
 +      annotateSlackAnswerLost(error, !sourceConsumed || answerStopFailed);
 +      throw error;
-     }
--    renderer.finish();
--    const finalCommittable = renderer.getCommittableText();
--    const finalDelta = finalCommittable.slice(lastAppended.length);
--    await flushMarkdownDelta(finalDelta);
--    const result = await streamer.stop({
--      token,
--      ...options?.stopBlocks ? {
--        blocks: options.stopBlocks
--      } : {}
--    });
--    const messageTs = result.message?.ts ?? result.ts;
++    }
 +    if (!lastResult) {
 +      throw new NetworkError("slack", "Slack stream returned no result");
-+    }
+     }
+-    const messageTs = result.message?.ts ?? result.ts;
 +    const messageTs = lastResult.message?.ts ?? lastResult.ts;
      this.logger.debug("Slack: stream complete", { messageId: messageTs });
      return {
@@ -701,16 +815,12 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
      };
    }
    /**
-@@ -3798,10 +4353,10 @@ var SlackAdapter = class _SlackAdapter {
-       formatted: this.formatConverter.toAst(text),
+@@ -5102,7 +5547,7 @@ var SlackAdapter = class _SlackAdapter {
+       formatted,
        raw: event,
        author: {
 -        userId: event.user || event.bot_id || "unknown",
 +        userId: event.user || event.bot_profile?.user_id || event.bot_id || "unknown",
          userName,
          fullName,
--        isBot: !!event.bot_id,
-+        isBot: Boolean(event.bot_id || event.bot_profile || event.subtype === "bot_message"),
-         isMe
-       },
-       metadata: {
+         isBot: !!event.bot_id,

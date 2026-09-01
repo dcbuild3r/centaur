@@ -39,10 +39,10 @@ describe('Slack user ID extraction', () => {
     const userId = await resolveSlackBotUserId({
       botToken: 'xoxb-test',
       configuredBotUserId: 'UBOT',
-      fetchFn: async () => {
+      fetchFn: (async () => {
         calls += 1
         return Response.json({ ok: true, user_id: 'UOTHER' })
-      }
+      }) as unknown as typeof fetch
     })
 
     expect(userId).toBe('UBOT')
@@ -54,10 +54,10 @@ describe('Slack user ID extraction', () => {
     const userId = await resolveSlackBotUserId({
       botToken: 'xoxb-test',
       slackApiUrl: 'https://slack.test/api/',
-      fetchFn: async (input, init) => {
+      fetchFn: (async (input, init) => {
         request = new Request(input, init)
         return Response.json({ ok: true, user_id: 'URESOLVED' })
-      }
+      }) as typeof fetch
     })
 
     expect(userId).toBe('URESOLVED')
@@ -70,7 +70,7 @@ describe('Slack user ID extraction', () => {
     await expect(
       resolveSlackBotUserId({
         botToken: 'xoxb-test',
-        fetchFn: async () => Response.json({ ok: false, error: 'invalid_auth' })
+        fetchFn: (async () => Response.json({ ok: false, error: 'invalid_auth' })) as unknown as typeof fetch
       })
     ).rejects.toThrow('Slack auth.test failed: invalid_auth')
   })

@@ -14,9 +14,9 @@
   "dependencies": {
     "@centaur/harness-events": "workspace:*",
     "@centaur/rendering": "workspace:*",
-    "@chat-adapter/state-pg": "^4.31.0",
-    "@chat-adapter/teams": "^4.31.0",
-    "chat": "^4.31.0",
+    "@chat-adapter/state-pg": "^4.39.0",
+    "@chat-adapter/teams": "^4.39.0",
+    "chat": "^4.39.0",
     "dotenv": "^17.3.1",
     "express": "5.2.1",
     "pg": "^8.21.0",
