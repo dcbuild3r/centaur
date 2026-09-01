@@ -730,6 +730,7 @@ class MeetingSchedulerClient:
         time_zone: str,
         occurrence_key: str,
         organizer_calendar_key: str,
+        zoom_host_user_id: str | None = None,
     ) -> dict[str, Any]:
         host = _config_value(ZOOM_HOST_USER_ID).strip()
         if not host:
@@ -749,10 +750,16 @@ class MeetingSchedulerClient:
                 "waiting_room": False,
             },
         }
-        schedule_for = _zoom_schedule_for_map().get(organizer_calendar_key)
+        schedule_for = str(zoom_host_user_id or "").strip().lower()
+        if schedule_for and not EMAIL_RE.fullmatch(schedule_for):
+            raise MeetingSchedulerError("zoom_host_user_id must be an exact email address")
+        schedule_for = schedule_for or _zoom_schedule_for_map().get(
+            organizer_calendar_key
+        )
         if schedule_for:
-            # This allowlist is operator-controlled. Zoom also enforces that
-            # the connected Orbie account has scheduling privilege for the user.
+            # Manual requests carry the authenticated Slack requester's
+            # verified email; cadences use the operator-controlled mapping.
+            # Zoom independently enforces Orbie's scheduling privilege.
             payload["schedule_for"] = schedule_for
         return self._zoom_request(
             "POST",
@@ -1325,8 +1332,12 @@ class MeetingSchedulerClient:
             items[0] if isinstance(items, list) and items and isinstance(items[0], dict) else None
         )
 
-    def _zoom_find_by_occurrence(self, key: str) -> dict[str, Any] | None:
-        host = _config_value(ZOOM_HOST_USER_ID).strip()
+    def _zoom_find_by_occurrence(
+        self, key: str, *, zoom_host_user_id: str | None = None
+    ) -> dict[str, Any] | None:
+        host = str(zoom_host_user_id or "").strip() or _config_value(
+            ZOOM_HOST_USER_ID
+        ).strip()
         if not host:
             return None
         next_page_token = ""
@@ -1366,6 +1377,7 @@ class MeetingSchedulerClient:
         request_id: str | None = None,
         mode: str = "cadence",
         confirmation_token: str | None = None,
+        zoom_host_user_id: str | None = None,
     ) -> dict[str, Any]:
         """Create or reuse one Zoom + Calendar meeting occurrence."""
         _require_enabled()
@@ -1412,6 +1424,7 @@ class MeetingSchedulerClient:
                 attendees=attendees,
                 allow_parameter_update=mode == "cadence",
                 check_slot_free=mode == "ad_hoc",
+                zoom_host_user_id=zoom_host_user_id,
             )
         )
         if isinstance(result, _OperationFailure):
@@ -1436,6 +1449,7 @@ class MeetingSchedulerClient:
         attendees: list[str],
         allow_parameter_update: bool,
         check_slot_free: bool,
+        zoom_host_user_id: str | None,
     ) -> dict[str, Any] | _OperationFailure:
         async def operation(connection: asyncpg.Connection) -> dict[str, Any] | _OperationFailure:
             organizer_date = start_at.astimezone(_zone(time_zone)).date().isoformat()
@@ -1528,7 +1542,13 @@ class MeetingSchedulerClient:
                     else:
                         join_url = str(existing_zoom.get("join_url") or join_url).strip()
                 if not zoom_id:
-                    existing_zoom = self._zoom_find_by_occurrence(key)
+                    existing_zoom = (
+                        self._zoom_find_by_occurrence(
+                            key, zoom_host_user_id=zoom_host_user_id
+                        )
+                        if zoom_host_user_id
+                        else self._zoom_find_by_occurrence(key)
+                    )
                     if existing_zoom:
                         zoom = existing_zoom
                     else:
@@ -1539,6 +1559,7 @@ class MeetingSchedulerClient:
                             time_zone=time_zone,
                             occurrence_key=key,
                             organizer_calendar_key=organizer_calendar_key,
+                            zoom_host_user_id=zoom_host_user_id,
                         )
                     join_url = str(zoom.get("join_url") or "").strip()
                     zoom_id = str(zoom.get("id") or "").strip()
@@ -2404,6 +2425,7 @@ def book_meeting(
     request_id: str | None = None,
     mode: str = "cadence",
     confirmation_token: str | None = None,
+    zoom_host_user_id: str | None = None,
 ) -> dict[str, Any]:
     return _client().book_meeting(
         occurrence_key,
@@ -2417,6 +2439,7 @@ def book_meeting(
         request_id,
         mode,
         confirmation_token,
+        zoom_host_user_id,
     )
 
 

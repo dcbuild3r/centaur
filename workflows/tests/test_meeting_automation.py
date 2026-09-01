@@ -493,7 +493,7 @@ def test_manual_scheduling_uses_orbie_as_organizer_and_invites_requester(monkeyp
     ]
 
 
-def test_manual_booking_forces_orbie_ownership_and_invites_requester(monkeypatch):
+def test_manual_booking_keeps_orbie_calendar_and_assigns_requester_as_zoom_host(monkeypatch):
     client = SchedulingFakeClient(
         {
             "status": "booked",
@@ -527,6 +527,7 @@ def test_manual_booking_forces_orbie_ownership_and_invites_requester(monkeypatch
     scheduling_call = next(call for call in client.calls if call[0] == "scheduling")
     assert scheduling_call[1] == "book_meeting"
     assert scheduling_call[2]["organizer_calendar_key"] == "orbie"
+    assert scheduling_call[2]["zoom_host_user_id"] == "piotr.piwowarczyk@world.org"
     assert scheduling_call[2]["attendee_emails"] == [
         "piotr.piwowarczyk@world.org",
         "person@world.org",
