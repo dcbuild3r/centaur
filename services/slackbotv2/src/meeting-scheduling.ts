@@ -32,7 +32,7 @@ export function parseFixedTimeMeetingRequest(
   text: string,
   requesterEmail: string,
   now = new Date(),
-  organizerCalendarKey = process.env.MEETING_MANUAL_ORGANIZER_CALENDAR_KEY ?? ''
+  organizerCalendarKey = requesterEmail
 ): PendingMeetingBooking | null {
   const clean = text.replace(/^\s*(?:<@[A-Z0-9]+(?:\|[^>]*)?>|@orbie)\s*/i, '').trim()
   if (!/^(?:schedule|book|create)\b/i.test(clean) || !/\bmeeting\b/i.test(clean)) return null
@@ -84,7 +84,7 @@ export function meetingBookingPreview(booking: PendingMeetingBooking): string {
     `• ${booking.title}`,
     `• ${booking.start} (${booking.timeZone}), ${booking.durationMinutes} minutes`,
     `• Requested by: ${booking.organizerEmail}`,
-    '• Organizer: Orbie Automation',
+    `• Organizer: ${booking.organizerEmail}`,
     `• Attendees: ${booking.attendeeEmails.join(', ')}`,
     '• World Foundation Zoom with automatic cloud recording',
     '',

@@ -10,20 +10,20 @@ describe('fixed-time meeting scheduling ingress', () => {
     const booking = parseFixedTimeMeetingRequest(
       'Schedule a 10-minute meeting called "Orbie Zoom integration smoke test" for me today at 1:15 PM Prague time. Use my verified Google Calendar, create the Zoom room, and enable automatic cloud recording.',
       'dc.builder@world.org',
-      new Date('2026-08-27T10:44:10Z'),
-      'orbie'
+      new Date('2026-08-27T10:44:10Z')
     )
 
     expect(booking).toMatchObject({
       attendeeEmails: ['dc.builder@world.org'],
       durationMinutes: 10,
-      organizerCalendarKey: 'orbie',
+      organizerCalendarKey: 'dc.builder@world.org',
       organizerEmail: 'dc.builder@world.org',
       start: '2026-08-27T11:15:00Z',
       timeZone: 'Europe/Prague',
       title: 'Orbie Zoom integration smoke test'
     })
     expect(meetingBookingPreview(booking!)).toContain('Requested by: dc.builder@world.org')
+    expect(meetingBookingPreview(booking!)).toContain('Organizer: dc.builder@world.org')
     expect(meetingBookingPreview(booking!)).toContain('Reply `confirm`')
   })
 
