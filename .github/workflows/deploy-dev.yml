@@ -69,8 +69,8 @@ jobs:
             dockerfile: services/slackbotv2/Dockerfile
             target: ""
           - image: centaur-githubbot
-            repository: centaur-githubbot
-            tagPrefix: ""
+            repository: common-app
+            tagPrefix: centaur-githubbot-
             context: .
             dockerfile: services/githubbot/Dockerfile
             target: ""
@@ -382,8 +382,8 @@ jobs:
             --set "slackbotv2.image.repository=$ECR_REGISTRY/centaur-slackbotv2" \
             --set "slackbotv2.image.tag=$GITHUB_SHA" \
             --set "githubbot.enabled=true" \
-            --set "githubbot.image.repository=$ECR_REGISTRY/centaur-githubbot" \
-            --set "githubbot.image.tag=$GITHUB_SHA" \
+            --set "githubbot.image.repository=$ECR_REGISTRY/common-app" \
+            --set "githubbot.image.tag=centaur-githubbot-$GITHUB_SHA" \
             --wait \
             --timeout 30m
 
