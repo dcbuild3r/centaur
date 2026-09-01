@@ -849,19 +849,39 @@ class MeetingSchedulerClient:
         return asyncio.run(_with_connection(query))
 
     def post_meeting_candidate_by_zoom_id(self, meeting_id: str) -> dict[str, Any] | None:
-        """Return the one ended, booked, and not-yet-delivered Zoom occurrence."""
+        """Return the exact ended, booked, not-yet-delivered Zoom occurrence."""
+
+        return self._post_meeting_candidate_by_zoom_id(meeting_id, allow_early_end=False)
+
+    def post_meeting_candidate_for_terminal_zoom_event(
+        self, meeting_id: str
+    ) -> dict[str, Any] | None:
+        """Return a candidate selected by an authenticated terminal Zoom event."""
+
+        return self._post_meeting_candidate_by_zoom_id(meeting_id, allow_early_end=True)
+
+    def _post_meeting_candidate_by_zoom_id(
+        self, meeting_id: str, *, allow_early_end: bool
+    ) -> dict[str, Any] | None:
 
         _require_enabled()
         normalized_id = _require_zoom_meeting_id(meeting_id)
 
         async def query(connection: asyncpg.Connection) -> dict[str, Any] | None:
-            row = await connection.fetchrow(
+            scheduled_end_clause = (
+                ""
+                if allow_early_end
+                else """
+                  and coalesce(actual_start, requested_start)
+                      + make_interval(mins => duration_minutes) <= now()
                 """
+            )
+            row = await connection.fetchrow(
+                f"""
                 select * from orbie_meeting_occurrences
                 where status = 'booked'
                   and zoom_meeting_id = $1
-                  and coalesce(actual_start, requested_start)
-                      + make_interval(mins => duration_minutes) <= now()
+                  {scheduled_end_clause}
                   and coalesce(metadata->>'post_meeting_status', '') <> 'delivered'
                 order by coalesce(actual_start, requested_start), occurrence_key
                 limit 1

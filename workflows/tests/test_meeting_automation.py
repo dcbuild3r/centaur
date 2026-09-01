@@ -1481,6 +1481,8 @@ class ScheduledFakeClient:
         if operation == "post_meeting_candidate_by_zoom_id":
             candidate = self.post_candidates_by_zoom_id.get(args["meeting_id"])
             return candidate
+        if operation == "post_meeting_candidate_for_terminal_zoom_event":
+            return self.post_candidates_by_zoom_id.get(args["meeting_id"])
         if operation == "collect_post_meeting_artifacts":
             return {
                 "ready": True,
@@ -1509,6 +1511,20 @@ def _zoom_webhook(
             "event": event,
             "payload": {"object": {"id": meeting_id, "uuid": uuid}},
         }
+    }
+
+
+def test_zoom_webhook_route_requires_zoom_signature_and_terminal_event_filter():
+    webhook = meeting_automation.WEBHOOKS[0]
+
+    assert webhook["auth"] == {
+        "type": "zoom",
+        "secret_ref": "ZOOM_WEBHOOK_SECRET",
+    }
+    assert set(webhook["filter"]["values"]) == {
+        "recording.completed",
+        "recording.transcript_completed",
+        "meeting.summary_completed",
     }
 
 
@@ -1542,22 +1558,48 @@ def test_zoom_webhook_parser_reads_event_and_object_id_or_uuid():
     )
 
 
+@pytest.mark.parametrize(
+    "event",
+    [
+        "recording.completed",
+        "recording.transcript_completed",
+        "meeting.summary_completed",
+    ],
+)
 def test_zoom_webhook_processes_target_occurrence_without_reconciliation_polling(
-    monkeypatch,
+    monkeypatch, event
 ):
     client = ScheduledFakeClient(_published_row())
     client.post_candidates = [_post_candidate("decoy")]
-    client.post_candidates_by_zoom_id["123"] = _post_candidate("123")
+    early_candidate = {
+        **_post_candidate("123"),
+        "actual_start": "2099-08-31T20:10:00+00:00",
+        "duration_minutes": 30,
+    }
+    client.post_candidates_by_zoom_id["123"] = early_candidate
+    original = client.scheduling_operation
+
+    async def require_terminal_event_operation(operation, args):
+        if operation == "post_meeting_candidate_for_terminal_zoom_event":
+            client.post_operations.append((operation, args))
+            return early_candidate
+        return await original(operation, args)
+
+    client.scheduling_operation = require_terminal_event_operation
     monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
 
     result = asyncio.run(
         meeting_automation.handler(
-            meeting_automation.Input(webhook=_zoom_webhook()), FakeContext()
+            meeting_automation.Input(webhook=_zoom_webhook(event=event)), FakeContext()
         )
     )
 
     assert result["status"] == "delivered"
     assert result["meeting_id"] == "123"
+    assert (
+        "post_meeting_candidate_for_terminal_zoom_event",
+        {"meeting_id": "123"},
+    ) in client.post_operations
     claim_args = next(
         args
         for operation, args in client.post_operations
@@ -1690,6 +1732,10 @@ def test_pending_transcript_is_observable_and_not_delivered(monkeypatch):
     )
 
     assert result["status"] == "pending_transcript"
+    assert (
+        "post_meeting_candidate_by_zoom_id",
+        {"meeting_id": "123"},
+    ) in client.post_operations
     assert not client.post_publications
     assert not any(
         operation == "mark_post_meeting_delivered"

@@ -1261,11 +1261,17 @@ async def _post_meeting_candidate_by_zoom_id(
     meeting_id: str,
     *,
     step_prefix: str,
+    terminal_event_verified: bool = False,
 ) -> dict[str, Any] | None:
     result = await ctx.step(
         f"{step_prefix}:candidate:{meeting_id}",
         lambda: client.scheduling_operation(
-            "post_meeting_candidate_by_zoom_id", {"meeting_id": meeting_id}
+            (
+                "post_meeting_candidate_for_terminal_zoom_event"
+                if terminal_event_verified
+                else "post_meeting_candidate_by_zoom_id"
+            ),
+            {"meeting_id": meeting_id},
         ),
     )
     if isinstance(result, dict):
@@ -1720,6 +1726,7 @@ async def _post_meeting_handler(inp: Input, ctx: WorkflowContext) -> dict[str, A
         client,
         meeting_id,
         step_prefix=f"post-meeting:{source}",
+        terminal_event_verified=source == "zoom_webhook",
     )
     if candidate is None:
         return {

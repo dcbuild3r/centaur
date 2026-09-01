@@ -219,7 +219,7 @@ def test_collect_post_meeting_artifacts_retries_provider_processing(monkeypatch)
     assert len(result["processing_errors"]) == 2
 
 
-def test_post_meeting_candidate_by_zoom_id_returns_one_ended_booked_undelivered_row(
+def test_terminal_zoom_event_candidate_accepts_booked_undelivered_early_end(
     monkeypatch,
 ):
     monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
@@ -242,14 +242,58 @@ def test_post_meeting_candidate_by_zoom_id_returns_one_ended_booked_undelivered_
 
     monkeypatch.setattr(client, "_with_connection", with_connection)
 
-    result = scheduler.post_meeting_candidate_by_zoom_id("123")
+    result = scheduler.post_meeting_candidate_for_terminal_zoom_event("123")
 
     assert result == row
     assert calls[0][1] == ("123",)
     assert "status = 'booked'" in calls[0][0]
     assert "zoom_meeting_id = $1" in calls[0][0]
-    assert "<= now()" in calls[0][0]
+    assert "make_interval" not in calls[0][0]
+    assert "<= now()" not in calls[0][0]
     assert "post_meeting_status" in calls[0][0]
+
+
+def test_post_meeting_candidate_by_zoom_id_keeps_end_gate(
+    monkeypatch,
+):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+    calls = []
+
+    class Connection:
+        async def fetchrow(self, query, *args):
+            calls.append((query, args))
+            return None
+
+    async def with_connection(operation):
+        return await operation(Connection())
+
+    monkeypatch.setattr(client, "_with_connection", with_connection)
+
+    assert scheduler.post_meeting_candidate_by_zoom_id("123") is None
+    assert calls[0][1] == ("123",)
+    assert "make_interval" in calls[0][0]
+    assert "<= now()" in calls[0][0]
+
+
+def test_post_meeting_candidates_keeps_scheduled_end_gate(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+    calls = []
+
+    class Connection:
+        async def fetch(self, query, *args):
+            calls.append((query, args))
+            return []
+
+    async def with_connection(operation):
+        return await operation(Connection())
+
+    monkeypatch.setattr(client, "_with_connection", with_connection)
+
+    assert scheduler.post_meeting_candidates("2026-08-31T20:15:00Z") == []
+    assert "make_interval" in calls[0][0]
+    assert "<= $1" in calls[0][0]
 
 
 @pytest.mark.parametrize("meeting_id", ["", "   ", "x" * 129, "one two"])
@@ -260,17 +304,17 @@ def test_post_meeting_candidate_by_zoom_id_validates_bounded_id(monkeypatch, mee
         client.MeetingSchedulerClient().post_meeting_candidate_by_zoom_id(meeting_id)
 
 
-def test_post_meeting_candidate_by_zoom_id_is_exposed_by_cli(monkeypatch, capsys):
+def test_terminal_zoom_event_candidate_is_exposed_by_cli(monkeypatch, capsys):
     calls = []
 
     class FakeClient:
-        def post_meeting_candidate_by_zoom_id(self, **kwargs):
+        def post_meeting_candidate_for_terminal_zoom_event(self, **kwargs):
             calls.append(kwargs)
             return {"occurrence_key": "occurrence:1"}
 
     monkeypatch.setattr(cli, "_client", lambda: FakeClient())
 
-    cli.post_meeting_candidate_by_zoom_id('{"meeting_id":"123"}')
+    cli.post_meeting_candidate_for_terminal_zoom_event('{"meeting_id":"123"}')
 
     assert calls == [{"meeting_id": "123"}]
     assert '"occurrence_key": "occurrence:1"' in capsys.readouterr().out

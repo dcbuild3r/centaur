@@ -65,6 +65,15 @@ def post_meeting_candidate_by_zoom_id(
     _print(_client().post_meeting_candidate_by_zoom_id(**json.loads(payload)))
 
 
+@app.command("post-meeting-candidate-for-terminal-zoom-event")
+def post_meeting_candidate_for_terminal_zoom_event(
+    payload: str = typer.Argument(..., help="Authenticated terminal Zoom event request"),
+) -> None:
+    _print(
+        _client().post_meeting_candidate_for_terminal_zoom_event(**json.loads(payload))
+    )
+
+
 @app.command("collect-post-meeting-artifacts")
 def collect_post_meeting_artifacts(
     payload: str = typer.Argument(..., help="JSON artifact request"),
