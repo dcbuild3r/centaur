@@ -55,7 +55,7 @@ jobs:
             context: .
             dockerfile: services/sandbox/Dockerfile
             target: sandbox
-            cache-mode: min
+            cache-mode: max
           - image: centaur-iron-proxy
             repository: centaur-iron-proxy
             tagPrefix: ""
