@@ -309,12 +309,6 @@ RUN rm -f /etc/sudoers.d/agent
 RUN install -d -m 0755 /etc/centaur /opt/centaur
 COPY --link centaur_sdk/ /opt/centaur/centaur_sdk/
 COPY --link --chmod=0755 services/sandbox/git-hooks/ /opt/centaur/git-hooks/
-COPY --link --chown=1001:1001 tools/ /opt/centaur/tools/
-# Notion clients send one placeholder Authorization header for iron-proxy to
-# replace. Inject mode adds a second Authorization header and Notion returns
-# 401, so reject an agent image that carries the old contract.
-RUN grep -Fq 'name = "NOTION_API_KEY", mode = "replace"' \
-      /opt/centaur/tools/productivity/notion/pyproject.toml
 COPY --link --chmod=644 services/sandbox/codex-auth.json /etc/centaur/codex-auth.default.json
 COPY --link --chmod=644 services/sandbox/claude-credentials.json /etc/centaur/claude-credentials.default.json
 COPY --link --chmod=755 services/sandbox/md2docx.py /usr/local/bin/md2docx
@@ -341,6 +335,15 @@ RUN --mount=type=cache,target=/home/agent/.cargo/registry,uid=1001,gid=1001,shar
     --mount=type=cache,target=/home/agent/.cache/harness-server-target,uid=1001,gid=1001,sharing=locked \
     CARGO_TARGET_DIR=/home/agent/.cache/harness-server-target \
     cargo +stable install --locked --path /opt/centaur/harness-server-src --root /home/agent/.local
+
+# Tools do not participate in the harness-server build. Keep them after the
+# Rust install so routine tool changes can reuse the completed install layer.
+COPY --link --chown=1001:1001 tools/ /opt/centaur/tools/
+# Notion clients send one placeholder Authorization header for iron-proxy to
+# replace. Inject mode adds a second Authorization header and Notion returns
+# 401, so reject an agent image that carries the old contract.
+RUN grep -Fq 'name = "NOTION_API_KEY", mode = "replace"' \
+      /opt/centaur/tools/productivity/notion/pyproject.toml
 
 # No RUN instructions after these — all repo-local content at the very end.
 COPY --link --chown=1001:1001 .agents/skills/ /home/agent/.agents/skills/
