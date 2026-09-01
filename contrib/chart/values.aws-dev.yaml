@@ -21,6 +21,10 @@ apiRs:
   opVault: Centaur
   sandboxReadyTimeoutSecs: 240
   sandboxWarmPoolSize: 3
+  # Keep long-running Codex progress in Slack's single assistant status instead
+  # of publishing one structured task card per internal tool invocation.
+  activitySummary:
+    enabled: true
   meetingScheduler:
     enabled: true
     organizerCalendars: '{"orbie":"orbie-automation@world.org"}'
