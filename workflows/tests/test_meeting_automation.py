@@ -453,7 +453,7 @@ def test_scheduling_args_reject_unknown_provider_fields():
         )
 
 
-def test_manual_scheduling_uses_verified_requester_calendar_as_organizer(monkeypatch):
+def test_manual_scheduling_uses_orbie_as_organizer_and_invites_requester(monkeypatch):
     client = SchedulingFakeClient(
         {
             "status": "ok",
@@ -467,6 +467,7 @@ def test_manual_scheduling_uses_verified_requester_calendar_as_organizer(monkeyp
         }
     )
     monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+    monkeypatch.setenv("MEETING_MANUAL_ORGANIZER_CALENDAR_KEY", "orbie")
     result = asyncio.run(
         meeting_automation.handler(
             _input(
@@ -485,7 +486,51 @@ def test_manual_scheduling_uses_verified_requester_calendar_as_organizer(monkeyp
 
     assert result["status"] == "ok"
     scheduling_call = next(call for call in client.calls if call[0] == "scheduling")
-    assert scheduling_call[2]["organizer_calendar_key"] == "piotr.piwowarczyk@world.org"
+    assert scheduling_call[2]["organizer_calendar_key"] == "orbie"
+    assert scheduling_call[2]["attendee_emails"] == [
+        "piotr.piwowarczyk@world.org",
+        "person@world.org",
+    ]
+
+
+def test_manual_booking_forces_orbie_ownership_and_invites_requester(monkeypatch):
+    client = SchedulingFakeClient(
+        {
+            "status": "booked",
+            "actualStart": "2099-08-24T09:00:00Z",
+            "zoomJoinUrl": "https://zoom.us/j/123",
+        }
+    )
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+    monkeypatch.setenv("MEETING_MANUAL_ORGANIZER_CALENDAR_KEY", "orbie")
+
+    result = asyncio.run(
+        meeting_automation.handler(
+            _input(
+                slack_channel_id="",
+                scheduling_operation="book_meeting",
+                scheduling_args={
+                    "occurrence_key": "manual:orbie-owned",
+                    "title": "Planning",
+                    "start": "2099-08-24T09:00:00Z",
+                    "duration_minutes": 30,
+                    "time_zone": "UTC",
+                    "attendee_emails": ["person@world.org"],
+                    "confirmation_token": "confirmed",
+                },
+            ),
+            FakeContext(),
+        )
+    )
+
+    assert result["status"] == "ok"
+    scheduling_call = next(call for call in client.calls if call[0] == "scheduling")
+    assert scheduling_call[1] == "book_meeting"
+    assert scheduling_call[2]["organizer_calendar_key"] == "orbie"
+    assert scheduling_call[2]["attendee_emails"] == [
+        "piotr.piwowarczyk@world.org",
+        "person@world.org",
+    ]
 
 
 def test_manual_booking_cannot_bypass_requester_ownership_with_cadence_id(monkeypatch):

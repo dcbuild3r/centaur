@@ -14,7 +14,7 @@ export type PendingMeetingBooking = {
   expiresAtMs: number
   occurrenceKey: string
   organizerCalendarKey: string
-  organizerEmail: string
+  requesterEmail: string
   start: string
   timeZone: string
   title: string
@@ -32,7 +32,7 @@ export function parseFixedTimeMeetingRequest(
   text: string,
   requesterEmail: string,
   now = new Date(),
-  organizerCalendarKey = requesterEmail
+  organizerCalendarKey = process.env.MEETING_MANUAL_ORGANIZER_CALENDAR_KEY ?? ''
 ): PendingMeetingBooking | null {
   const clean = text.replace(/^\s*(?:<@[A-Z0-9]+(?:\|[^>]*)?>|@orbie)\s*/i, '').trim()
   if (!/^(?:schedule|book|create)\b/i.test(clean) || !/\bmeeting\b/i.test(clean)) return null
@@ -60,10 +60,10 @@ export function parseFixedTimeMeetingRequest(
   if (new Date(start).getTime() <= now.getTime()) return null
 
   const emails = Array.from(clean.matchAll(EMAIL), match => match[0].toLowerCase())
-  const organizerEmail = requesterEmail.trim().toLowerCase()
+  requesterEmail = requesterEmail.trim().toLowerCase()
   organizerCalendarKey = organizerCalendarKey.trim()
   if (!organizerCalendarKey) return null
-  const attendeeEmails = Array.from(new Set([organizerEmail, ...emails]))
+  const attendeeEmails = Array.from(new Set([requesterEmail, ...emails]))
   if (!attendeeEmails.every(email => /^[^@\s]+@world\.org$/i.test(email))) return null
   return {
     attendeeEmails,
@@ -71,7 +71,7 @@ export function parseFixedTimeMeetingRequest(
     expiresAtMs: now.getTime() + BOOKING_TTL_MS,
     occurrenceKey: `slack:${randomUUID()}`,
     organizerCalendarKey,
-    organizerEmail,
+    requesterEmail,
     start,
     timeZone,
     title: titleMatch[1]!.trim()
@@ -83,8 +83,8 @@ export function meetingBookingPreview(booking: PendingMeetingBooking): string {
     'Please confirm this real meeting booking:',
     `• ${booking.title}`,
     `• ${booking.start} (${booking.timeZone}), ${booking.durationMinutes} minutes`,
-    `• Requested by: ${booking.organizerEmail}`,
-    `• Organizer: ${booking.organizerEmail}`,
+    `• Requested by: ${booking.requesterEmail}`,
+    '• Organizer: Orbie Automation',
     `• Attendees: ${booking.attendeeEmails.join(', ')}`,
     '• World Foundation Zoom with automatic cloud recording',
     '',
@@ -99,7 +99,7 @@ export async function dispatchConfirmedMeetingBooking(
 ): Promise<JsonObject | null> {
   const serialized = await serializeMessage(message, options)
   const requester = await resolveSlackMeetingAutomationRequester(options, serialized)
-  if (!requester || requester.slackEmail?.toLowerCase() !== booking.organizerEmail) return null
+  if (!requester || requester.slackEmail?.toLowerCase() !== booking.requesterEmail) return null
   const request: SlackMeetingSchedulingRunRequest = {
     operation: 'book_meeting',
     args: {

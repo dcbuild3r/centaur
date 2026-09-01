@@ -46,14 +46,17 @@ World Foundation Zoom meeting, and one Calendar event. Calendar events carry
 the occurrence key in `extendedProperties.private`, include the Zoom join URL,
 and use `sendUpdates=all`.
 
-The scheduler reads participant free/busy only. It never returns private event
-titles or descriptions. All writes are gated by the scheduler feature flag,
-stable occurrence identity, and the workflow principal's provider grants.
-Manual ad-hoc availability and bookings resolve the verified Slack requester
-to an exact calendar email and create the invitation on that person's writable
-calendar, making them the event owner instead of `orbie-automation@world.org`.
-They also require explicit confirmation in the current conversation. Automated
-cadence bookings continue to use their configured managed organizer alias.
+The scheduling operation reads participant free/busy, while Orbie's separate
+read-only Calendar capability may use organization-visible event details for
+questions such as which calls a coworker has on a given day. Calendar owners
+remain responsible for marking sensitive events private so organization-wide
+readers see only a busy slot. All writes are gated by the scheduler feature
+flag, stable occurrence identity, and workflow principal's provider grants.
+Manual ad-hoc meetings are created on Orbie's managed calendar and include the
+verified Slack requester as an attendee; Orbie does not need write access to
+the requester's calendar. They also require explicit confirmation in the
+current conversation. Automated cadence bookings continue to use their
+configured managed organizer alias.
 
 If any provider, Docs, or Slack delivery step fails, the workflow leaves
 `Next date` unchanged and retries the same occurrence. Rescheduling updates
@@ -164,13 +167,14 @@ After deployment, verify all of the following:
 
 Before enabling `MEETING_SCHEDULER_ENABLED` in Dev:
 
-1. Share each participant calendar with `orbie-automation@world.org` at
-   free/busy level only.
-2. Grant `writer` or `owner` access to each approved manual proposer's
-   calendar, and grant write access only to explicitly designated automated
-   cadence calendars. Map automated calendar IDs through
-   `MEETING_ORGANIZER_CALENDARS`; never map `primary` or accept a raw calendar
-   ID from a caller.
+1. Configure the Workspace organization-wide Calendar policy so
+   `orbie-automation@world.org` can read event details. Calendar owners must
+   mark sensitive events private when only the busy interval should be shared.
+2. Map Orbie's own calendar and explicitly designated automated cadence
+   calendars through `MEETING_ORGANIZER_CALENDARS`. Set
+   `MEETING_MANUAL_ORGANIZER_CALENDAR_KEY` to Orbie's managed alias; never map
+   `primary`, accept a raw calendar ID from a caller, or grant Orbie writer
+   access to employee calendars.
 3. Configure the World Foundation Zoom General/User-managed OAuth app, connect
    it as the licensed Orbie host, and let Centaur Console own the rotating
    refresh-token family. The scheduler consumes broker credential

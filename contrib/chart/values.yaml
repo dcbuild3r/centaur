@@ -487,6 +487,8 @@ apiRs:
   meetingScheduler:
     enabled: false
     organizerCalendars: "{}"
+    # Managed Orbie calendar alias used for all user-requested meetings.
+    manualOrganizerCalendarKey: ""
     zoomHostUserId: ""
     # Optional organizer-calendar-key -> Zoom user mapping. Leave empty for
     # Orbie-owned rooms; entries require Zoom scheduling privilege grants.

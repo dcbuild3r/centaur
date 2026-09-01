@@ -24,6 +24,7 @@ apiRs:
   meetingScheduler:
     enabled: true
     organizerCalendars: '{"orbie":"orbie-automation@world.org"}'
+    manualOrganizerCalendarKey: orbie
     zoomHostUserId: orbie-automation@world.org
     zoomScheduleForUsers: "{}"
   extraEnv:

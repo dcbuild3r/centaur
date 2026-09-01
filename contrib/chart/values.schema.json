@@ -382,6 +382,7 @@
                 { "type": "object", "additionalProperties": { "type": "string" } }
               ]
             },
+            "manualOrganizerCalendarKey": { "type": "string" },
             "zoomHostUserId": { "type": "string" },
             "zoomScheduleForUsers": {
               "anyOf": [
