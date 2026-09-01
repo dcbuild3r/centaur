@@ -155,9 +155,11 @@ After deployment, verify all of the following:
 12. Replaying the same Slack message produces no duplicate document or Slack
    message and does not overwrite attendee-entered notes.
 13. In Dev, a real Auto-book cadence produces one Calendar invite with the
-   World Foundation Zoom URL, a matching Notion booking status, and a joinable
-   Zoom meeting. A retry reuses both provider IDs; a reschedule changes the
+    World Foundation Zoom URL, a matching Notion booking status, and a joinable
+    Zoom meeting. A retry reuses both provider IDs; a reschedule changes the
     same pair and leaves the original cadence anchor intact.
+    Confirm invited guests can edit event details and invite additional guests
+    without receiving calendar-wide write access.
 14. End the meeting and wait for Zoom processing. Confirm one idempotent Notion
     summary/transcript append, participant DMs, and (for a public cadence) one
     channel announcement. Rerun the scheduled handler and confirm no duplicate

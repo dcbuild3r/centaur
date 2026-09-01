@@ -5,8 +5,10 @@ must not be exposed to user-facing Slack or Console principals; the public
 skill submits through the durable `meeting_automation` scheduling broker.
 It returns free/busy-derived slots only and writes to managed organizer
 aliases. Manual meetings are always created on Orbie's managed calendar, with
-the verified proposer included as an attendee; the scheduler never requires or
-uses write access to an employee calendar. Every write is keyed by a stable
+the verified proposer included as an attendee. Orbie-created events allow
+guests to modify event details and invite others, giving participants
+event-level collaboration without requiring write access to an employee
+calendar. Every write is keyed by a stable
 occurrence identity and is recorded in `orbie_meeting_occurrences` before
 provider work begins.
 

@@ -1309,6 +1309,8 @@ class MeetingSchedulerClient:
             "start": {"dateTime": _rfc3339_in_zone(start, time_zone), "timeZone": time_zone},
             "end": {"dateTime": _rfc3339_in_zone(end, time_zone), "timeZone": time_zone},
             "attendees": [{"email": email} for email in attendees],
+            "guestsCanModify": True,
+            "guestsCanInviteOthers": True,
             "extendedProperties": {"private": {"orbieOccurrenceKey": key}},
         }
 

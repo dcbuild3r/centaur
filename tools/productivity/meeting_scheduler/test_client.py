@@ -1437,7 +1437,11 @@ def test_book_meeting_reuses_deterministic_calendar_id_after_partial_insert(monk
     assert result["status"] == "booked"
     assert result["zoomJoinUrl"] == "https://zoom/j/1"
     assert "id" not in events.insert_calls[0]
-    event_id = events.insert_calls[0]["body"]["id"]
+    event_body = events.insert_calls[0]["body"]
+    assert event_body["description"] == "World Foundation Zoom: https://zoom/j/1"
+    assert event_body["guestsCanModify"] is True
+    assert event_body["guestsCanInviteOthers"] is True
+    event_id = event_body["id"]
     assert event_id == client.MeetingSchedulerClient._calendar_event_id("cadence:1")
     assert "_" not in event_id
 
