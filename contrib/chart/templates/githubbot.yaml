@@ -58,6 +58,19 @@ spec:
         - name: githubbot
           image: {{ printf "%s:%s" .Values.githubbot.image.repository .Values.githubbot.image.tag | quote }}
           imagePullPolicy: {{ .Values.githubbot.image.pullPolicy }}
+{{- if .Values.githubbot.databaseUsernameOverride }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              export GITHUBBOT_DATABASE_URL="$(
+                bun -e '
+              const url = new URL(process.env.GITHUBBOT_DATABASE_URL)
+              url.username = process.env.DATABASE_USERNAME_OVERRIDE
+              console.log(url.toString())
+              '
+              )"
+              exec bun src/server.ts
+{{- end }}
           env:
             - name: PORT
               value: "3001"
@@ -96,6 +109,10 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sDATABASE_URL" .Values.secretManager.envPrefix }}
+{{- if .Values.githubbot.databaseUsernameOverride }}
+            - name: DATABASE_USERNAME_OVERRIDE
+              value: {{ .Values.githubbot.databaseUsernameOverride | quote }}
+{{- end }}
             - name: GITHUB_BOT_USERNAME
               value: {{ required "githubbot.userName is required (the bot account's GitHub login)" .Values.githubbot.userName | quote }}
             # v2 PR self-management knobs.

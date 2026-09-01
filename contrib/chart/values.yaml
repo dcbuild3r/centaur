@@ -698,6 +698,9 @@ linearbot:
 githubbot:
   enabled: false
   replicaCount: 1
+  # Override the username embedded in DATABASE_URL when shared Chat SDK tables
+  # are owned by a legacy database role.
+  databaseUsernameOverride: ""
   image:
     repository: centaur-githubbot
     tag: latest

@@ -99,5 +99,6 @@ githubbot:
   enabled: true
   userName: wf-orbie
   autoMerge: false
+  databaseUsernameOverride: tempo
 networkPolicy:
   enabled: false
