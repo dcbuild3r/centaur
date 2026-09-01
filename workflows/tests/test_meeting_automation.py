@@ -1815,6 +1815,39 @@ def test_active_post_meeting_lease_prevents_duplicate_publication(monkeypatch):
     )
 
 
+def test_superseded_post_meeting_worker_yields_without_retrying(monkeypatch):
+    client = ScheduledFakeClient(_published_row())
+    client.post_candidates_by_zoom_id["123"] = _post_candidate("123")
+    client.artifact_result = {
+        "ready": False,
+        "transcript_status": "processing",
+        "transcript": "",
+    }
+    original = client.scheduling_operation
+
+    async def lose_lease_while_marking(operation, args):
+        if operation == "record_post_meeting_processing":
+            client.post_operations.append((operation, args))
+            raise RuntimeError(
+                "centaur-tools call failed: post-meeting processing lease was lost"
+            )
+        return await original(operation, args)
+
+    client.scheduling_operation = lose_lease_while_marking
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+
+    result = asyncio.run(
+        meeting_automation.handler(
+            meeting_automation.Input(webhook=_zoom_webhook()), FakeContext()
+        )
+    )
+
+    assert result["status"] == "processing"
+    assert result["reason"] == "lease_superseded"
+    assert result["meeting_id"] == "123"
+    assert not client.post_publications
+
+
 def test_operator_replay_is_idempotent_after_delivery(monkeypatch):
     client = ScheduledFakeClient(_published_row())
     client.post_candidates_by_zoom_id["123"] = _post_candidate("123")

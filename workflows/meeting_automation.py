@@ -1337,6 +1337,12 @@ async def _mark_post_meeting_processing(
     return result
 
 
+def _post_meeting_lease_was_superseded(error: Exception) -> bool:
+    """Recognize the scheduler's stale-owner result through the tool boundary."""
+
+    return "post-meeting processing lease was lost" in str(error).lower()
+
+
 async def _process_post_meeting_candidate(
     ctx: WorkflowContext,
     client: MeetingOpsClient,
@@ -1739,14 +1745,35 @@ async def _post_meeting_handler(inp: Input, ctx: WorkflowContext) -> dict[str, A
         f"post-meeting:{source}:slack-users:{meeting_id}",
         lambda: client.slack_users(),
     )
-    result = await _process_post_meeting_candidate(
-        ctx,
-        client,
-        candidate,
-        slack_users=slack_users,
-        event=str(parsed_webhook.get("event") or source),
-        step_prefix=f"post-meeting:{source}",
-    )
+    try:
+        result = await _process_post_meeting_candidate(
+            ctx,
+            client,
+            candidate,
+            slack_users=slack_users,
+            event=str(parsed_webhook.get("event") or source),
+            step_prefix=f"post-meeting:{source}",
+        )
+    except Exception as error:
+        # Zoom can emit recording and transcript completion events only
+        # milliseconds apart. If another durable run took over after this run
+        # collected artifacts, this run is stale rather than failed. Returning
+        # success prevents it from retrying forever and contending with the
+        # current lease owner.
+        if not _post_meeting_lease_was_superseded(error):
+            raise
+        result = {
+            "status": "processing",
+            "reason": "lease_superseded",
+            "occurrence_key": _candidate_occurrence_key(candidate),
+            "meeting_id": meeting_id,
+        }
+        ctx.log(
+            "zoom_post_meeting_lease_superseded",
+            meeting_id=meeting_id,
+            occurrence_key=_candidate_occurrence_key(candidate),
+            zoom_event=str(parsed_webhook.get("event") or source),
+        )
     result["source"] = source
     if parsed_webhook.get("event"):
         result["event"] = parsed_webhook["event"]
