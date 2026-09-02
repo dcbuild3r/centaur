@@ -783,10 +783,14 @@ def _zoom_webhook_input(inp: Input) -> dict[str, str]:
     payload = payload if isinstance(payload, dict) else {}
     meeting = payload.get("object")
     meeting = meeting if isinstance(meeting, dict) else {}
-    meeting_id = str(meeting.get("id") or meeting.get("uuid") or "").strip()
+    meeting_uuid = str(meeting.get("uuid") or "").strip()
+    meeting_id = str(meeting.get("id") or meeting_uuid).strip()
     if not meeting_id:
         return {"event": event}
-    return {"event": event, "meeting_id": meeting_id}
+    result = {"event": event, "meeting_id": meeting_id}
+    if meeting_uuid:
+        result["meeting_uuid"] = meeting_uuid
+    return result
 
 
 def _post_meeting_zoom_id(inp: Input) -> tuple[str, str]:
@@ -1352,6 +1356,7 @@ async def _process_post_meeting_candidate(
     cadence: dict[str, Any] | None = None,
     event: str = "artifact_poll",
     step_prefix: str,
+    artifact_meeting_identifier: str = "",
 ) -> dict[str, Any]:
     occurrence_key = _candidate_occurrence_key(candidate)
     meeting_id = _candidate_meeting_id(candidate)
@@ -1397,10 +1402,11 @@ async def _process_post_meeting_candidate(
         raise ValueError("post-meeting claim returned no lease token")
 
     try:
+        artifact_identifier = artifact_meeting_identifier or meeting_id
         artifacts = await ctx.step(
             f"{step_prefix}:artifacts:{occurrence_key}",
             lambda: client.scheduling_operation(
-                "collect_post_meeting_artifacts", {"meeting_id": meeting_id}
+                "collect_post_meeting_artifacts", {"meeting_id": artifact_identifier}
             ),
         )
     except Exception as error:
@@ -1727,6 +1733,11 @@ async def _post_meeting_handler(inp: Input, ctx: WorkflowContext) -> dict[str, A
         }
     if len(meeting_id) > 128 or any(char.isspace() for char in meeting_id):
         raise ValueError("post_meeting_zoom_id must be a bounded token")
+    meeting_uuid = str(parsed_webhook.get("meeting_uuid") or "").strip()
+    if meeting_uuid and (
+        len(meeting_uuid) > 128 or any(char.isspace() for char in meeting_uuid)
+    ):
+        raise ValueError("Zoom meeting UUID must be a bounded token")
     candidate = await _post_meeting_candidate_by_zoom_id(
         ctx,
         client,
@@ -1752,6 +1763,7 @@ async def _post_meeting_handler(inp: Input, ctx: WorkflowContext) -> dict[str, A
             candidate,
             slack_users=slack_users,
             event=str(parsed_webhook.get("event") or source),
+            artifact_meeting_identifier=meeting_uuid,
             step_prefix=f"post-meeting:{source}",
         )
     except Exception as error:

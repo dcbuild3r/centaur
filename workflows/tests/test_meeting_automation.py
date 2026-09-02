@@ -1616,6 +1616,7 @@ def test_zoom_webhook_parser_reads_event_and_object_id_or_uuid():
     assert parsed == {
         "event": "recording.transcript_completed",
         "meeting_id": "456",
+        "meeting_uuid": "u-123",
     }
     uuid_only = _zoom_webhook(meeting_id=None, uuid="occurrence-uuid")
     del uuid_only["body"]["payload"]["object"]["id"]
@@ -1684,6 +1685,10 @@ def test_zoom_webhook_processes_target_occurrence_without_reconciliation_polling
         operation == "post_meeting_candidates"
         for operation, _args in client.post_operations
     )
+    assert (
+        "collect_post_meeting_artifacts",
+        {"meeting_id": "u-123"},
+    ) in client.post_operations
     assert client.post_publications[0][1]["meeting_id"] == "123"
 
 

@@ -854,13 +854,18 @@ class MeetingSchedulerClient:
             "GET", f"/meetings/{_zoom_meeting_path_id(normalized_id)}/recordings"
         )
         meeting_uuid = str(recording.get("uuid") or "").strip()
+        meeting_uuid_resolution_error = ""
         if not meeting_uuid and normalized_id.isdigit():
             try:
                 instances = self._zoom_request(
                     "GET",
                     f"/past_meetings/{_zoom_meeting_path_id(normalized_id)}/instances",
                 )
-            except (MeetingSchedulerError, httpx.HTTPError, ValueError):
+            except MeetingSchedulerError as error:
+                meeting_uuid_resolution_error = str(error)
+                instances = {}
+            except (httpx.HTTPError, ValueError) as error:
+                meeting_uuid_resolution_error = type(error).__name__
                 instances = {}
             past_meetings = instances.get("meetings")
             candidates = [
@@ -912,6 +917,7 @@ class MeetingSchedulerClient:
             # Zoom's past-meeting endpoints identify the exact completed
             # occurrence by UUID, which may contain '/', '+', and '='.
             "meeting_uuid": meeting_uuid or None,
+            "meeting_uuid_resolution_error": meeting_uuid_resolution_error or None,
             "topic": recording.get("topic"),
             "start_time": recording.get("start_time"),
             "recording_files": public_files,
@@ -1302,6 +1308,11 @@ class MeetingSchedulerClient:
             recording = self.get_recording(meeting_id)
         except MeetingSchedulerError as error:
             errors.append(str(error))
+        uuid_resolution_error = str(
+            recording.get("meeting_uuid_resolution_error") or ""
+        ).strip()
+        if uuid_resolution_error:
+            errors.append(f"Zoom meeting UUID resolution failed: {uuid_resolution_error}")
         try:
             summary_identifier = str(recording.get("meeting_uuid") or meeting_id).strip()
             summary = self.get_summary(summary_identifier)

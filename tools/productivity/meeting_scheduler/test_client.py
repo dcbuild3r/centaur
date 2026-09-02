@@ -178,6 +178,7 @@ def test_get_recording_keeps_transcript_when_optional_instance_lookup_times_out(
     result = scheduler.get_recording("123")
 
     assert result["meeting_uuid"] is None
+    assert result["meeting_uuid_resolution_error"] == "ReadTimeout"
     assert result["transcript_status"] == "ready"
     assert result["transcript"] == "spoken text"
 
