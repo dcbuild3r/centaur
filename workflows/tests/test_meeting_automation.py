@@ -1771,6 +1771,82 @@ def test_retry_uses_uuid_returned_by_claim_when_candidate_snapshot_is_stale(monk
     )
 
 
+def test_retry_uses_uuid_from_json_encoded_claim_metadata(monkeypatch):
+    client = ScheduledFakeClient(_published_row())
+    candidate = _post_candidate("123")
+    original = client.scheduling_operation
+
+    async def claim_with_json_metadata(operation, args):
+        if operation == "claim_post_meeting_processing":
+            client.post_operations.append((operation, args))
+            return {
+                "claimed": True,
+                "lease_token": "lease-123",
+                "occurrence": {
+                    **candidate,
+                    "metadata": '{"post_meeting_zoom_uuid":"/fresh+uuid=="}',
+                },
+            }
+        return await original(operation, args)
+
+    client.scheduling_operation = claim_with_json_metadata
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+
+    result = asyncio.run(
+        meeting_automation._process_post_meeting_candidate(
+            FakeContext(),
+            client,
+            candidate,
+            slack_users=client.slack_user_data,
+            event="artifact_poll",
+            step_prefix="scheduled:post-meeting",
+        )
+    )
+
+    assert result["status"] == "delivered"
+    assert (
+        "collect_post_meeting_artifacts",
+        {"meeting_id": "/fresh+uuid=="},
+    ) in client.post_operations
+
+
+@pytest.mark.parametrize("metadata", ["{invalid", "[]"])
+def test_retry_safely_falls_back_for_unrecognized_claim_metadata(monkeypatch, metadata):
+    client = ScheduledFakeClient(_published_row())
+    candidate = _post_candidate("123")
+    original = client.scheduling_operation
+
+    async def claim_with_unrecognized_metadata(operation, args):
+        if operation == "claim_post_meeting_processing":
+            client.post_operations.append((operation, args))
+            return {
+                "claimed": True,
+                "lease_token": "lease-123",
+                "occurrence": {**candidate, "metadata": metadata},
+            }
+        return await original(operation, args)
+
+    client.scheduling_operation = claim_with_unrecognized_metadata
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+
+    result = asyncio.run(
+        meeting_automation._process_post_meeting_candidate(
+            FakeContext(),
+            client,
+            candidate,
+            slack_users=client.slack_user_data,
+            event="artifact_poll",
+            step_prefix="scheduled:post-meeting",
+        )
+    )
+
+    assert result["status"] == "delivered"
+    assert (
+        "collect_post_meeting_artifacts",
+        {"meeting_id": "123"},
+    ) in client.post_operations
+
+
 def test_transcript_only_runs_durable_orbie_summary_and_publishes_fallback(monkeypatch):
     client = ScheduledFakeClient(_published_row())
     client.post_candidates_by_zoom_id["123"] = _post_candidate("123")

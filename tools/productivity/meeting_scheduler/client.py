@@ -325,6 +325,14 @@ def _serialize_row(row: asyncpg.Record | None) -> dict[str, Any] | None:
     for key, value in result.items():
         if isinstance(value, (dt.datetime, dt.date)):
             result[key] = value.isoformat()
+    metadata = result.get("metadata")
+    if isinstance(metadata, str):
+        try:
+            decoded_metadata = json.loads(metadata)
+        except json.JSONDecodeError:
+            decoded_metadata = None
+        if isinstance(decoded_metadata, dict):
+            result["metadata"] = decoded_metadata
     return result
 
 

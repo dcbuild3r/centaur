@@ -14,6 +14,36 @@ async def _async_value(value):
     return value
 
 
+def test_serialize_row_decodes_jsonb_metadata_from_asyncpg():
+    row = {
+        "occurrence_key": "meeting:1",
+        "metadata": json.dumps(
+            {
+                "post_meeting_zoom_uuid": "/abc+def==",
+                "post_meeting_status": "processing",
+            }
+        ),
+    }
+
+    serialized = client._serialize_row(row)
+
+    assert serialized is not None
+    assert serialized["metadata"] == {
+        "post_meeting_zoom_uuid": "/abc+def==",
+        "post_meeting_status": "processing",
+    }
+
+
+@pytest.mark.parametrize("metadata", ["{invalid", "[]"])
+def test_serialize_row_preserves_unrecognized_jsonb_metadata(metadata):
+    serialized = client._serialize_row(
+        {"occurrence_key": "meeting:1", "metadata": metadata}
+    )
+
+    assert serialized is not None
+    assert serialized["metadata"] == metadata
+
+
 def test_zoom_create_defaults_to_orbie_join_anytime_and_cloud_recording(monkeypatch):
     monkeypatch.setenv("MEETING_ZOOM_HOST_USER_ID", "orbie@world.org")
     monkeypatch.setenv("MEETING_ZOOM_SCHEDULE_FOR_USERS", "{}")

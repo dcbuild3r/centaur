@@ -1261,6 +1261,11 @@ def _candidate_occurrence_key(candidate: dict[str, Any]) -> str:
 
 def _candidate_zoom_uuid(candidate: dict[str, Any]) -> str:
     metadata = candidate.get("metadata")
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except json.JSONDecodeError:
+            metadata = {}
     metadata = metadata if isinstance(metadata, dict) else {}
     return str(metadata.get("post_meeting_zoom_uuid") or "").strip()
 
