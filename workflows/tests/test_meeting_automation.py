@@ -1692,6 +1692,39 @@ def test_zoom_webhook_processes_target_occurrence_without_reconciliation_polling
     assert client.post_publications[0][1]["meeting_id"] == "123"
 
 
+def test_scheduled_retry_uses_persisted_zoom_occurrence_uuid(monkeypatch):
+    client = ScheduledFakeClient(_published_row())
+    candidate = {
+        **_post_candidate("123"),
+        "metadata": {"post_meeting_zoom_uuid": "/abc+def=="},
+    }
+    client.artifact_result = {
+        "ready": True,
+        "transcript_status": "ready",
+        "transcript": "WEBVTT\nHello world.",
+        "summary_text": "Decisions were made.",
+        "action_items": "Ship it.",
+    }
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+
+    result = asyncio.run(
+        meeting_automation._process_post_meeting_candidate(
+            FakeContext(),
+            client,
+            candidate,
+            slack_users=client.slack_user_data,
+            event="artifact_poll",
+            step_prefix="scheduled:post-meeting",
+        )
+    )
+
+    assert result["status"] == "delivered"
+    assert (
+        "collect_post_meeting_artifacts",
+        {"meeting_id": "/abc+def=="},
+    ) in client.post_operations
+
+
 def test_transcript_only_runs_durable_orbie_summary_and_publishes_fallback(monkeypatch):
     client = ScheduledFakeClient(_published_row())
     client.post_candidates_by_zoom_id["123"] = _post_candidate("123")

@@ -922,7 +922,7 @@ class MeetingSchedulerClient:
             "start_time": recording.get("start_time"),
             "recording_files": public_files,
             "transcript": transcript,
-            "transcript_status": "ready" if transcript is not None else "pending",
+            "transcript_status": "ready" if str(transcript or "").strip() else "pending",
         }
 
     def get_summary(self, meeting_identifier: str) -> dict[str, Any]:
@@ -1161,6 +1161,7 @@ class MeetingSchedulerClient:
         lease_seconds: int = 600,
         force: bool = False,
         owner_token: str | None = None,
+        meeting_uuid: str | None = None,
     ) -> dict[str, Any]:
         """Atomically lease one occurrence so concurrent Zoom events cannot duplicate work."""
 
@@ -1173,6 +1174,9 @@ class MeetingSchedulerClient:
         normalized_owner_token = str(owner_token or "").strip()
         if normalized_owner_token and not re.fullmatch(r"[0-9a-f]{64}", normalized_owner_token):
             raise MeetingSchedulerError("owner_token must be a SHA-256 token")
+        normalized_meeting_uuid = (
+            _require_zoom_meeting_id(meeting_uuid) if meeting_uuid is not None else ""
+        )
         now = dt.datetime.now(dt.UTC)
         lease_until = now + dt.timedelta(seconds=bounded_lease_seconds)
 
@@ -1189,6 +1193,25 @@ class MeetingSchedulerClient:
                     return {"claimed": False, "reason": "not_booked"}
                 metadata = current.get("metadata")
                 metadata = metadata if isinstance(metadata, dict) else {}
+                # The authenticated webhook carries Zoom's exact completed-
+                # occurrence UUID. Persist it before lease arbitration so a
+                # racing scheduler worker and every later retry can use it.
+                if normalized_meeting_uuid and str(
+                    metadata.get("post_meeting_zoom_uuid") or ""
+                ) != normalized_meeting_uuid:
+                    uuid_patch = {"post_meeting_zoom_uuid": normalized_meeting_uuid}
+                    await connection.fetchrow(
+                        """
+                        update orbie_meeting_occurrences
+                        set metadata = metadata || $2::jsonb,
+                            version = version + 1, updated_at = now()
+                        where occurrence_key = $1
+                        returning *
+                        """,
+                        key,
+                        json.dumps(uuid_patch),
+                    )
+                    metadata = {**metadata, **uuid_patch}
                 status = str(metadata.get("post_meeting_status") or "").lower()
                 if status == "delivered" or str(current.get("status") or "").lower() == "completed":
                     return {"claimed": False, "reason": "already_delivered"}

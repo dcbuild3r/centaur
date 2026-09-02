@@ -1259,6 +1259,12 @@ def _candidate_occurrence_key(candidate: dict[str, Any]) -> str:
     ).strip()
 
 
+def _candidate_zoom_uuid(candidate: dict[str, Any]) -> str:
+    metadata = candidate.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return str(metadata.get("post_meeting_zoom_uuid") or "").strip()
+
+
 async def _post_meeting_candidate_by_zoom_id(
     ctx: WorkflowContext,
     client: MeetingOpsClient,
@@ -1377,6 +1383,8 @@ async def _process_post_meeting_candidate(
     # instead of replaying a stale lease token. The durable run-derived owner
     # token lets the same run resume while keeping concurrent runs excluded.
     owner_token = hashlib.sha256(f"{ctx.run_id}:{occurrence_key}".encode()).hexdigest()
+    persisted_meeting_uuid = _candidate_zoom_uuid(candidate)
+    requested_meeting_uuid = str(artifact_meeting_identifier or "").strip()
     claim = await client.scheduling_operation(
         "claim_post_meeting_processing",
         {
@@ -1388,6 +1396,7 @@ async def _process_post_meeting_candidate(
             "force": False,
             "lease_seconds": 3600,
             "owner_token": owner_token,
+            **({"meeting_uuid": requested_meeting_uuid} if requested_meeting_uuid else {}),
         },
     )
     if isinstance(claim, dict) and claim.get("claimed") is False:
@@ -1402,7 +1411,7 @@ async def _process_post_meeting_candidate(
         raise ValueError("post-meeting claim returned no lease token")
 
     try:
-        artifact_identifier = artifact_meeting_identifier or meeting_id
+        artifact_identifier = requested_meeting_uuid or persisted_meeting_uuid or meeting_id
         artifacts = await ctx.step(
             f"{step_prefix}:artifacts:{occurrence_key}",
             lambda: client.scheduling_operation(

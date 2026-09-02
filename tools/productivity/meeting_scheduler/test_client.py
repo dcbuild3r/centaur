@@ -119,6 +119,32 @@ def test_get_recording_fetches_transcript_without_returning_signed_urls(monkeypa
     assert "download_url" not in result["recording_files"][0]
 
 
+def test_get_recording_keeps_empty_transcript_pending(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+    monkeypatch.setattr(
+        scheduler,
+        "_zoom_request",
+        lambda *_args, **_kwargs: {
+            "id": "123",
+            "uuid": "/abc+def==",
+            "recording_files": [
+                {
+                    "file_type": "TRANSCRIPT",
+                    "status": "completed",
+                    "download_url": "https://us02web.zoom.us/rec/download/signed",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(scheduler, "_zoom_download_transcript", lambda _url: "")
+
+    result = scheduler.get_recording("/abc+def==")
+
+    assert result["transcript"] == ""
+    assert result["transcript_status"] == "pending"
+
+
 def test_get_recording_resolves_missing_uuid_from_matching_past_instance(monkeypatch):
     monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
     scheduler = client.MeetingSchedulerClient()
@@ -664,6 +690,51 @@ def test_claim_post_meeting_processing_atomically_leases_occurrence(monkeypatch)
     assert patch["post_meeting_status"] == "processing"
     assert patch["post_meeting_attempt"] == 3
     assert patch["post_meeting_lease_until"] > patch["post_meeting_attempted_at"]
+
+
+def test_claim_post_meeting_processing_persists_authenticated_webhook_uuid(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+    calls = []
+
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Connection:
+        def transaction(self):
+            return Transaction()
+
+        async def fetchrow(self, query, *args):
+            calls.append((query, args))
+            if query.lstrip().startswith("select"):
+                return {
+                    "occurrence_key": "occurrence:1",
+                    "status": "booked",
+                    "metadata": {},
+                }
+            return {
+                "occurrence_key": "occurrence:1",
+                "status": "booked",
+                "metadata": json.loads(args[1]),
+            }
+
+    async def with_connection(operation):
+        return await operation(Connection())
+
+    monkeypatch.setattr(client, "_with_connection", with_connection)
+
+    scheduler.claim_post_meeting_processing(
+        "occurrence:1",
+        event="recording.completed",
+        meeting_uuid="/abc+def==",
+    )
+
+    patch = json.loads(calls[1][1][1])
+    assert patch["post_meeting_zoom_uuid"] == "/abc+def=="
 
 
 @pytest.mark.parametrize(
