@@ -853,6 +853,35 @@ class MeetingSchedulerClient:
         recording = self._zoom_request(
             "GET", f"/meetings/{_zoom_meeting_path_id(normalized_id)}/recordings"
         )
+        meeting_uuid = str(recording.get("uuid") or "").strip()
+        if not meeting_uuid and normalized_id.isdigit():
+            try:
+                instances = self._zoom_request(
+                    "GET",
+                    f"/past_meetings/{_zoom_meeting_path_id(normalized_id)}/instances",
+                )
+            except (MeetingSchedulerError, httpx.HTTPError, ValueError):
+                instances = {}
+            past_meetings = instances.get("meetings")
+            candidates = [
+                item
+                for item in (past_meetings if isinstance(past_meetings, list) else [])
+                if isinstance(item, dict) and str(item.get("uuid") or "").strip()
+            ]
+            recording_start = str(recording.get("start_time") or "").strip()
+            matched = next(
+                (
+                    item
+                    for item in candidates
+                    if recording_start
+                    and str(item.get("start_time") or "").strip() == recording_start
+                ),
+                None,
+            )
+            if matched is None and len(candidates) == 1:
+                matched = candidates[0]
+            if matched is not None:
+                meeting_uuid = str(matched.get("uuid") or "").strip()
         files = recording.get("recording_files")
         public_files: list[dict[str, Any]] = []
         transcript = None
@@ -882,7 +911,7 @@ class MeetingSchedulerClient:
             # A numeric meeting ID can be reused across recurring meetings.
             # Zoom's past-meeting endpoints identify the exact completed
             # occurrence by UUID, which may contain '/', '+', and '='.
-            "meeting_uuid": recording.get("uuid"),
+            "meeting_uuid": meeting_uuid or None,
             "topic": recording.get("topic"),
             "start_time": recording.get("start_time"),
             "recording_files": public_files,

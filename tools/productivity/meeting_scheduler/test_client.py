@@ -119,6 +119,69 @@ def test_get_recording_fetches_transcript_without_returning_signed_urls(monkeypa
     assert "download_url" not in result["recording_files"][0]
 
 
+def test_get_recording_resolves_missing_uuid_from_matching_past_instance(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+    calls = []
+
+    def zoom_request(method, path, **_kwargs):
+        calls.append((method, path))
+        if path == "/meetings/123/recordings":
+            return {
+                "id": "123",
+                "start_time": "2026-09-02T14:19:01Z",
+                "recording_files": [],
+            }
+        if path == "/past_meetings/123/instances":
+            return {
+                "meetings": [
+                    {"uuid": "older-uuid", "start_time": "2026-08-26T14:19:01Z"},
+                    {"uuid": "/abc+def==", "start_time": "2026-09-02T14:19:01Z"},
+                ]
+            }
+        raise AssertionError(f"unexpected Zoom path: {path}")
+
+    monkeypatch.setattr(scheduler, "_zoom_request", zoom_request)
+
+    result = scheduler.get_recording("123")
+
+    assert calls == [
+        ("GET", "/meetings/123/recordings"),
+        ("GET", "/past_meetings/123/instances"),
+    ]
+    assert result["meeting_uuid"] == "/abc+def=="
+
+
+def test_get_recording_keeps_transcript_when_optional_instance_lookup_times_out(
+    monkeypatch,
+):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+
+    def zoom_request(_method, path, **_kwargs):
+        if path == "/meetings/123/recordings":
+            return {
+                "id": "123",
+                "start_time": "2026-09-02T14:19:01Z",
+                "recording_files": [
+                    {
+                        "file_type": "TRANSCRIPT",
+                        "download_url": "https://zoom.us/recording.vtt",
+                    }
+                ],
+            }
+        raise httpx.ReadTimeout("past instances timed out")
+
+    monkeypatch.setattr(scheduler, "_zoom_request", zoom_request)
+    monkeypatch.setattr(scheduler, "_zoom_download_transcript", lambda _url: "spoken text")
+
+    result = scheduler.get_recording("123")
+
+    assert result["meeting_uuid"] is None
+    assert result["transcript_status"] == "ready"
+    assert result["transcript"] == "spoken text"
+
+
 def test_zoom_transcript_download_rejects_non_zoom_hosts():
     with pytest.raises(client.MeetingSchedulerError, match="invalid transcript"):
         client.MeetingSchedulerClient()._zoom_download_transcript(
