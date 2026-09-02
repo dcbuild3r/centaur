@@ -3016,16 +3016,40 @@ async def _scheduled_handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]
         cadence = by_id.get(
             str(candidate.get("cadence_id") or candidate.get("cadenceId") or "")
         )
-        post_meetings.append(
-            await _process_post_meeting_candidate(
-                ctx,
-                client,
-                candidate,
-                slack_users=slack_users,
-                cadence=cadence,
-                step_prefix="scheduled:post-meeting",
+        try:
+            post_meetings.append(
+                await _process_post_meeting_candidate(
+                    ctx,
+                    client,
+                    candidate,
+                    slack_users=slack_users,
+                    cadence=cadence,
+                    step_prefix="scheduled:post-meeting",
+                )
             )
-        )
+        except Exception as error:
+            # Webhook delivery and the reconciliation schedule can race for the
+            # same occurrence. Losing that durable lease means another worker
+            # owns the publication; it must not abort unrelated candidates or
+            # the rest of the scheduled meeting automation run.
+            if not _post_meeting_lease_was_superseded(error):
+                raise
+            occurrence_key = _candidate_occurrence_key(candidate)
+            meeting_id = _candidate_meeting_id(candidate)
+            post_meetings.append(
+                {
+                    "status": "processing",
+                    "reason": "lease_superseded",
+                    "occurrence_key": occurrence_key,
+                    "meeting_id": meeting_id,
+                }
+            )
+            ctx.log(
+                "zoom_post_meeting_lease_superseded",
+                meeting_id=meeting_id,
+                occurrence_key=occurrence_key,
+                zoom_event="artifact_poll",
+            )
     due = [
         cadence
         for cadence in cadences

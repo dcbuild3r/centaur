@@ -2129,6 +2129,50 @@ def test_scheduled_handler_publishes_zoom_artifacts_and_notifies_participant(
     assert result["post_meetings"][0]["status"] == "delivered"
 
 
+def test_scheduled_handler_continues_after_post_meeting_lease_is_superseded(
+    monkeypatch,
+):
+    client = ScheduledFakeClient(_published_row())
+    client.post_candidates = [
+        _post_candidate("stale", "weekly-sync:2026-08-10"),
+        _post_candidate("current", "weekly-sync:2026-08-11"),
+    ]
+    original = client.scheduling_operation
+
+    async def lose_first_candidate_lease(operation, args):
+        if (
+            operation == "record_post_meeting_processing"
+            and args.get("occurrence_key") == "weekly-sync:2026-08-10"
+        ):
+            client.post_operations.append((operation, args))
+            raise RuntimeError(
+                "centaur-tools call failed: post-meeting processing lease was lost"
+            )
+        return await original(operation, args)
+
+    client.scheduling_operation = lose_first_candidate_lease
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+
+    result = asyncio.run(
+        meeting_automation.handler(
+            meeting_automation.Input(
+                now="2026-08-14T07:15:00Z",
+                metadata={"source": "workflow_schedule"},
+            ),
+            FakeContext(),
+        )
+    )
+
+    assert result["post_meetings"][0] == {
+        "status": "processing",
+        "reason": "lease_superseded",
+        "occurrence_key": "weekly-sync:2026-08-10",
+        "meeting_id": "stale",
+    }
+    assert result["post_meetings"][1]["status"] == "delivered"
+    assert client.post_publications[0][1]["meeting_id"] == "current"
+
+
 def test_auto_book_scheduled_handler_books_before_docs_and_uses_actual_time(
     monkeypatch,
 ):
