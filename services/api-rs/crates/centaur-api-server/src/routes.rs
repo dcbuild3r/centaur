@@ -206,6 +206,7 @@ const MEETING_SCHEDULING_OPERATIONS: &[&str] = &[
     "book_meeting",
     "reschedule_meeting",
     "cancel_meeting",
+    "end_meeting",
     "get_or_reconcile_meeting",
 ];
 const MAX_CUSTOM_INSTRUCTIONS_CHARS: usize = 4000;
@@ -3560,6 +3561,21 @@ mod meeting_scheduling_request_tests {
             workflow.input.get("scheduling_operation"),
             Some(&json!("find_availability"))
         );
+    }
+
+    #[test]
+    fn accepts_end_meeting_as_a_scheduling_operation() {
+        let mut request = request();
+        request.operation = "end_meeting".to_owned();
+        request.args = json!({
+            "occurrence_key": "request:1786000000.123456",
+            "organizer_calendar_key": "wf-main",
+            "confirmation_token": "end-v1:confirmed"
+        });
+
+        let request = validate_meeting_scheduling_request(request, true).unwrap();
+
+        assert_eq!(request.operation, "end_meeting");
     }
 
     #[test]

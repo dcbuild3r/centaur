@@ -33,6 +33,13 @@ returns bounded transcript content and `get_summary`
 returns the AI Companion summary after Zoom has finished processing, without
 exposing signed provider URLs.
 
+Because Zoom ownership remains with Orbie, attendees cannot end a live room for
+everyone. The confirmation-gated `end_meeting` operation lets an authorized
+requester ask Orbie to end its own Zoom meeting through the provider status API.
+It only accepts a recorded Orbie occurrence and deliberately keeps the Calendar
+event intact so recording processing and post-meeting follow-up retain their
+source metadata.
+
 The scheduled workflow also polls ended booked occurrences until both Zoom's
 processed summary and cloud-recording transcript are ready. It publishes the
 summary and bounded transcript to the cadence's

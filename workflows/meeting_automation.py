@@ -2415,6 +2415,7 @@ SCHEDULING_OPERATIONS = frozenset(
         "book_meeting",
         "reschedule_meeting",
         "cancel_meeting",
+        "end_meeting",
         "get_or_reconcile_meeting",
     }
 )
@@ -2449,6 +2450,11 @@ SCHEDULING_FIELDS = {
         "confirmation_token",
     },
     "cancel_meeting": {
+        "occurrence_key",
+        "organizer_calendar_key",
+        "confirmation_token",
+    },
+    "end_meeting": {
         "occurrence_key",
         "organizer_calendar_key",
         "confirmation_token",
@@ -2505,7 +2511,7 @@ def _scheduling_args(inp: Input) -> tuple[str, dict[str, Any], str]:
             "confirmation_token",
         )
         args["mode"] = "ad_hoc"
-    elif operation == "cancel_meeting":
+    elif operation in {"cancel_meeting", "end_meeting"}:
         require("occurrence_key", "organizer_calendar_key", "confirmation_token")
     else:
         require("occurrence_key")
@@ -2568,8 +2574,9 @@ def _public_scheduling_result(
         if event_link:
             public["calendarHtmlLink"] = event_link
         return public
-    if operation == "cancel_meeting":
-        return {"status": str(result.get("status") or "cancelled")}
+    if operation in {"cancel_meeting", "end_meeting"}:
+        fallback = "cancelled" if operation == "cancel_meeting" else "ended"
+        return {"status": str(result.get("status") or fallback)}
     return {
         "status": str(result.get("status") or "pending"),
         **{
@@ -2587,6 +2594,7 @@ def _public_scheduling_result(
                 "calendarHtmlLink",
                 "providerState",
                 "cancelConfirmationToken",
+                "endConfirmationToken",
             )
             if key in result
         },
@@ -2606,6 +2614,8 @@ def _scheduling_message(operation: str, result: dict[str, Any]) -> str:
         return "\n".join(lines)
     if operation == "cancel_meeting":
         return "The meeting was cancelled in Calendar and Zoom."
+    if operation == "end_meeting":
+        return "The Zoom meeting was ended for everyone."
     if operation == "get_or_reconcile_meeting":
         return f"Meeting state: {result.get('status', 'pending')}."
     return (
@@ -2778,6 +2788,7 @@ async def _scheduling_handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any
     if operation in {
         "reschedule_meeting",
         "cancel_meeting",
+        "end_meeting",
         "get_or_reconcile_meeting",
     }:
         preflight_result = await ctx.step(

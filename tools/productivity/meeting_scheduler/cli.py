@@ -36,6 +36,11 @@ def cancel(payload: str = typer.Argument(..., help="JSON cancellation request"))
     _print(_client().cancel_meeting(**json.loads(payload)))
 
 
+@app.command("end")
+def end(payload: str = typer.Argument(..., help="JSON live meeting end request")) -> None:
+    _print(_client().end_meeting(**json.loads(payload)))
+
+
 @app.command("get")
 def get(payload: str = typer.Argument(..., help="JSON reconciliation request")) -> None:
     _print(_client().get_or_reconcile_meeting(**json.loads(payload)))

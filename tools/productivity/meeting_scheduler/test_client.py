@@ -984,6 +984,70 @@ def test_ad_hoc_reschedule_and_cancel_require_confirmation(monkeypatch):
         scheduler.reschedule_meeting("request:1", "2026-08-17T10:00:00Z", 1, "wf", mode="ad_hoc")
     with pytest.raises(client.MeetingSchedulerError, match="explicit confirmation"):
         scheduler.cancel_meeting("request:1", "wf")
+    with pytest.raises(client.MeetingSchedulerError, match="explicit confirmation"):
+        scheduler.end_meeting("request:1", "wf")
+
+
+def test_end_meeting_uses_orbie_zoom_owner_and_keeps_calendar_event(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+    provider_calls = []
+    database_updates = []
+
+    class Connection:
+        async def fetchrow(self, _query, _key):
+            return {
+                "occurrence_key": "request:1",
+                "status": "booked",
+                "organizer_calendar_key": "wf",
+                "zoom_meeting_id": "93648882154",
+                "calendar_event_id": "event-must-remain",
+                "cadence_id": None,
+            }
+
+        async def execute(self, query, *args):
+            database_updates.append((query, args))
+
+    async def lock(_key, operation):
+        return await operation(Connection())
+
+    monkeypatch.setattr(client, "_with_occurrence_lock", lock)
+    monkeypatch.setattr(
+        scheduler,
+        "_zoom_request",
+        lambda method, path, **kwargs: provider_calls.append(
+            (method, path, kwargs)
+        )
+        or {},
+    )
+    monkeypatch.setattr(
+        client,
+        "get_calendar_service",
+        lambda: pytest.fail("ending a live meeting must not delete its Calendar event"),
+    )
+
+    result = scheduler.end_meeting(
+        "request:1",
+        "wf",
+        client._end_confirmation_token(
+            occurrence_key="request:1", organizer_calendar_key="wf"
+        ),
+    )
+
+    assert result == {
+        "status": "ended",
+        "occurrenceKey": "request:1",
+        "cadence_id": None,
+    }
+    assert provider_calls == [
+        (
+            "PUT",
+            "/meetings/93648882154/status",
+            {"payload": {"action": "end"}, "occurrence_key": "request:1"},
+        )
+    ]
+    assert len(database_updates) == 1
+    assert "zoom_ended_by_orbie_at" in database_updates[0][0]
 
 
 def test_cancel_meeting_locks_row_and_does_not_overwrite_completed(monkeypatch):
@@ -1730,6 +1794,7 @@ def test_public_scheduler_methods_have_explicit_tool_signatures():
     assert "**kwargs" not in str(inspect.signature(client.book_meeting))
     assert "**kwargs" not in str(inspect.signature(client.reschedule_meeting))
     assert "**kwargs" not in str(inspect.signature(client.cancel_meeting))
+    assert "**kwargs" not in str(inspect.signature(client.end_meeting))
 
 
 def _zoom_transport(monkeypatch, status_code, *, json_body=None, text=None, headers=None):

@@ -382,6 +382,11 @@ def _cancel_confirmation_token(*, occurrence_key: str, organizer_calendar_key: s
     return f"cancel-v1:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
 
 
+def _end_confirmation_token(*, occurrence_key: str, organizer_calendar_key: str) -> str:
+    payload = f"end-v1:{organizer_calendar_key}:{occurrence_key}"
+    return f"end-v1:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
+
+
 def _matches_confirmation(actual: str | None, expected: str) -> bool:
     return bool(actual) and secrets.compare_digest(str(actual).strip(), expected)
 
@@ -2280,6 +2285,95 @@ class MeetingSchedulerClient:
 
         return await _with_occurrence_lock(key, operation)
 
+    def end_meeting(
+        self,
+        occurrence_key: str,
+        organizer_calendar_key: str,
+        confirmation_token: str | None = None,
+    ) -> dict[str, Any]:
+        """End an Orbie-owned live Zoom meeting without deleting its event."""
+
+        _require_enabled()
+        key = _require_occurrence_key(occurrence_key)
+        if not str(confirmation_token or "").strip():
+            raise MeetingSchedulerError("ending a meeting requires explicit confirmation")
+        expected_confirmation = _end_confirmation_token(
+            occurrence_key=key,
+            organizer_calendar_key=organizer_calendar_key,
+        )
+        if not _matches_confirmation(confirmation_token, expected_confirmation):
+            raise MeetingSchedulerError("confirmation does not match the requested meeting")
+        result = asyncio.run(
+            self._end_meeting_locked(key=key, organizer_calendar_key=organizer_calendar_key)
+        )
+        if isinstance(result, _OperationFailure):
+            error = result.error
+            if isinstance(error, MeetingSchedulerError):
+                raise error
+            raise MeetingSchedulerError("Zoom meeting end failed") from error
+        return result
+
+    async def _end_meeting_locked(
+        self, *, key: str, organizer_calendar_key: str
+    ) -> dict[str, Any] | _OperationFailure:
+        async def operation(connection: asyncpg.Connection) -> dict[str, Any] | _OperationFailure:
+            state = _serialize_row(
+                await connection.fetchrow(
+                    """
+                    select * from orbie_meeting_occurrences
+                    where occurrence_key = $1
+                    for update
+                    """,
+                    key,
+                )
+            )
+            if not state:
+                return {"status": "not_found", "occurrenceKey": key}
+            if str(state.get("organizer_calendar_key") or "") != organizer_calendar_key:
+                raise MeetingSchedulerError("organizer calendar does not match occurrence state")
+            if state.get("status") != "booked":
+                return {
+                    "status": state.get("status"),
+                    "occurrenceKey": key,
+                    "cadence_id": state.get("cadence_id"),
+                }
+            meeting_id = str(state.get("zoom_meeting_id") or "").strip()
+            if not meeting_id:
+                raise MeetingSchedulerError("booked meeting has no Zoom meeting ID")
+            try:
+                self._zoom_request(
+                    "PUT",
+                    f"/meetings/{meeting_id}/status",
+                    payload={"action": "end"},
+                    occurrence_key=key,
+                )
+                await connection.execute(
+                    """
+                    update orbie_meeting_occurrences
+                    set metadata = metadata || jsonb_build_object(
+                            'zoom_ended_by_orbie_at', now()::text
+                        ),
+                        last_error = '',
+                        updated_at = now()
+                    where occurrence_key = $1
+                    """,
+                    key,
+                )
+                return {
+                    "status": "ended",
+                    "occurrenceKey": key,
+                    "cadence_id": state.get("cadence_id"),
+                }
+            except Exception as error:
+                await connection.execute(
+                    "update orbie_meeting_occurrences set last_error = $2, updated_at = now() where occurrence_key = $1",
+                    key,
+                    str(error)[:2000],
+                )
+                return _OperationFailure(error)
+
+        return await _with_occurrence_lock(key, operation)
+
     def get_or_reconcile_meeting(self, occurrence_key: str) -> dict[str, Any]:
         _require_enabled()
         key = _require_occurrence_key(occurrence_key)
@@ -2432,6 +2526,10 @@ class MeetingSchedulerClient:
                 occurrence_key=key,
                 organizer_calendar_key=str(state.get("organizer_calendar_key") or ""),
             )
+            result["endConfirmationToken"] = _end_confirmation_token(
+                occurrence_key=key,
+                organizer_calendar_key=str(state.get("organizer_calendar_key") or ""),
+            )
             return result
 
         return asyncio.run(_with_occurrence_lock(key, reconcile))
@@ -2515,6 +2613,14 @@ def cancel_meeting(
     confirmation_token: str | None = None,
 ) -> dict[str, Any]:
     return _client().cancel_meeting(occurrence_key, organizer_calendar_key, confirmation_token)
+
+
+def end_meeting(
+    occurrence_key: str,
+    organizer_calendar_key: str,
+    confirmation_token: str | None = None,
+) -> dict[str, Any]:
+    return _client().end_meeting(occurrence_key, organizer_calendar_key, confirmation_token)
 
 
 def get_or_reconcile_meeting(occurrence_key: str) -> dict[str, Any]:

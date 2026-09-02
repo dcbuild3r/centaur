@@ -628,6 +628,31 @@ def test_cancel_clears_the_existing_notion_cadence_booking(monkeypatch):
     ]
 
 
+def test_end_meeting_is_authorized_but_keeps_the_cadence_booking(monkeypatch):
+    client = SchedulingFakeClient({"status": "ended", "cadence_id": "weekly-sync"})
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+    context = FakeContext()
+
+    result = asyncio.run(
+        meeting_automation.handler(
+            _input(
+                scheduling_operation="end_meeting",
+                scheduling_args={
+                    "occurrence_key": "weekly-sync:2026-08-24",
+                    "organizer_calendar_key": "wf-main",
+                    "confirmation_token": "confirmed",
+                },
+            ),
+            context,
+        )
+    )
+
+    assert result["result"] == {"status": "ended"}
+    assert result["cadenceUpdate"] is None
+    assert context.posts == [("D123456", "The Zoom meeting was ended for everyone.")]
+    assert client.booking_updates == []
+
+
 def test_cadence_meeting_mutation_requires_an_authorized_requester(monkeypatch):
     client = SchedulingFakeClient(
         {
