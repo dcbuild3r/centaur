@@ -346,6 +346,19 @@ def _require_zoom_meeting_id(value: Any) -> str:
     return meeting_id
 
 
+def _zoom_meeting_path_id(value: Any) -> str:
+    """Encode a Zoom meeting ID or completed-occurrence UUID for a URL path."""
+
+    meeting_id = _require_zoom_meeting_id(value)
+    encoded = quote(meeting_id, safe="")
+    # Zoom requires a second encoding pass when a completed occurrence UUID
+    # starts with '/' or contains '//'. Without it the router decodes the slash
+    # before resolving the past meeting and responds with code 300.
+    if meeting_id.startswith("/") or "//" in meeting_id:
+        encoded = quote(encoded, safe="")
+    return encoded
+
+
 def _require_post_meeting_text(value: Any, *, field: str, limit: int) -> str:
     text = str(value or "").strip()
     if not text or len(text) > limit or any(ord(char) < 32 for char in text):
@@ -838,7 +851,7 @@ class MeetingSchedulerClient:
         _require_enabled()
         normalized_id = _require_zoom_meeting_id(meeting_id)
         recording = self._zoom_request(
-            "GET", f"/meetings/{quote(normalized_id, safe='')}/recordings"
+            "GET", f"/meetings/{_zoom_meeting_path_id(normalized_id)}/recordings"
         )
         files = recording.get("recording_files")
         public_files: list[dict[str, Any]] = []
@@ -866,6 +879,10 @@ class MeetingSchedulerClient:
                     transcript = self._zoom_download_transcript(download_url)
         return {
             "meeting_id": recording.get("id") or normalized_id,
+            # A numeric meeting ID can be reused across recurring meetings.
+            # Zoom's past-meeting endpoints identify the exact completed
+            # occurrence by UUID, which may contain '/', '+', and '='.
+            "meeting_uuid": recording.get("uuid"),
             "topic": recording.get("topic"),
             "start_time": recording.get("start_time"),
             "recording_files": public_files,
@@ -873,13 +890,14 @@ class MeetingSchedulerClient:
             "transcript_status": "ready" if transcript is not None else "pending",
         }
 
-    def get_summary(self, meeting_id: str) -> dict[str, Any]:
+    def get_summary(self, meeting_identifier: str) -> dict[str, Any]:
         """Return Zoom AI Companion's processed meeting summary, when available."""
 
         _require_enabled()
-        normalized_id = _require_zoom_meeting_id(meeting_id)
+        normalized_identifier = _require_zoom_meeting_id(meeting_identifier)
         summary = self._zoom_request(
-            "GET", f"/meetings/{quote(normalized_id, safe='')}/meeting_summary"
+            "GET",
+            f"/meetings/{_zoom_meeting_path_id(normalized_identifier)}/meeting_summary",
         )
         # Keep the provider payload because Zoom may add summary sections, but
         # never expose token-bearing URLs or provider-internal download links.
@@ -1256,7 +1274,8 @@ class MeetingSchedulerClient:
         except MeetingSchedulerError as error:
             errors.append(str(error))
         try:
-            summary = self.get_summary(meeting_id)
+            summary_identifier = str(recording.get("meeting_uuid") or meeting_id).strip()
+            summary = self.get_summary(summary_identifier)
         except MeetingSchedulerError as error:
             errors.append(str(error))
         summary_text = str(summary.get("meeting_summary") or summary.get("summary") or "").strip()

@@ -97,6 +97,7 @@ def test_get_recording_fetches_transcript_without_returning_signed_urls(monkeypa
         "_zoom_request",
         lambda *_args, **_kwargs: {
             "id": "123",
+            "uuid": "/abc+def==",
             "topic": "Planning",
             "recording_files": [
                 {
@@ -114,6 +115,7 @@ def test_get_recording_fetches_transcript_without_returning_signed_urls(monkeypa
 
     assert result["transcript"] == "WEBVTT\n"
     assert result["transcript_status"] == "ready"
+    assert result["meeting_uuid"] == "/abc+def=="
     assert "download_url" not in result["recording_files"][0]
 
 
@@ -150,6 +152,21 @@ def test_get_summary_uses_zoom_summary_endpoint_and_strips_signed_urls(monkeypat
     assert "share_url" not in result
 
 
+def test_get_summary_double_encodes_completed_uuid_that_starts_with_slash(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+    calls = []
+    monkeypatch.setattr(
+        scheduler,
+        "_zoom_request",
+        lambda method, path, **_kwargs: calls.append((method, path)) or {},
+    )
+
+    scheduler.get_summary("/abc+def==")
+
+    assert calls == [("GET", "/meetings/%252Fabc%252Bdef%253D%253D/meeting_summary")]
+
+
 def test_collect_post_meeting_artifacts_is_ready_with_transcript_and_summary(monkeypatch):
     monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
     scheduler = client.MeetingSchedulerClient()
@@ -175,6 +192,37 @@ def test_collect_post_meeting_artifacts_is_ready_with_transcript_and_summary(mon
     assert result["summary_text"] == "Decisions were made."
     assert result["summary_source"] == "zoom"
     assert result["processing_errors"] == []
+
+
+def test_collect_post_meeting_artifacts_uses_recording_uuid_for_past_meeting_summary(
+    monkeypatch,
+):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+    summary_ids = []
+    monkeypatch.setattr(
+        scheduler,
+        "get_recording",
+        lambda _meeting_id: {
+            "meeting_id": "123",
+            "meeting_uuid": "/abc+def==",
+            "transcript_status": "ready",
+            "transcript": "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nHello world.",
+            "recording_files": [],
+        },
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "get_summary",
+        lambda meeting_id: (
+            summary_ids.append(meeting_id) or {"meeting_summary": "Decisions were made."}
+        ),
+    )
+
+    result = scheduler.collect_post_meeting_artifacts("123")
+
+    assert summary_ids == ["/abc+def=="]
+    assert result["summary_text"] == "Decisions were made."
 
 
 def test_collect_post_meeting_artifacts_is_ready_without_zoom_summary(monkeypatch):
