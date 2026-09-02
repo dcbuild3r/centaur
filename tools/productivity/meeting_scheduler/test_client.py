@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 
+import httpx
 import pytest
 
 from meeting_scheduler import cli, client
@@ -1709,3 +1710,201 @@ def test_public_scheduler_methods_have_explicit_tool_signatures():
     assert "**kwargs" not in str(inspect.signature(client.book_meeting))
     assert "**kwargs" not in str(inspect.signature(client.reschedule_meeting))
     assert "**kwargs" not in str(inspect.signature(client.cancel_meeting))
+
+
+def _zoom_transport(monkeypatch, status_code, *, json_body=None, text=None, headers=None):
+    """Route _zoom_request through a real httpx client with a canned response."""
+
+    def handler(request):
+        if json_body is not None:
+            return httpx.Response(status_code, json=json_body, headers=headers)
+        return httpx.Response(status_code, text=text or "", headers=headers)
+
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        client.httpx,
+        "Client",
+        lambda *args, **kwargs: real_client(*args, transport=transport, **kwargs),
+    )
+
+
+def test_zoom_request_error_keeps_bounded_code_and_message(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+    _zoom_transport(
+        monkeypatch,
+        400,
+        json_body={"code": 300, "message": "Invalid tracking field: orbie_occurrence_key."},
+    )
+
+    with pytest.raises(client.MeetingSchedulerError) as raised:
+        scheduler._zoom_request("POST", "/users/me/meetings", payload={"topic": "x"})
+
+    message = str(raised.value)
+    assert message.startswith("Zoom request failed with HTTP 400")
+    assert "zoom code 300" in message
+    assert "Invalid tracking field: orbie_occurrence_key." in message
+
+
+def test_zoom_request_error_includes_field_level_validation_errors(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+    _zoom_transport(
+        monkeypatch,
+        400,
+        json_body={
+            "code": 300,
+            "message": "Validation Failed.",
+            "errors": [
+                {"field": "settings.auto_recording", "message": "Invalid field."},
+                {"field": "tracking_fields", "message": "Tracking field is not configured."},
+            ],
+        },
+    )
+
+    with pytest.raises(client.MeetingSchedulerError) as raised:
+        scheduler._zoom_request("POST", "/users/me/meetings", payload={})
+
+    message = str(raised.value)
+    assert "settings.auto_recording: Invalid field." in message
+    assert "tracking_fields: Tracking field is not configured." in message
+
+
+def test_zoom_request_error_redacts_urls_tokens_emails_and_control_chars(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+    secret_token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJvcmJpZSJ9.abcdefghijklmnopqrstuvwxyz0123456789"
+    _zoom_transport(
+        monkeypatch,
+        401,
+        json_body={
+            "code": 124,
+            "message": (
+                "Invalid access token Bearer "
+                + secret_token
+                + " for host@world.org\r\nsee https://api.zoom.us/v2/users/me?token=abc"
+            ),
+        },
+        headers={"x-zm-trackingid": "trace-secret", "www-authenticate": "Bearer realm=x"},
+    )
+
+    with pytest.raises(client.MeetingSchedulerError) as raised:
+        scheduler._zoom_request("GET", "/users/me/meetings")
+
+    message = str(raised.value)
+    assert message.startswith("Zoom request failed with HTTP 401")
+    assert "zoom code 124" in message
+    assert "Invalid access token" in message
+    assert secret_token not in message
+    assert "eyJ" not in message
+    assert "host@world.org" not in message
+    assert "api.zoom.us" not in message
+    assert "token=abc" not in message
+    assert "trace-secret" not in message
+    assert "realm=" not in message
+    assert not any(ord(char) < 32 for char in message)
+
+
+def test_zoom_request_error_bounds_message_length(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+    _zoom_transport(
+        monkeypatch,
+        400,
+        json_body={
+            "code": 300,
+            "message": "x" * 5000,
+            "errors": [{"field": "f" * 500, "message": "m" * 500} for _ in range(50)],
+        },
+    )
+
+    with pytest.raises(client.MeetingSchedulerError) as raised:
+        scheduler._zoom_request("POST", "/users/me/meetings", payload={})
+
+    assert len(str(raised.value)) <= client.MAX_ZOOM_ERROR_DETAIL_LENGTH + 64
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"text": "<html><body>Bad Gateway from https://api.zoom.us/secret</body></html>"},
+        {"json_body": ["not", "a", "dict"]},
+        {"json_body": {"unexpected": "shape", "token": "eyJabc"}},
+        {"text": ""},
+    ],
+)
+def test_zoom_request_error_without_recognized_body_leaks_nothing(monkeypatch, kwargs):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+    _zoom_transport(monkeypatch, 400, **kwargs)
+
+    with pytest.raises(client.MeetingSchedulerError) as raised:
+        scheduler._zoom_request("POST", "/users/me/meetings", payload={})
+
+    assert str(raised.value) == "Zoom request failed with HTTP 400"
+
+
+def test_zoom_request_delete_404_still_returns_empty(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    scheduler = client.MeetingSchedulerClient()
+    _zoom_transport(
+        monkeypatch, 404, json_body={"code": 3001, "message": "Meeting does not exist."}
+    )
+
+    assert scheduler._zoom_request("DELETE", "/meetings/1") == {}
+
+
+def test_booking_persists_sanitized_zoom_reason_in_last_error(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    monkeypatch.setenv("MEETING_ZOOM_HOST_USER_ID", "orbie@world.org")
+    scheduler = client.MeetingSchedulerClient()
+    executed = []
+
+    class Connection:
+        async def execute(self, query, *args):
+            executed.append((query, args))
+
+    async def claim(_connection, **_kwargs):
+        return {"status": "pending", "organizer_calendar_key": "wf"}, True
+
+    async def lock(_key, operation):
+        return await operation(Connection())
+
+    monkeypatch.setattr(scheduler, "_claim_occurrence_row", claim)
+    monkeypatch.setattr(scheduler, "_zoom_find_by_occurrence", lambda _key: None)
+    monkeypatch.setattr(client, "_with_occurrence_lock", lock)
+    monkeypatch.setattr(
+        client, "get_calendar_service", lambda: pytest.fail("calendar must not be touched")
+    )
+    _zoom_transport(
+        monkeypatch,
+        400,
+        json_body={"code": 300, "message": "Invalid tracking field: see https://zoom.us/x"},
+    )
+
+    result = asyncio.run(
+        scheduler._book_meeting_locked(
+            key="request:1",
+            cadence_id=None,
+            request_id="request:1",
+            title="Planning",
+            start_at=client._parse_rfc3339("2099-08-17T10:00:00Z", field="start"),
+            duration=30,
+            time_zone="UTC",
+            organizer_calendar_key="wf",
+            organizer_id="organizer@world.org",
+            attendees=["person@world.org"],
+            allow_parameter_update=False,
+            check_slot_free=False,
+        )
+    )
+
+    assert isinstance(result, client._OperationFailure)
+    blocked = [item for item in executed if "status = 'blocked'" in item[0]]
+    assert len(blocked) == 1
+    stored_error = blocked[0][1][1]
+    assert stored_error.startswith("Zoom request failed with HTTP 400")
+    assert "zoom code 300" in stored_error
+    assert "Invalid tracking field" in stored_error
+    assert "zoom.us" not in stored_error

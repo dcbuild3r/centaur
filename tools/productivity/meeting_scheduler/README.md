@@ -18,7 +18,11 @@ each rotated refresh token; the scheduler receives only the current bearer.
 All meetings are owned by the configured Orbie Zoom user. Orbie never uses
 `schedule_for` or another user's identity to create a room. Zoom requests use
 the OAuth identity-bound `/users/me` endpoint, so the authorizing Orbie account
-is always the owner. Every created room
+is always the owner. When Zoom rejects a request, the raised error keeps the
+HTTP status and a bounded, redacted copy of Zoom's `code`, `message`, and
+field-level `errors`; headers, URLs, tokens, and email addresses are never
+retained. Booking failures persist that reason in the occurrence's
+`last_error`. Every created room
 requests cloud recording; `get_recording`
 returns bounded transcript content and `get_summary`
 returns the AI Companion summary after Zoom has finished processing, without

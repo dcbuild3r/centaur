@@ -49,10 +49,84 @@ MAX_MEETING_ID_LENGTH = 128
 MAX_POST_MEETING_ERROR_LENGTH = 2000
 MAX_POST_MEETING_STATE_LENGTH = 64
 MAX_POST_MEETING_EVENT_LENGTH = 128
+MAX_ZOOM_ERROR_DETAIL_LENGTH = 400
+MAX_ZOOM_ERROR_FIELD_ERRORS = 5
+# Zoom error bodies are {"code": int, "message": str, "errors": [{"field", "message"}]}.
+# Only those fields are retained, after removing anything that could carry a
+# credential, a signed URL, or an identity: URLs and zoom.us hosts, bearer
+# tokens, JWT-shaped or long opaque tokens, email addresses, and control
+# characters. Headers and unrecognized body content are never retained.
+_ZOOM_ERROR_REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"(?i)\b(?:https?|wss?)://[^\s<>\"']+"), "[url]"),
+    (re.compile(r"(?i)\b[\w.-]*zoom\.us[^\s<>\"']*"), "[url]"),
+    (re.compile(r"(?i)\bbearer\s+[^\s]+"), "[token]"),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]+)*"), "[token]"),
+    (re.compile(r"\b[A-Za-z0-9_-]{32,}\b"), "[token]"),
+    (re.compile(r"[^\s@<>\"']+@[^\s@<>\"']+\.[^\s@<>\"']+"), "[email]"),
+    (re.compile(r"[\x00-\x1f\x7f]+"), " "),
+)
 
 
 class MeetingSchedulerError(RuntimeError):
     """Raised for fail-closed scheduling or provider errors."""
+
+
+def _redact_zoom_error_text(value: str, limit: int) -> str:
+    """Bound one Zoom error string and strip anything secret-shaped."""
+
+    text = value
+    for pattern, replacement in _ZOOM_ERROR_REDACTIONS:
+        text = pattern.sub(replacement, text)
+    text = " ".join(text.split())
+    if len(text) > limit:
+        text = text[: limit - 1].rstrip() + "…"
+    return text
+
+
+def _zoom_error_detail(response: httpx.Response) -> str:
+    """Return a bounded, redacted summary of a Zoom error body.
+
+    The result distinguishes scope, host identity, account policy, and payload
+    validation failures for durable occurrence state and operator logs while
+    never retaining headers, URLs, tokens, or arbitrary response content.
+    """
+
+    if not response.content:
+        return ""
+    try:
+        body = response.json()
+    except ValueError:
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    parts: list[str] = []
+    code = body.get("code")
+    if isinstance(code, (int, str)) and not isinstance(code, bool):
+        code_text = _redact_zoom_error_text(str(code), 32)
+        if code_text:
+            parts.append(f"zoom code {code_text}")
+    message = body.get("message")
+    if isinstance(message, str):
+        message_text = _redact_zoom_error_text(message, MAX_ZOOM_ERROR_DETAIL_LENGTH)
+        if message_text:
+            parts.append(message_text)
+    detail = ": ".join(parts)
+    errors = body.get("errors")
+    field_parts: list[str] = []
+    for item in (errors if isinstance(errors, list) else [])[:MAX_ZOOM_ERROR_FIELD_ERRORS]:
+        if not isinstance(item, dict):
+            continue
+        field = _redact_zoom_error_text(str(item.get("field") or ""), 64)
+        field_message = _redact_zoom_error_text(str(item.get("message") or ""), 120)
+        if field and field_message:
+            field_parts.append(f"{field}: {field_message}")
+        elif field or field_message:
+            field_parts.append(field or field_message)
+    if field_parts:
+        detail = f"{detail} [{'; '.join(field_parts)}]".strip()
+    if len(detail) > MAX_ZOOM_ERROR_DETAIL_LENGTH:
+        detail = detail[: MAX_ZOOM_ERROR_DETAIL_LENGTH - 1].rstrip() + "…"
+    return detail
 
 
 @dataclass(frozen=True)
@@ -697,7 +771,11 @@ class MeetingSchedulerClient:
         if response.status_code == 404 and method.upper() == "DELETE":
             return {}
         if response.status_code >= 400:
-            raise MeetingSchedulerError(f"Zoom request failed with HTTP {response.status_code}")
+            failure = f"Zoom request failed with HTTP {response.status_code}"
+            detail = _zoom_error_detail(response)
+            if detail:
+                failure = f"{failure} ({detail})"
+            raise MeetingSchedulerError(failure)
         if not response.content:
             return {}
         body = response.json()

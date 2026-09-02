@@ -63,6 +63,14 @@ If any provider, Docs, or Slack delivery step fails, the workflow leaves
 the existing Calendar/Zoom pair and the occurrence's actual time; the cadence
 anchor is not moved.
 
+A failed provider call marks the occurrence `blocked` and stores the reason in
+`orbie_meeting_occurrences.last_error`. For Zoom, the reason keeps the HTTP
+status plus a bounded copy of Zoom's own `code`, `message`, and field-level
+validation errors, so operators can distinguish a missing OAuth scope, a host
+identity problem, an account policy, or a rejected payload field. Response
+headers, URLs, tokens, email addresses, and any other body content are never
+retained.
+
 ## Post-meeting publication
 
 The scheduled handler polls ended booked meetings until Zoom exposes both the
