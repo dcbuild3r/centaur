@@ -902,6 +902,7 @@ def test_claim_post_meeting_processing_resumes_same_durable_owner(monkeypatch):
     assert result["resumed"] is True
     assert result["lease_token"] == owner_token
     assert result["attempt"] == 3
+    assert result["occurrence"]["metadata"]["post_meeting_status"] == "publishing_notion"
     assert len(calls) == 2
 
 

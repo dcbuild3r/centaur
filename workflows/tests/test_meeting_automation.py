@@ -1746,10 +1746,11 @@ def test_retry_uses_uuid_returned_by_claim_when_candidate_snapshot_is_stale(monk
 
     client.scheduling_operation = claim_with_fresh_occurrence
     monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+    context = FakeContext()
 
     result = asyncio.run(
         meeting_automation._process_post_meeting_candidate(
-            FakeContext(),
+            context,
             client,
             candidate,
             slack_users=client.slack_user_data,
@@ -1763,6 +1764,11 @@ def test_retry_uses_uuid_returned_by_claim_when_candidate_snapshot_is_stale(monk
         "collect_post_meeting_artifacts",
         {"meeting_id": "/fresh+uuid=="},
     ) in client.post_operations
+    identifier_fingerprint = hashlib.sha256(b"/fresh+uuid==").hexdigest()[:16]
+    assert (
+        f"scheduled:post-meeting:artifacts:weekly-sync:2026-08-10:{identifier_fingerprint}"
+        in context.step_names
+    )
 
 
 def test_transcript_only_runs_durable_orbie_summary_and_publishes_fallback(monkeypatch):

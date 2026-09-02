@@ -1300,7 +1300,7 @@ class MeetingSchedulerClient:
                                 "post_meeting_updated_at": _rfc3339(now),
                                 "post_meeting_lease_until": _rfc3339(lease_until),
                             }
-                            await connection.fetchrow(
+                            resumed_row = await connection.fetchrow(
                                 """
                                 update orbie_meeting_occurrences
                                 set metadata = metadata || $2::jsonb,
@@ -1314,6 +1314,7 @@ class MeetingSchedulerClient:
                             return {
                                 "claimed": True,
                                 "occurrence_key": key,
+                                "occurrence": _serialize_row(resumed_row),
                                 "lease_token": active_token,
                                 "lease_until": patch["post_meeting_lease_until"],
                                 "attempt": max(

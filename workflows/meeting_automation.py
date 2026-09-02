@@ -1426,8 +1426,11 @@ async def _process_post_meeting_candidate(
             or persisted_meeting_uuid
             or meeting_id
         )
+        artifact_identifier_fingerprint = hashlib.sha256(
+            artifact_identifier.encode()
+        ).hexdigest()[:16]
         artifacts = await ctx.step(
-            f"{step_prefix}:artifacts:{occurrence_key}",
+            f"{step_prefix}:artifacts:{occurrence_key}:{artifact_identifier_fingerprint}",
             lambda: client.scheduling_operation(
                 "collect_post_meeting_artifacts", {"meeting_id": artifact_identifier}
             ),
