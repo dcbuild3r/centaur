@@ -34,7 +34,7 @@ def test_zoom_create_defaults_to_orbie_join_anytime_and_cloud_recording(monkeypa
     )
 
     payload = calls[0][2]["payload"]
-    assert calls[0][1] == "/users/orbie@world.org/meetings"
+    assert calls[0][1] == "/users/me/meetings"
     assert payload["settings"] == {
         "auto_recording": "cloud",
         "join_before_host": True,

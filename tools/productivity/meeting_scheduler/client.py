@@ -735,7 +735,7 @@ class MeetingSchedulerClient:
         }
         return self._zoom_request(
             "POST",
-            f"/users/{host}/meetings",
+            "/users/me/meetings",
             occurrence_key=occurrence_key,
             payload=payload,
         )
@@ -1307,15 +1307,14 @@ class MeetingSchedulerClient:
         )
 
     def _zoom_find_by_occurrence(self, key: str) -> dict[str, Any] | None:
-        host = _config_value(ZOOM_HOST_USER_ID).strip()
-        if not host:
+        if not _config_value(ZOOM_HOST_USER_ID).strip():
             return None
         next_page_token = ""
         # The occurrence key is the retry identity. Search all bounded pages so
         # an older occurrence cannot be missed and recreated after a partial
         # failure when the host has more than one page of scheduled meetings.
         for _ in range(20):
-            query = f"/users/{quote(host, safe='')}/meetings?type=scheduled&page_size=300"
+            query = "/users/me/meetings?type=scheduled&page_size=300"
             if next_page_token:
                 query += f"&next_page_token={quote(next_page_token, safe='')}"
             try:

@@ -16,7 +16,9 @@ Production Zoom access is a `brokered_token` minted from the dedicated
 User-managed General OAuth app. Centaur Console serializes refreshes and stores
 each rotated refresh token; the scheduler receives only the current bearer.
 All meetings are owned by the configured Orbie Zoom user. Orbie never uses
-`schedule_for` or another user's identity to create a room. Every created room
+`schedule_for` or another user's identity to create a room. Zoom requests use
+the OAuth identity-bound `/users/me` endpoint, so the authorizing Orbie account
+is always the owner. Every created room
 requests cloud recording; `get_recording`
 returns bounded transcript content and `get_summary`
 returns the AI Companion summary after Zoom has finished processing, without
