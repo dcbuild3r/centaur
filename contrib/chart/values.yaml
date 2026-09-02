@@ -489,10 +489,8 @@ apiRs:
     organizerCalendars: "{}"
     # Managed Orbie calendar alias used for all user-requested meetings.
     manualOrganizerCalendarKey: ""
+    # Licensed Orbie Zoom user that owns every room and its recordings.
     zoomHostUserId: ""
-    # Optional organizer-calendar-key -> Zoom user mapping for automated
-    # cadences. Manual rooms use the verified requester identity directly.
-    zoomScheduleForUsers: "{}"
   # Scheduled ETL workflow configuration. The chart renders these into api-rs
   # env so workflow discovery sees the right schedules, then derives the
   # workflow-host passthrough list from the same non-secret config.

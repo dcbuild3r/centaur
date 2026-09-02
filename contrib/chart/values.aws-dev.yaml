@@ -30,7 +30,6 @@ apiRs:
     organizerCalendars: '{"orbie":"orbie-automation@world.org"}'
     manualOrganizerCalendarKey: orbie
     zoomHostUserId: orbie-automation@world.org
-    zoomScheduleForUsers: "{}"
   extraEnv:
     MEETING_OPS_SCHEDULER_ENABLED: "true"
     MEETING_OPS_SCHEDULER_CRON: "*/15 * * * *"

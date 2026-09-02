@@ -383,13 +383,7 @@
               ]
             },
             "manualOrganizerCalendarKey": { "type": "string" },
-            "zoomHostUserId": { "type": "string" },
-            "zoomScheduleForUsers": {
-              "anyOf": [
-                { "type": "string" },
-                { "type": "object", "additionalProperties": { "type": "string" } }
-              ]
-            }
+            "zoomHostUserId": { "type": "string" }
           }
         },
         "etl": {

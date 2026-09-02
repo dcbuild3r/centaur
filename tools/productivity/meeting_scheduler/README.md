@@ -15,12 +15,9 @@ provider work begins.
 Production Zoom access is a `brokered_token` minted from the dedicated
 User-managed General OAuth app. Centaur Console serializes refreshes and stores
 each rotated refresh token; the scheduler receives only the current bearer.
-Manual meetings are scheduled by Orbie for the authenticated requester's
-verified Slack email, making that requester the Zoom host while Orbie retains
-the automation credential. Automated cadences remain owned by the configured
-Orbie host unless an organizer key is explicitly mapped through
-`MEETING_ZOOM_SCHEDULE_FOR_USERS`. Delegated hosts must grant Zoom scheduling
-privilege to Orbie. Every created room requests cloud recording; `get_recording`
+All meetings are owned by the configured Orbie Zoom user. Orbie never uses
+`schedule_for` or another user's identity to create a room. Every created room
+requests cloud recording; `get_recording`
 returns bounded transcript content and `get_summary`
 returns the AI Companion summary after Zoom has finished processing, without
 exposing signed provider URLs.

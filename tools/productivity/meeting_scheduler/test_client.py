@@ -45,7 +45,7 @@ def test_zoom_create_defaults_to_orbie_join_anytime_and_cloud_recording(monkeypa
     assert "schedule_for" not in payload
 
 
-def test_zoom_create_only_delegates_through_operator_allowlist(monkeypatch):
+def test_zoom_create_never_delegates_to_another_user(monkeypatch):
     monkeypatch.setenv("MEETING_ZOOM_HOST_USER_ID", "orbie@world.org")
     monkeypatch.setenv("MEETING_ZOOM_SCHEDULE_FOR_USERS", json.dumps({"wf": "delegate@world.org"}))
     scheduler = client.MeetingSchedulerClient()
@@ -65,33 +65,7 @@ def test_zoom_create_only_delegates_through_operator_allowlist(monkeypatch):
         organizer_calendar_key="wf",
     )
 
-    assert calls[0]["payload"]["schedule_for"] == "delegate@world.org"
-
-
-def test_zoom_create_assigns_verified_requester_as_host_and_keeps_cloud_recording(monkeypatch):
-    monkeypatch.setenv("MEETING_ZOOM_HOST_USER_ID", "orbie@world.org")
-    monkeypatch.setenv("MEETING_ZOOM_SCHEDULE_FOR_USERS", "{}")
-    scheduler = client.MeetingSchedulerClient()
-    calls = []
-    monkeypatch.setattr(
-        scheduler,
-        "_zoom_request",
-        lambda method, path, **kwargs: calls.append((method, path, kwargs)) or {"id": "1"},
-    )
-
-    scheduler._zoom_create(
-        title="Planning",
-        start=client._parse_rfc3339("2099-08-17T10:00:00Z", field="start"),
-        duration=30,
-        time_zone="UTC",
-        occurrence_key="manual:1",
-        organizer_calendar_key="orbie",
-        zoom_host_user_id="requester@world.org",
-    )
-
-    assert calls[0][1] == "/users/orbie@world.org/meetings"
-    assert calls[0][2]["payload"]["schedule_for"] == "requester@world.org"
-    assert calls[0][2]["payload"]["settings"]["auto_recording"] == "cloud"
+    assert "schedule_for" not in calls[0]["payload"]
 
 
 def test_get_recording_fetches_transcript_without_returning_signed_urls(monkeypatch):

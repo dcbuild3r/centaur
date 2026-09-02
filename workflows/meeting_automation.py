@@ -2774,7 +2774,6 @@ async def _scheduling_handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any
             attendee_emails.insert(0, requester_email)
         args["attendee_emails"] = attendee_emails
         args["organizer_calendar_key"] = _manual_organizer_calendar_key()
-        args["zoom_host_user_id"] = requester_email
     preflight: dict[str, Any] | None = None
     if operation in {
         "reschedule_meeting",
