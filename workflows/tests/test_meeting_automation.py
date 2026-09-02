@@ -1726,6 +1726,45 @@ def test_scheduled_retry_uses_persisted_zoom_occurrence_uuid(monkeypatch):
     ) in client.post_operations
 
 
+def test_retry_uses_uuid_returned_by_claim_when_candidate_snapshot_is_stale(monkeypatch):
+    client = ScheduledFakeClient(_published_row())
+    candidate = _post_candidate("123")
+    original = client.scheduling_operation
+
+    async def claim_with_fresh_occurrence(operation, args):
+        if operation == "claim_post_meeting_processing":
+            client.post_operations.append((operation, args))
+            return {
+                "claimed": True,
+                "lease_token": "lease-123",
+                "occurrence": {
+                    **candidate,
+                    "metadata": {"post_meeting_zoom_uuid": "/fresh+uuid=="},
+                },
+            }
+        return await original(operation, args)
+
+    client.scheduling_operation = claim_with_fresh_occurrence
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+
+    result = asyncio.run(
+        meeting_automation._process_post_meeting_candidate(
+            FakeContext(),
+            client,
+            candidate,
+            slack_users=client.slack_user_data,
+            event="artifact_poll",
+            step_prefix="scheduled:post-meeting",
+        )
+    )
+
+    assert result["status"] == "delivered"
+    assert (
+        "collect_post_meeting_artifacts",
+        {"meeting_id": "/fresh+uuid=="},
+    ) in client.post_operations
+
+
 def test_transcript_only_runs_durable_orbie_summary_and_publishes_fallback(monkeypatch):
     client = ScheduledFakeClient(_published_row())
     client.post_candidates_by_zoom_id["123"] = _post_candidate("123")

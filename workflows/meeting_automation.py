@@ -1409,9 +1409,23 @@ async def _process_post_meeting_candidate(
     lease_token = str((claim or {}).get("lease_token") or "")
     if not lease_token:
         raise ValueError("post-meeting claim returned no lease token")
+    claimed_occurrence = (claim or {}).get("occurrence")
+    claimed_meeting_uuid = (
+        _candidate_zoom_uuid(claimed_occurrence)
+        if isinstance(claimed_occurrence, dict)
+        else ""
+    )
 
     try:
-        artifact_identifier = requested_meeting_uuid or persisted_meeting_uuid or meeting_id
+        # The claim can persist a UUID from a racing authenticated webhook.
+        # Prefer that freshly locked row over the stale candidate snapshot so
+        # scheduled retries never fall back to Zoom's numeric meeting ID.
+        artifact_identifier = (
+            requested_meeting_uuid
+            or claimed_meeting_uuid
+            or persisted_meeting_uuid
+            or meeting_id
+        )
         artifacts = await ctx.step(
             f"{step_prefix}:artifacts:{occurrence_key}",
             lambda: client.scheduling_operation(
