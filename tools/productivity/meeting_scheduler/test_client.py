@@ -98,6 +98,60 @@ def test_zoom_create_assigns_requester_as_alternative_host_without_delegating(
     assert "schedule_for" not in payload
 
 
+def test_ensure_zoom_alternative_host_repairs_and_verifies_provider_state(monkeypatch):
+    scheduler = client.MeetingSchedulerClient()
+    calls = []
+    responses = iter(
+        [
+            {"id": "1", "settings": {"alternative_hosts": ""}},
+            {},
+            {
+                "id": "1",
+                "join_url": "https://zoom.example/j/1",
+                "settings": {"alternative_hosts": "proposer@world.org"},
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_zoom_request",
+        lambda method, path, **kwargs: calls.append((method, path, kwargs))
+        or next(responses),
+    )
+
+    result = scheduler._ensure_zoom_alternative_host(
+        {"id": "1", "join_url": "https://zoom.example/j/1"},
+        "PROPOSER@world.org",
+    )
+
+    assert [call[:2] for call in calls] == [
+        ("GET", "/meetings/1"),
+        ("PATCH", "/meetings/1"),
+        ("GET", "/meetings/1"),
+    ]
+    assert calls[1][2]["payload"] == {
+        "settings": {"alternative_hosts": "proposer@world.org"}
+    }
+    assert result["settings"]["alternative_hosts"] == "proposer@world.org"
+
+
+def test_ensure_zoom_alternative_host_fails_when_zoom_does_not_apply_it(monkeypatch):
+    scheduler = client.MeetingSchedulerClient()
+    monkeypatch.setattr(
+        scheduler,
+        "_zoom_request",
+        lambda method, path, **kwargs: (
+            {} if method == "PATCH" else {"id": "1", "settings": {}}
+        ),
+    )
+
+    with pytest.raises(client.MeetingSchedulerError, match="did not assign"):
+        scheduler._ensure_zoom_alternative_host(
+            {"id": "1", "join_url": "https://zoom.example/j/1"},
+            "proposer@world.org",
+        )
+
+
 def test_zoom_find_by_occurrence_uses_agenda_marker(monkeypatch):
     monkeypatch.setenv("MEETING_ZOOM_HOST_USER_ID", "orbie@world.org")
     scheduler = client.MeetingSchedulerClient()

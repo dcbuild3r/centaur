@@ -848,6 +848,39 @@ class MeetingSchedulerClient:
             payload=payload,
         )
 
+    @staticmethod
+    def _zoom_alternative_hosts(meeting: dict[str, Any]) -> list[str]:
+        value = (meeting.get("settings") or {}).get("alternative_hosts") or ""
+        return [item.strip().lower() for item in str(value).split(";") if item.strip()]
+
+    def _ensure_zoom_alternative_host(
+        self, meeting: dict[str, Any], alternative_host_email: str
+    ) -> dict[str, Any]:
+        """Make the authenticated proposer a verified Zoom alternative host."""
+        alternative_host = alternative_host_email.strip().lower()
+        if not alternative_host:
+            return meeting
+        meeting_id = _require_zoom_meeting_id(meeting.get("id"))
+        current = meeting
+        if alternative_host not in self._zoom_alternative_hosts(current):
+            current = self._zoom_request(
+                "GET", f"/meetings/{_zoom_meeting_path_id(meeting_id)}"
+            )
+        if alternative_host not in self._zoom_alternative_hosts(current):
+            self._zoom_request(
+                "PATCH",
+                f"/meetings/{_zoom_meeting_path_id(meeting_id)}",
+                payload={"settings": {"alternative_hosts": alternative_host}},
+            )
+            current = self._zoom_request(
+                "GET", f"/meetings/{_zoom_meeting_path_id(meeting_id)}"
+            )
+        if alternative_host not in self._zoom_alternative_hosts(current):
+            raise MeetingSchedulerError(
+                "Zoom did not assign the authenticated proposer as alternative host"
+            )
+        return current
+
     def get_recording(self, meeting_id: str) -> dict[str, Any]:
         """Return recording metadata and the bounded VTT transcript, when ready."""
 
@@ -1700,6 +1733,9 @@ class MeetingSchedulerClient:
                         join_url = ""
                     else:
                         join_url = str(existing_zoom.get("join_url") or join_url).strip()
+                        self._ensure_zoom_alternative_host(
+                            existing_zoom, alternative_host_email
+                        )
                 if not zoom_id:
                     existing_zoom = self._zoom_find_by_occurrence(key)
                     if existing_zoom:
@@ -1714,6 +1750,9 @@ class MeetingSchedulerClient:
                             organizer_calendar_key=organizer_calendar_key,
                             alternative_host_email=alternative_host_email,
                         )
+                    zoom = self._ensure_zoom_alternative_host(
+                        zoom, alternative_host_email
+                    )
                     join_url = str(zoom.get("join_url") or "").strip()
                     zoom_id = str(zoom.get("id") or "").strip()
                 if not join_url or not zoom_id:
