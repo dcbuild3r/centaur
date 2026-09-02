@@ -33,8 +33,11 @@ returns bounded transcript content and `get_summary`
 returns the AI Companion summary after Zoom has finished processing, without
 exposing signed provider URLs.
 
-Because Zoom ownership remains with Orbie, attendees cannot end a live room for
-everyone. The confirmation-gated `end_meeting` operation lets an authorized
+Zoom ownership remains with Orbie. For confirmed ad-hoc bookings, the
+authenticated proposer is also assigned as the Zoom alternative host, which
+gives them host controls (including ending the room for everyone) without
+delegating API ownership or Calendar identity. The confirmation-gated
+`end_meeting` operation remains available as a fallback and lets an authorized
 requester ask Orbie to end its own Zoom meeting through the provider status API.
 It only accepts a recorded Orbie occurrence and deliberately keeps the Calendar
 event intact so recording processing and post-meeting follow-up retain their

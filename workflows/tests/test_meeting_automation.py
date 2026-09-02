@@ -527,6 +527,7 @@ def test_manual_booking_keeps_orbie_calendar_and_zoom_ownership(monkeypatch):
     scheduling_call = next(call for call in client.calls if call[0] == "scheduling")
     assert scheduling_call[1] == "book_meeting"
     assert scheduling_call[2]["organizer_calendar_key"] == "orbie"
+    assert scheduling_call[2]["alternative_host_email"] == "piotr.piwowarczyk@world.org"
     assert "zoom_host_user_id" not in scheduling_call[2]
     assert scheduling_call[2]["attendee_emails"] == [
         "piotr.piwowarczyk@world.org",

@@ -816,6 +816,7 @@ class MeetingSchedulerClient:
         time_zone: str,
         occurrence_key: str,
         organizer_calendar_key: str,
+        alternative_host_email: str = "",
     ) -> dict[str, Any]:
         host = _config_value(ZOOM_HOST_USER_ID).strip()
         if not host:
@@ -838,6 +839,8 @@ class MeetingSchedulerClient:
                 "waiting_room": False,
             },
         }
+        if alternative_host_email:
+            payload["settings"]["alternative_hosts"] = alternative_host_email
         return self._zoom_request(
             "POST",
             "/users/me/meetings",
@@ -1524,6 +1527,7 @@ class MeetingSchedulerClient:
         request_id: str | None = None,
         mode: str = "cadence",
         confirmation_token: str | None = None,
+        alternative_host_email: str | None = None,
     ) -> dict[str, Any]:
         """Create or reuse one Zoom + Calendar meeting occurrence."""
         _require_enabled()
@@ -1533,6 +1537,15 @@ class MeetingSchedulerClient:
         if mode == "ad_hoc" and not str(confirmation_token or "").strip():
             raise MeetingSchedulerError("ad-hoc booking requires explicit confirmation")
         attendees = _email_list(attendee_emails)
+        alternative_host = ""
+        if alternative_host_email:
+            alternative_host = _email_list([alternative_host_email])[0]
+            if mode != "ad_hoc":
+                raise MeetingSchedulerError(
+                    "alternative hosts are only supported for confirmed ad-hoc meetings"
+                )
+            if alternative_host not in attendees:
+                raise MeetingSchedulerError("alternative host must be a meeting attendee")
         start_at = _parse_rfc3339(start, field="start")
         duration = _positive_int(duration_minutes, "duration_minutes")
         organizer_id, _ = self._calendar_ids(organizer_calendar_key, attendees)
@@ -1568,6 +1581,7 @@ class MeetingSchedulerClient:
                 organizer_calendar_key=organizer_calendar_key,
                 organizer_id=organizer_id,
                 attendees=attendees,
+                alternative_host_email=alternative_host,
                 allow_parameter_update=mode == "cadence",
                 check_slot_free=mode == "ad_hoc",
             )
@@ -1594,6 +1608,7 @@ class MeetingSchedulerClient:
         attendees: list[str],
         allow_parameter_update: bool,
         check_slot_free: bool,
+        alternative_host_email: str = "",
     ) -> dict[str, Any] | _OperationFailure:
         async def operation(connection: asyncpg.Connection) -> dict[str, Any] | _OperationFailure:
             organizer_date = start_at.astimezone(_zone(time_zone)).date().isoformat()
@@ -1697,6 +1712,7 @@ class MeetingSchedulerClient:
                             time_zone=time_zone,
                             occurrence_key=key,
                             organizer_calendar_key=organizer_calendar_key,
+                            alternative_host_email=alternative_host_email,
                         )
                     join_url = str(zoom.get("join_url") or "").strip()
                     zoom_id = str(zoom.get("id") or "").strip()

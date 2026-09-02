@@ -71,6 +71,33 @@ def test_zoom_create_never_delegates_to_another_user(monkeypatch):
     assert "schedule_for" not in calls[0]["payload"]
 
 
+def test_zoom_create_assigns_requester_as_alternative_host_without_delegating(
+    monkeypatch,
+):
+    monkeypatch.setenv("MEETING_ZOOM_HOST_USER_ID", "orbie@world.org")
+    scheduler = client.MeetingSchedulerClient()
+    calls = []
+    monkeypatch.setattr(
+        scheduler,
+        "_zoom_request",
+        lambda method, path, **kwargs: calls.append((method, path, kwargs)) or {"id": "1"},
+    )
+
+    scheduler._zoom_create(
+        title="Planning",
+        start=client._parse_rfc3339("2099-08-17T10:00:00Z", field="start"),
+        duration=30,
+        time_zone="UTC",
+        occurrence_key="request:1",
+        organizer_calendar_key="orbie",
+        alternative_host_email="proposer@world.org",
+    )
+
+    payload = calls[0][2]["payload"]
+    assert payload["settings"]["alternative_hosts"] == "proposer@world.org"
+    assert "schedule_for" not in payload
+
+
 def test_zoom_find_by_occurrence_uses_agenda_marker(monkeypatch):
     monkeypatch.setenv("MEETING_ZOOM_HOST_USER_ID", "orbie@world.org")
     scheduler = client.MeetingSchedulerClient()
