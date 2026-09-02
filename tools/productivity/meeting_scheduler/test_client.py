@@ -43,6 +43,8 @@ def test_zoom_create_defaults_to_orbie_join_anytime_and_cloud_recording(monkeypa
         "meeting_authentication": False,
         "waiting_room": False,
     }
+    assert "tracking_fields" not in payload
+    assert payload["agenda"].startswith("orbie-occurrence:")
     assert "schedule_for" not in payload
 
 
@@ -67,6 +69,24 @@ def test_zoom_create_never_delegates_to_another_user(monkeypatch):
     )
 
     assert "schedule_for" not in calls[0]["payload"]
+
+
+def test_zoom_find_by_occurrence_uses_agenda_marker(monkeypatch):
+    monkeypatch.setenv("MEETING_ZOOM_HOST_USER_ID", "orbie@world.org")
+    scheduler = client.MeetingSchedulerClient()
+    key = "request:agenda-marker"
+    monkeypatch.setattr(
+        scheduler,
+        "_zoom_request",
+        lambda *_args, **_kwargs: {
+            "meetings": [
+                {"id": "unrelated", "agenda": "other"},
+                {"id": "expected", "agenda": client._zoom_occurrence_marker(key)},
+            ]
+        },
+    )
+
+    assert scheduler._zoom_find_by_occurrence(key)["id"] == "expected"
 
 
 def test_get_recording_fetches_transcript_without_returning_signed_urls(monkeypatch):

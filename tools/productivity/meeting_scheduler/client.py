@@ -71,6 +71,12 @@ class MeetingSchedulerError(RuntimeError):
     """Raised for fail-closed scheduling or provider errors."""
 
 
+def _zoom_occurrence_marker(key: str) -> str:
+    """Return an opaque retry marker accepted by Zoom's free-form agenda."""
+
+    return f"orbie-occurrence:{hashlib.sha256(key.encode('utf-8')).hexdigest()[:32]}"
+
+
 def _redact_zoom_error_text(value: str, limit: int) -> str:
     """Bound one Zoom error string and strip anything secret-shaped."""
 
@@ -802,7 +808,10 @@ class MeetingSchedulerClient:
             "start_time": _rfc3339(start),
             "duration": duration,
             "timezone": time_zone,
-            "tracking_fields": [{"field": "orbie_occurrence_key", "value": occurrence_key}],
+            # Zoom rejects tracking fields that an account administrator has
+            # not configured in advance. The agenda is free-form and gives us
+            # the same crash-recovery marker without account-global setup.
+            "agenda": _zoom_occurrence_marker(occurrence_key),
             "settings": {
                 "auto_recording": "cloud",
                 "join_before_host": True,
@@ -1403,6 +1412,10 @@ class MeetingSchedulerClient:
             for meeting in meetings if isinstance(meetings, list) else []:
                 if not isinstance(meeting, dict):
                     continue
+                if meeting.get("agenda") == _zoom_occurrence_marker(key):
+                    return meeting
+                # Retain discovery compatibility for meetings created before
+                # the agenda marker replaced the account-configured field.
                 for tracking in meeting.get("tracking_fields") or []:
                     if isinstance(tracking, dict) and tracking.get("value") == key:
                         return meeting
