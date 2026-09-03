@@ -1726,7 +1726,9 @@ def test_scheduled_retry_uses_persisted_zoom_occurrence_uuid(monkeypatch):
     ) in client.post_operations
 
 
-def test_retry_uses_uuid_returned_by_claim_when_candidate_snapshot_is_stale(monkeypatch):
+def test_retry_uses_uuid_returned_by_claim_when_candidate_snapshot_is_stale(
+    monkeypatch,
+):
     client = ScheduledFakeClient(_published_row())
     candidate = _post_candidate("123")
     original = client.scheduling_operation
@@ -1875,7 +1877,16 @@ def test_transcript_only_runs_durable_orbie_summary_and_publishes_fallback(monke
     client.scheduling_operation = scheduling_operation
     monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
     context = FakeContext(
-        agent_result='{"summary":"Ship the fix Friday.","action_items":["Ship the fix Friday"]}'
+        agent_result={
+            "thread_key": "wf:meeting-summary",
+            "execution_id": "execution-123",
+            "status": "completed",
+            "output_lines": [],
+            "result_text": (
+                '{"summary":"Ship the fix Friday.",'
+                '"action_items":["Ship the fix Friday"]}'
+            ),
+        }
     )
 
     result = asyncio.run(

@@ -1206,8 +1206,16 @@ def _agent_summary(result: Any) -> tuple[str, str] | None:
 
     value = _tool_output(result)
     candidates: list[Any] = [value]
-    if isinstance(value, str):
-        text = value.strip().removeprefix("```json").removesuffix("```").strip()
+    if (
+        isinstance(value, dict)
+        and value.get("status") == "completed"
+        and isinstance(value.get("result_text"), str)
+    ):
+        candidates.insert(0, value["result_text"])
+    for candidate in list(candidates):
+        if not isinstance(candidate, str):
+            continue
+        text = candidate.strip().removeprefix("```json").removesuffix("```").strip()
         candidates = [text]
         decoder = json.JSONDecoder()
         for index, character in enumerate(text):
@@ -1218,6 +1226,7 @@ def _agent_summary(result: Any) -> tuple[str, str] | None:
                     continue
                 candidates.append(parsed)
                 break
+        break
     for candidate in candidates:
         if not isinstance(candidate, dict):
             continue
@@ -1401,7 +1410,11 @@ async def _process_post_meeting_candidate(
             "force": False,
             "lease_seconds": 3600,
             "owner_token": owner_token,
-            **({"meeting_uuid": requested_meeting_uuid} if requested_meeting_uuid else {}),
+            **(
+                {"meeting_uuid": requested_meeting_uuid}
+                if requested_meeting_uuid
+                else {}
+            ),
         },
     )
     if isinstance(claim, dict) and claim.get("claimed") is False:
