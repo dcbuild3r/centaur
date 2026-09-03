@@ -2747,6 +2747,7 @@ def book_meeting(
     request_id: str | None = None,
     mode: str = "cadence",
     confirmation_token: str | None = None,
+    alternative_host_email: str | None = None,
 ) -> dict[str, Any]:
     return _client().book_meeting(
         occurrence_key,
@@ -2760,6 +2761,7 @@ def book_meeting(
         request_id,
         mode,
         confirmation_token,
+        alternative_host_email=alternative_host_email,
     )
 
 

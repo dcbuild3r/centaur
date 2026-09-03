@@ -2268,6 +2268,34 @@ def test_public_scheduler_methods_have_explicit_tool_signatures():
     assert "**kwargs" not in str(inspect.signature(client.end_meeting))
 
 
+def test_public_book_meeting_forwards_alternative_host_email(monkeypatch):
+    calls = []
+
+    class FakeClient:
+        def book_meeting(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            return {"status": "booked"}
+
+    monkeypatch.setattr(client, "_client", lambda: FakeClient())
+
+    result = client.book_meeting(
+        occurrence_key="request:1",
+        title="Planning",
+        start="2099-08-17T10:00:00Z",
+        duration_minutes=30,
+        time_zone="Europe/Prague",
+        attendee_emails=["proposer@world.org"],
+        organizer_calendar_key="wf",
+        mode="ad_hoc",
+        confirmation_token="confirmed",
+        alternative_host_email="proposer@world.org",
+    )
+
+    assert result == {"status": "booked"}
+    assert "alternative_host_email" in inspect.signature(client.book_meeting).parameters
+    assert calls[0][1]["alternative_host_email"] == "proposer@world.org"
+
+
 def _zoom_transport(monkeypatch, status_code, *, json_body=None, text=None, headers=None):
     """Route _zoom_request through a real httpx client with a canned response."""
 
