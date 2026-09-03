@@ -37,6 +37,25 @@ describe('fixed-time meeting scheduling ingress', () => {
     )).toBeNull()
   })
 
+  test('parses the production 24-hour Europe/Prague request through the broker', () => {
+    const booking = parseFixedTimeMeetingRequest(
+      'Schedule a fresh 10-minute Zoom end-to-end acceptance meeting for today, 3 September 2026, at 15:16 Europe/Prague. Title it “Orbie Zoom semantic summary acceptance.” Use the normal Orbie-owned Calendar and Zoom flow, invite dc.builder@world.org, make the authenticated proposer a verified Zoom alternative host with end-for-all controls, allow join before host with no waiting room or authentication requirement, and enable automatic cloud recording.',
+      'dc.builder@world.org',
+      new Date('2026-09-03T13:11:38Z'),
+      'orbie'
+    )
+
+    expect(booking).toMatchObject({
+      attendeeEmails: ['dc.builder@world.org'],
+      durationMinutes: 10,
+      organizerCalendarKey: 'orbie',
+      requesterEmail: 'dc.builder@world.org',
+      start: '2026-09-03T13:16:00Z',
+      timeZone: 'Europe/Prague',
+      title: 'Orbie Zoom semantic summary acceptance.'
+    })
+  })
+
   test('recognizes only unambiguous booking confirmations', () => {
     expect(isMeetingConfirmation('confirm')).toBeTrue()
     expect(isMeetingConfirmation('confirm\n\nSent using @ChatGPT')).toBeTrue()

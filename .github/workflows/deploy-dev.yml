@@ -462,19 +462,38 @@ jobs:
             --tools-dir /app/tools \
             principals grant workflow-meeting-automation --tool meeting_scheduler
 
-          # Remove both historical operator-principal variants now that the
-          # workflow owns execution. Revocation is idempotent.
-          kubectl --namespace "$HELM_NAMESPACE" exec \
+          # The workflow principal is the only principal allowed to hold the
+          # raw meeting roles. Enumerate persisted state instead of naming
+          # historical Slack principal variants: an unknown or future session
+          # principal must not retain a path around the authenticated broker.
+          principal_rows="$(kubectl --namespace "$HELM_NAMESPACE" exec \
             deployment/centaur-centaur-api-rs -- \
             /usr/local/bin/centaur-perms \
             --tools-dir /app/tools \
-            principals revoke slack-user-tl1hm8uuu-u03tnh0duqp --tool meeting_ops
-
-          kubectl --namespace "$HELM_NAMESPACE" exec \
-            deployment/centaur-centaur-api-rs -- \
-            /usr/local/bin/centaur-perms \
-            --tools-dir /app/tools \
-            principals revoke slack-user-u03tnh0duqp --tool meeting_ops
+            principals list)"
+          while read -r foreign_id principal_oid; do
+            [[ -n "$principal_oid" ]] || continue
+            [[ "$foreign_id" != "workflow-meeting-automation" ]] || continue
+            candidate_state="$(kubectl --namespace "$HELM_NAMESPACE" exec \
+              deployment/centaur-centaur-api-rs -- \
+              /usr/local/bin/centaur-perms \
+              --tools-dir /app/tools \
+              principals show "$principal_oid")"
+            if grep -Fq 'tool-meeting-ops (' <<<"$candidate_state"; then
+              kubectl --namespace "$HELM_NAMESPACE" exec \
+                deployment/centaur-centaur-api-rs -- \
+                /usr/local/bin/centaur-perms \
+                --tools-dir /app/tools \
+                principals revoke "$principal_oid" --tool meeting_ops
+            fi
+            if grep -Fq 'tool-meeting-scheduler (' <<<"$candidate_state"; then
+              kubectl --namespace "$HELM_NAMESPACE" exec \
+                deployment/centaur-centaur-api-rs -- \
+                /usr/local/bin/centaur-perms \
+                --tools-dir /app/tools \
+                principals revoke "$principal_oid" --tool meeting_scheduler
+            fi
+          done < <(awk '$2 ~ /^prn_/ { print $1, $2 }' <<<"$principal_rows")
 
           # Remove historical DM/channel grants. New grants are made by api-rs
           # only for the explicit World Foundation channel policy; the session
@@ -541,6 +560,30 @@ jobs:
           grep -Fq '  MEETING_OPS_SCRIPT_ID' <<<"$principal_state"
           grep -Fq 'tool-meeting-scheduler (' <<<"$principal_state"
           grep -Fq 'static ZOOM_ACCESS_TOKEN' <<<"$principal_state"
+
+          principal_rows="$(kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            principals list)"
+          while read -r foreign_id principal_oid; do
+            [[ -n "$principal_oid" ]] || continue
+            candidate_state="$(kubectl --namespace "$HELM_NAMESPACE" exec \
+              deployment/centaur-centaur-api-rs -- \
+              /usr/local/bin/centaur-perms \
+              --tools-dir /app/tools \
+              principals show "$principal_oid")"
+            if [[ "$foreign_id" != "workflow-meeting-automation" ]] \
+              && grep -Fq 'tool-meeting-scheduler (' <<<"$candidate_state"; then
+              echo "raw meeting scheduler remains assigned to $foreign_id ($principal_oid)" >&2
+              exit 1
+            fi
+            if [[ "$foreign_id" != "workflow-meeting-automation" ]] \
+              && grep -Fq 'tool-meeting-ops (' <<<"$candidate_state"; then
+              echo "meeting ops remains assigned directly to $foreign_id ($principal_oid)" >&2
+              exit 1
+            fi
+          done < <(awk '$2 ~ /^prn_/ { print $1, $2 }' <<<"$principal_rows")
 
           postgres_state="$(kubectl --namespace "$HELM_NAMESPACE" exec \
             deployment/centaur-centaur-api-rs -- \

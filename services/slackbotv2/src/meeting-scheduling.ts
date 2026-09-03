@@ -38,20 +38,23 @@ export function parseFixedTimeMeetingRequest(
   if (!/^(?:schedule|book|create)\b/i.test(clean) || !/\bmeeting\b/i.test(clean)) return null
 
   const durationMatch = clean.match(/\b(\d{1,3})[- ]minute\b/i)
-  const timeMatch = clean.match(/\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i)
-  const titleMatch = clean.match(/\bcalled\s+["“]([^"”]{1,160})["”]/i)
+  const timeMatch = clean.match(/\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i)
+    ?? clean.match(/\bat\s+([01]?\d|2[0-3]):([0-5]\d)\b/i)
+  const titleMatch = clean.match(/\b(?:called|title\s+it)\s+["“]([^"”]{1,160})["”]/i)
   const zoneMatch = clean.match(/\b(Prague|UTC)\s+time\b/i)
+    ?? clean.match(/\b(Europe\/Prague|UTC)\b/i)
   if (!durationMatch || !timeMatch || !titleMatch || !zoneMatch) return null
 
   const durationMinutes = Number(durationMatch[1])
   if (!Number.isInteger(durationMinutes) || durationMinutes < 5 || durationMinutes > 480) return null
   let hour = Number(timeMatch[1])
   const minute = Number(timeMatch[2] ?? '0')
-  if (hour < 1 || hour > 12 || minute > 59) return null
-  if (timeMatch[3]!.toLowerCase() === 'pm' && hour !== 12) hour += 12
-  if (timeMatch[3]!.toLowerCase() === 'am' && hour === 12) hour = 0
+  const meridiem = timeMatch[3]?.toLowerCase()
+  if ((meridiem ? hour < 1 || hour > 12 : hour > 23) || minute > 59) return null
+  if (meridiem === 'pm' && hour !== 12) hour += 12
+  if (meridiem === 'am' && hour === 12) hour = 0
 
-  const timeZone = zoneMatch[1]!.toLowerCase() === 'prague' ? 'Europe/Prague' : 'UTC'
+  const timeZone = zoneMatch[1]!.toLowerCase().includes('prague') ? 'Europe/Prague' : 'UTC'
   const dayOffset = /\btomorrow\b/i.test(clean) ? 1 : /\btoday\b/i.test(clean) ? 0 : -1
   if (dayOffset < 0) return null
   const local = zonedParts(now, timeZone)
