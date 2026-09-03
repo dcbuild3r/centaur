@@ -17,7 +17,7 @@ import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import quote, urlparse, urlunparse
+from urllib.parse import quote, urljoin, urlparse, urlunparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import asyncpg
@@ -45,6 +45,7 @@ SCHEDULER_STATUSES = {"pending", "booked", "blocked", "completed", "cancelled"}
 EMAIL_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
 WRITABLE_CALENDAR_ACCESS_ROLES = frozenset({"writer", "owner"})
 MAX_TRANSCRIPT_BYTES = 10 * 1024 * 1024
+ZOOM_TRANSCRIPT_DOWNLOAD_TIMEOUT_SECONDS = 30.0
 MAX_MEETING_ID_LENGTH = 128
 MAX_POST_MEETING_ERROR_LENGTH = 2000
 MAX_POST_MEETING_STATE_LENGTH = 64
@@ -871,18 +872,14 @@ class MeetingSchedulerClient:
         meeting_id = _require_zoom_meeting_id(meeting.get("id"))
         current = meeting
         if alternative_host not in self._zoom_alternative_hosts(current):
-            current = self._zoom_request(
-                "GET", f"/meetings/{_zoom_meeting_path_id(meeting_id)}"
-            )
+            current = self._zoom_request("GET", f"/meetings/{_zoom_meeting_path_id(meeting_id)}")
         if alternative_host not in self._zoom_alternative_hosts(current):
             self._zoom_request(
                 "PATCH",
                 f"/meetings/{_zoom_meeting_path_id(meeting_id)}",
                 payload={"settings": {"alternative_hosts": alternative_host}},
             )
-            current = self._zoom_request(
-                "GET", f"/meetings/{_zoom_meeting_path_id(meeting_id)}"
-            )
+            current = self._zoom_request("GET", f"/meetings/{_zoom_meeting_path_id(meeting_id)}")
         if alternative_host not in self._zoom_alternative_hosts(current):
             raise MeetingSchedulerError(
                 "Zoom did not assign the authenticated proposer as alternative host"
@@ -1240,9 +1237,10 @@ class MeetingSchedulerClient:
                 # The authenticated webhook carries Zoom's exact completed-
                 # occurrence UUID. Persist it before lease arbitration so a
                 # racing scheduler worker and every later retry can use it.
-                if normalized_meeting_uuid and str(
-                    metadata.get("post_meeting_zoom_uuid") or ""
-                ) != normalized_meeting_uuid:
+                if (
+                    normalized_meeting_uuid
+                    and str(metadata.get("post_meeting_zoom_uuid") or "") != normalized_meeting_uuid
+                ):
                     uuid_patch = {"post_meeting_zoom_uuid": normalized_meeting_uuid}
                     await connection.fetchrow(
                         """
@@ -1376,9 +1374,7 @@ class MeetingSchedulerClient:
             recording = self.get_recording(meeting_id)
         except MeetingSchedulerError as error:
             errors.append(str(error))
-        uuid_resolution_error = str(
-            recording.get("meeting_uuid_resolution_error") or ""
-        ).strip()
+        uuid_resolution_error = str(recording.get("meeting_uuid_resolution_error") or "").strip()
         if uuid_resolution_error:
             errors.append(f"Zoom meeting UUID resolution failed: {uuid_resolution_error}")
         try:
@@ -1457,19 +1453,55 @@ class MeetingSchedulerClient:
         return asyncio.run(_with_connection(update))
 
     def _zoom_download_transcript(self, download_url: str) -> str:
-        parsed = urlparse(download_url)
-        hostname = (parsed.hostname or "").lower()
-        if parsed.scheme != "https" or not (hostname == "zoom.us" or hostname.endswith(".zoom.us")):
-            raise MeetingSchedulerError("Zoom returned an invalid transcript download URL")
-        with httpx.Client(timeout=30.0, follow_redirects=False) as client:
-            response = client.get(download_url, headers=self._zoom_headers())
-        if response.status_code >= 400:
-            raise MeetingSchedulerError(
-                f"Zoom transcript download failed with HTTP {response.status_code}"
-            )
-        if len(response.content) > MAX_TRANSCRIPT_BYTES:
-            raise MeetingSchedulerError("Zoom transcript exceeded the size limit")
-        return response.content.decode("utf-8-sig")
+        return asyncio.run(self._zoom_download_transcript_async(download_url))
+
+    async def _zoom_download_transcript_async(self, download_url: str) -> str:
+        current_url = download_url
+        try:
+            async with asyncio.timeout(ZOOM_TRANSCRIPT_DOWNLOAD_TIMEOUT_SECONDS):
+                async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
+                    for redirect_count in range(6):
+                        parsed = urlparse(current_url)
+                        hostname = (parsed.hostname or "").lower()
+                        if parsed.scheme != "https" or not (
+                            hostname == "zoom.us" or hostname.endswith(".zoom.us")
+                        ):
+                            raise MeetingSchedulerError(
+                                "Zoom returned an invalid transcript download URL"
+                            )
+                        # Zoom's first response authorizes the download and redirects
+                        # to a signed URL. Never forward the bearer token beyond that
+                        # initial request, even to another Zoom-owned hostname.
+                        headers = self._zoom_headers() if redirect_count == 0 else {}
+                        async with client.stream("GET", current_url, headers=headers) as response:
+                            if response.status_code in {301, 302, 303, 307, 308}:
+                                location = response.headers.get("location", "").strip()
+                                if not location:
+                                    raise MeetingSchedulerError(
+                                        "Zoom transcript download redirect had no location"
+                                    )
+                                if redirect_count == 5:
+                                    raise MeetingSchedulerError(
+                                        "Zoom transcript download exceeded the redirect limit"
+                                    )
+                                current_url = urljoin(current_url, location)
+                                continue
+                            if response.status_code >= 300:
+                                raise MeetingSchedulerError(
+                                    "Zoom transcript download failed with HTTP "
+                                    f"{response.status_code}"
+                                )
+                            content = bytearray()
+                            async for chunk in response.aiter_bytes():
+                                if len(content) + len(chunk) > MAX_TRANSCRIPT_BYTES:
+                                    raise MeetingSchedulerError(
+                                        "Zoom transcript exceeded the size limit"
+                                    )
+                                content.extend(chunk)
+                            return bytes(content).decode("utf-8-sig")
+        except TimeoutError as exc:
+            raise MeetingSchedulerError("Zoom transcript download exceeded the time limit") from exc
+        raise MeetingSchedulerError("Zoom transcript download exceeded the redirect limit")
 
     @staticmethod
     def _calendar_event_id(key: str) -> str:
@@ -1742,9 +1774,7 @@ class MeetingSchedulerClient:
                         join_url = ""
                     else:
                         join_url = str(existing_zoom.get("join_url") or join_url).strip()
-                        self._ensure_zoom_alternative_host(
-                            existing_zoom, alternative_host_email
-                        )
+                        self._ensure_zoom_alternative_host(existing_zoom, alternative_host_email)
                 if not zoom_id:
                     existing_zoom = self._zoom_find_by_occurrence(key)
                     if existing_zoom:
@@ -1759,9 +1789,7 @@ class MeetingSchedulerClient:
                             organizer_calendar_key=organizer_calendar_key,
                             alternative_host_email=alternative_host_email,
                         )
-                    zoom = self._ensure_zoom_alternative_host(
-                        zoom, alternative_host_email
-                    )
+                    zoom = self._ensure_zoom_alternative_host(zoom, alternative_host_email)
                     join_url = str(zoom.get("join_url") or "").strip()
                     zoom_id = str(zoom.get("id") or "").strip()
                 if not join_url or not zoom_id:

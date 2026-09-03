@@ -36,9 +36,7 @@ def test_serialize_row_decodes_jsonb_metadata_from_asyncpg():
 
 @pytest.mark.parametrize("metadata", ["{invalid", "[]"])
 def test_serialize_row_preserves_unrecognized_jsonb_metadata(metadata):
-    serialized = client._serialize_row(
-        {"occurrence_key": "meeting:1", "metadata": metadata}
-    )
+    serialized = client._serialize_row({"occurrence_key": "meeting:1", "metadata": metadata})
 
     assert serialized is not None
     assert serialized["metadata"] == metadata
@@ -145,8 +143,7 @@ def test_ensure_zoom_alternative_host_repairs_and_verifies_provider_state(monkey
     monkeypatch.setattr(
         scheduler,
         "_zoom_request",
-        lambda method, path, **kwargs: calls.append((method, path, kwargs))
-        or next(responses),
+        lambda method, path, **kwargs: calls.append((method, path, kwargs)) or next(responses),
     )
 
     result = scheduler._ensure_zoom_alternative_host(
@@ -159,9 +156,7 @@ def test_ensure_zoom_alternative_host_repairs_and_verifies_provider_state(monkey
         ("PATCH", "/meetings/1"),
         ("GET", "/meetings/1"),
     ]
-    assert calls[1][2]["payload"] == {
-        "settings": {"alternative_hosts": "proposer@world.org"}
-    }
+    assert calls[1][2]["payload"] == {"settings": {"alternative_hosts": "proposer@world.org"}}
     assert result["settings"]["alternative_hosts"] == "proposer@world.org"
 
 
@@ -170,9 +165,7 @@ def test_ensure_zoom_alternative_host_fails_when_zoom_does_not_apply_it(monkeypa
     monkeypatch.setattr(
         scheduler,
         "_zoom_request",
-        lambda method, path, **kwargs: (
-            {} if method == "PATCH" else {"id": "1", "settings": {}}
-        ),
+        lambda method, path, **kwargs: {} if method == "PATCH" else {"id": "1", "settings": {}},
     )
 
     with pytest.raises(client.MeetingSchedulerError, match="did not assign"):
@@ -325,6 +318,194 @@ def test_zoom_transcript_download_rejects_non_zoom_hosts():
         client.MeetingSchedulerClient()._zoom_download_transcript(
             "https://example.com/recording.vtt"
         )
+
+
+def test_zoom_transcript_download_follows_bounded_zoom_redirect(monkeypatch):
+    scheduler = client.MeetingSchedulerClient()
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if request.url.host == "us02web.zoom.us":
+            return httpx.Response(
+                302,
+                headers={"location": "https://file.zoom.us/rec/transcript.vtt"},
+            )
+        return httpx.Response(200, content=b"WEBVTT\n\nHello world.")
+
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        client.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: real_client(*args, transport=transport, **kwargs),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_zoom_headers",
+        lambda: {"Authorization": "Bearer placeholder"},
+    )
+
+    transcript = scheduler._zoom_download_transcript("https://us02web.zoom.us/rec/download/signed")
+
+    assert transcript == "WEBVTT\n\nHello world."
+    assert [request.url.host for request in requests] == [
+        "us02web.zoom.us",
+        "file.zoom.us",
+    ]
+    assert requests[0].headers["authorization"] == "Bearer placeholder"
+    assert "authorization" not in requests[1].headers
+
+
+def test_zoom_transcript_download_rejects_redirect_outside_zoom(monkeypatch):
+    scheduler = client.MeetingSchedulerClient()
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(302, headers={"location": "https://example.com/transcript.vtt"})
+
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        client.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: real_client(*args, transport=transport, **kwargs),
+    )
+
+    with pytest.raises(client.MeetingSchedulerError, match="invalid transcript"):
+        scheduler._zoom_download_transcript("https://us02web.zoom.us/rec/download/signed")
+
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "http://file.zoom.us/transcript.vtt",
+        "https://zoom.us.example.com/transcript.vtt",
+    ],
+)
+def test_zoom_transcript_download_rejects_unsafe_redirects(monkeypatch, location):
+    scheduler = client.MeetingSchedulerClient()
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(302, headers={"location": location})
+
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        client.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: real_client(*args, transport=transport, **kwargs),
+    )
+
+    with pytest.raises(client.MeetingSchedulerError, match="invalid transcript"):
+        scheduler._zoom_download_transcript("https://us02web.zoom.us/rec/download/signed")
+
+    assert len(requests) == 1
+
+
+def test_zoom_transcript_download_supports_relative_redirect(monkeypatch):
+    scheduler = client.MeetingSchedulerClient()
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if request.url.path == "/rec/download/signed":
+            return httpx.Response(302, headers={"location": "/rec/transcript.vtt"})
+        return httpx.Response(200, content=b"WEBVTT\n\nHello world.")
+
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        client.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: real_client(*args, transport=transport, **kwargs),
+    )
+
+    assert (
+        scheduler._zoom_download_transcript("https://us02web.zoom.us/rec/download/signed")
+        == "WEBVTT\n\nHello world."
+    )
+    assert requests[1].url == httpx.URL("https://us02web.zoom.us/rec/transcript.vtt")
+
+
+def test_zoom_transcript_download_enforces_redirect_limit(monkeypatch):
+    scheduler = client.MeetingSchedulerClient()
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(302, headers={"location": "/rec/again"})
+
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        client.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: real_client(*args, transport=transport, **kwargs),
+    )
+
+    with pytest.raises(client.MeetingSchedulerError, match="redirect limit"):
+        scheduler._zoom_download_transcript("https://us02web.zoom.us/rec/download/signed")
+
+    assert len(requests) == 6
+
+
+def test_zoom_transcript_download_rejects_redirect_without_location(monkeypatch):
+    scheduler = client.MeetingSchedulerClient()
+    transport = httpx.MockTransport(lambda _request: httpx.Response(302))
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        client.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: real_client(*args, transport=transport, **kwargs),
+    )
+
+    with pytest.raises(client.MeetingSchedulerError, match="had no location"):
+        scheduler._zoom_download_transcript("https://us02web.zoom.us/rec/download/signed")
+
+
+def test_zoom_transcript_download_enforces_overall_stream_deadline(monkeypatch):
+    scheduler = client.MeetingSchedulerClient()
+
+    class SlowStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            await asyncio.sleep(0.05)
+            yield b"WEBVTT\n"
+
+    transport = httpx.MockTransport(lambda _request: httpx.Response(200, stream=SlowStream()))
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        client.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: real_client(*args, transport=transport, **kwargs),
+    )
+    monkeypatch.setattr(client, "ZOOM_TRANSCRIPT_DOWNLOAD_TIMEOUT_SECONDS", 0.01)
+
+    with pytest.raises(client.MeetingSchedulerError, match="time limit"):
+        scheduler._zoom_download_transcript("https://us02web.zoom.us/rec/download/signed")
+
+
+def test_zoom_transcript_download_streams_with_size_limit(monkeypatch):
+    scheduler = client.MeetingSchedulerClient()
+
+    def handler(_request):
+        return httpx.Response(200, content=b"x" * (client.MAX_TRANSCRIPT_BYTES + 1))
+
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        client.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: real_client(*args, transport=transport, **kwargs),
+    )
+
+    with pytest.raises(client.MeetingSchedulerError, match="size limit"):
+        scheduler._zoom_download_transcript("https://us02web.zoom.us/rec/download/signed")
 
 
 def test_get_summary_uses_zoom_summary_endpoint_and_strips_signed_urls(monkeypatch):
@@ -1310,10 +1491,7 @@ def test_end_meeting_uses_orbie_zoom_owner_and_keeps_calendar_event(monkeypatch)
     monkeypatch.setattr(
         scheduler,
         "_zoom_request",
-        lambda method, path, **kwargs: provider_calls.append(
-            (method, path, kwargs)
-        )
-        or {},
+        lambda method, path, **kwargs: provider_calls.append((method, path, kwargs)) or {},
     )
     monkeypatch.setattr(
         client,
@@ -1324,9 +1502,7 @@ def test_end_meeting_uses_orbie_zoom_owner_and_keeps_calendar_event(monkeypatch)
     result = scheduler.end_meeting(
         "request:1",
         "wf",
-        client._end_confirmation_token(
-            occurrence_key="request:1", organizer_calendar_key="wf"
-        ),
+        client._end_confirmation_token(occurrence_key="request:1", organizer_calendar_key="wf"),
     )
 
     assert result == {
