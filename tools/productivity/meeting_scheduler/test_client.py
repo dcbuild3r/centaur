@@ -1388,6 +1388,24 @@ def test_ad_hoc_booking_rechecks_a_confirmed_slot_for_staleness(monkeypatch):
         )
 
 
+def test_slot_confirmation_binds_explicit_visibility_for_slack_bookings():
+    common = {
+        "start": client._parse_rfc3339("2099-08-17T10:00:00Z", field="start"),
+        "duration": 30,
+        "time_zone": "Europe/Prague",
+        "attendees": ["person@world.org"],
+        "organizer_calendar_key": "wf",
+    }
+
+    public_token = client._slot_confirmation_token(**common, visibility="public")
+    private_token = client._slot_confirmation_token(**common, visibility="private")
+
+    assert public_token != private_token
+    assert private_token == (
+        "slot-v1:103b9cb8382f12c6618870b57bbf5082e0a4c0182b70b2281a47bf642615325d"
+    )
+
+
 def test_organizer_alias_is_allowlisted(monkeypatch):
     monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
     monkeypatch.setenv("MEETING_ORGANIZER_CALENDARS", '{"wf":"organizer@world.org"}')

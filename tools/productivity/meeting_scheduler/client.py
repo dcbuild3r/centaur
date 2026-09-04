@@ -382,17 +382,21 @@ def _slot_confirmation_token(
     time_zone: str,
     attendees: list[str],
     organizer_calendar_key: str,
+    visibility: str | None = None,
 ) -> str:
     """Bind an ad-hoc write receipt to the exact slot and attendee set."""
 
+    fields: dict[str, Any] = {
+        "attendees": sorted(set(attendees)),
+        "duration": duration,
+        "organizer": organizer_calendar_key,
+        "start": _rfc3339(start),
+        "time_zone": time_zone,
+    }
+    if visibility is not None:
+        fields["visibility"] = visibility
     payload = json.dumps(
-        {
-            "attendees": sorted(set(attendees)),
-            "duration": duration,
-            "organizer": organizer_calendar_key,
-            "start": _rfc3339(start),
-            "time_zone": time_zone,
-        },
+        fields,
         separators=(",", ":"),
         sort_keys=True,
     )
@@ -1645,8 +1649,28 @@ class MeetingSchedulerClient:
                 time_zone=time_zone,
                 attendees=attendees,
                 organizer_calendar_key=organizer_calendar_key,
+                visibility=visibility,
             )
-            if not _matches_confirmation(confirmation_token, expected_confirmation):
+            legacy_public_confirmation = (
+                _slot_confirmation_token(
+                    start=start_at,
+                    duration=duration,
+                    time_zone=time_zone,
+                    attendees=attendees,
+                    organizer_calendar_key=organizer_calendar_key,
+                )
+                if visibility == "public"
+                else ""
+            )
+            if not (
+                _matches_confirmation(confirmation_token, expected_confirmation)
+                or (
+                    legacy_public_confirmation
+                    and _matches_confirmation(
+                        confirmation_token, legacy_public_confirmation
+                    )
+                )
+            ):
                 raise MeetingSchedulerError(
                     "confirmation does not match the requested meeting slot"
                 )
