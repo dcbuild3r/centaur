@@ -1211,7 +1211,7 @@ def drive_list_permissions(file_id: str) -> list[dict]:
         service.permissions()
         .list(
             fileId=file_id,
-            fields="permissions(id, type, role, emailAddress, displayName)",
+            fields="permissions(id, type, role, emailAddress, displayName, domain)",
             supportsAllDrives=True,
         )
         .execute()
@@ -1224,6 +1224,7 @@ def drive_list_permissions(file_id: str) -> list[dict]:
             "role": p.get("role", ""),
             "email": p.get("emailAddress", ""),
             "display_name": p.get("displayName", ""),
+            "domain": p.get("domain", ""),
         }
         for p in result.get("permissions", [])
     ]

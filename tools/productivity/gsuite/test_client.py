@@ -18,6 +18,41 @@ def test_revision_export_authenticates_google_docs_request():
     assert "docs.google.com" in oauth_hosts
 
 
+def test_drive_list_permissions_preserves_domain_writer_grants(monkeypatch):
+    class PermissionsApi:
+        def list(self, **kwargs):
+            assert "domain" in kwargs["fields"]
+            return _CreateRequest(
+                {
+                    "permissions": [
+                        {
+                            "id": "domain-writer",
+                            "type": "domain",
+                            "role": "writer",
+                            "domain": "world.org",
+                        }
+                    ]
+                }
+            )
+
+    class DriveService:
+        def permissions(self):
+            return PermissionsApi()
+
+    monkeypatch.setattr(client, "get_drive_service", lambda: DriveService())
+
+    assert client.drive_list_permissions("agenda-doc") == [
+        {
+            "id": "domain-writer",
+            "type": "domain",
+            "role": "writer",
+            "email": "",
+            "display_name": "",
+            "domain": "world.org",
+        }
+    ]
+
+
 class _CreateRequest:
     def __init__(self, result: dict):
         self._result = result
