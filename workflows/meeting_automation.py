@@ -2145,6 +2145,7 @@ async def _ensure_document_editors(
 ) -> list[str]:
     """Grant and verify writer access through Orbie's authenticated GSuite tool."""
 
+    writable_roles = {"writer", "owner", "organizer", "fileOrganizer"}
     requested = list(
         dict.fromkeys(email.strip().lower() for email in emails if email.strip())
     )
@@ -2160,22 +2161,26 @@ async def _ensure_document_editors(
         .strip()
         .lower()
         for permission in before
-        if str(permission.get("role") or "").strip() in {"writer", "owner"}
+        if str(permission.get("role") or "").strip() in writable_roles
     }
     writer_domains = {
         str(permission.get("domain") or "").strip().lower()
         for permission in before
-        if str(permission.get("role") or "").strip() in {"writer", "owner"}
+        if str(permission.get("role") or "").strip() in writable_roles
         and str(permission.get("type") or "").strip() == "domain"
     }
+    granted_permission_ids: dict[str, str] = {}
     for email in requested:
         email_domain = email.rsplit("@", 1)[-1] if "@" in email else ""
         if email in writers or email_domain in writer_domains:
             continue
-        await ctx.step(
+        grant = await ctx.step(
             f"{step_prefix}:share_drive_file:{email}",
             lambda email=email: client.share_drive_file(file_id, email),
         )
+        permission_id = str(grant.get("id") or "").strip()
+        if permission_id:
+            granted_permission_ids[email] = permission_id
     after = await ctx.step(
         f"{step_prefix}:list_drive_permissions:after",
         lambda: client.drive_file_permissions(file_id),
@@ -2185,19 +2190,26 @@ async def _ensure_document_editors(
         .strip()
         .lower()
         for permission in after
-        if str(permission.get("role") or "").strip() in {"writer", "owner"}
+        if str(permission.get("role") or "").strip() in writable_roles
     }
     verified_domains = {
         str(permission.get("domain") or "").strip().lower()
         for permission in after
-        if str(permission.get("role") or "").strip() in {"writer", "owner"}
+        if str(permission.get("role") or "").strip() in writable_roles
         and str(permission.get("type") or "").strip() == "domain"
+    }
+    verified_permission_ids = {
+        str(permission.get("id") or "").strip()
+        for permission in after
+        if str(permission.get("role") or "").strip() in writable_roles
+        and str(permission.get("id") or "").strip()
     }
     missing = [
         email
         for email in requested
         if email not in verified
         and (email.rsplit("@", 1)[-1] if "@" in email else "") not in verified_domains
+        and granted_permission_ids.get(email) not in verified_permission_ids
     ]
     if missing:
         raise ValueError(

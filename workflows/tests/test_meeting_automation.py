@@ -1037,6 +1037,36 @@ def test_domain_writer_permission_verifies_world_member_editors():
     assert [call for call in client.calls if call[0] == "drive_share"] == []
 
 
+def test_shared_drive_role_and_canonical_email_verify_editor_grant():
+    class CanonicalizingDriveClient(FakeClient):
+        async def share_drive_file(self, file_id, email):
+            self.calls.append(("drive_share", file_id, email))
+            self.drive_permissions = [
+                {
+                    "id": "permission-1",
+                    "type": "user",
+                    "email": "cody@worldcoin.org",
+                    "role": "fileOrganizer",
+                }
+            ]
+            return {"id": "permission-1", "email": email, "role": "writer"}
+
+    client = CanonicalizingDriveClient([])
+
+    verified = asyncio.run(
+        meeting_automation._ensure_document_editors(
+            FakeContext(),
+            client,
+            step_prefix="shared-drive-access",
+            run_result={"docId": "doc-1"},
+            emails=["cody@world.org"],
+        )
+    )
+
+    assert verified == ["cody@world.org"]
+    assert ("drive_share", "doc-1", "cody@world.org") in client.calls
+
+
 def test_manual_private_delivery_rejects_malformed_acknowledgement(monkeypatch):
     client = MalformedAcknowledgementClient(
         [{"id": "private-ai", "title": "AI Workstream", "visibility": "private"}],
