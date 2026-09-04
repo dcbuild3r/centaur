@@ -31,8 +31,10 @@ The worker never receives Notion or Slack credentials in a cadence payload.
      `MEETING_CONFIG_JSON` remains a backwards-compatible fallback.
      Each cadence may set `templateTabName` for the preserved format tab and
      `notesTabName` for the dated notes layout; they default to `Template` and
-     `Meeting Notes`, respectively. Document names support `{YYYY-MM-DD}` and
-     the two-digit ISO week placeholder `{week}`.
+     `Meeting Notes`, respectively. Document names support occurrence-based
+     `{YYYY-MM-DD}`, `{week}`, and `{calendar_week}` placeholders. They also
+     support `{current_date}` and `{current_calendar_week}`, resolved from the
+     actual generation time in the cadence's configured time zone.
    - `ALLOWED_WF_CHANNEL_IDS`: comma-separated Slack channel IDs approved for
      this project. This is a fail-closed allowlist; WF-TFH channels are not
      permitted.

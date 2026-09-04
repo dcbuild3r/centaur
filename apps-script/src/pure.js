@@ -21,11 +21,14 @@ var MeetingOpsPure = (function () {
     return ('0' + week).slice(-2);
   }
 
-  function resolveDocName(template, date, timeZone) {
+  function resolveDocName(template, date, timeZone, currentDate) {
+    var runDate = currentDate || date;
     return String(template)
       .split('{YYYY-MM-DD}').join(dateKey(date, timeZone))
       .split('{calendar_week}').join(isoWeek(date, timeZone))
-      .split('{week}').join(isoWeek(date, timeZone));
+      .split('{week}').join(isoWeek(date, timeZone))
+      .split('{current_date}').join(dateKey(runDate, timeZone))
+      .split('{current_calendar_week}').join(isoWeek(runDate, timeZone));
   }
 
   function isWithinAgendaWindow(now, occurrence, leadMin, staleWindowMin) {

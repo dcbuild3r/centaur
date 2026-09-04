@@ -195,7 +195,12 @@ function processAgenda_(meeting, now, requesterSlackUserId, options) {
 
   var timeZone = meeting.timeZone || DEFAULT_TIME_ZONE;
   var date = MeetingOpsPure.dateKey(occurrence, timeZone);
-  var docName = MeetingOpsPure.resolveDocName(meeting.docNameTemplate, occurrence, timeZone);
+  var docName = MeetingOpsPure.resolveDocName(
+    meeting.docNameTemplate,
+    occurrence,
+    timeZone,
+    now
+  );
   var recordKey = AGENDA_RECORD_PREFIX + meeting.id + ':' + date;
   var properties = PropertiesService.getScriptProperties();
   var record = readJsonProperty_(properties, recordKey);
