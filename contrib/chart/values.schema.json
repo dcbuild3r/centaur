@@ -14,6 +14,12 @@
         },
         "sentryDsn": { "type": "string" },
         "railsEnv": { "type": "string" },
+        "chat": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" }
+          }
+        },
         "passwordLoginEnabled": { "type": "boolean" },
         "publicSlackThreadsEnabled": { "type": "boolean" },
         "adminSlackThreadsEnabled": { "type": "boolean" },

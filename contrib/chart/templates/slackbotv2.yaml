@@ -131,10 +131,11 @@ spec:
             - name: SLACKBOTV2_DELETE_ALLOWED_CHANNELS
               value: {{ .Values.slackbotv2.deleteAllowedChannels | quote }}
 {{- end }}
-{{- if $console.publicUrl }}
+{{- if and $console.chat.enabled $console.publicUrl }}
             # Public origin of the Console UI (matches the Console's own
-            # CENTAUR_CONSOLE_PUBLIC_URL). When set, the first assistant message
-            # in a Slack thread gets an "Open session in Console" link.
+            # CENTAUR_CONSOLE_PUBLIC_URL). When chat is enabled, the first
+            # assistant message in a Slack thread gets an "Open chat in Console"
+            # link.
             - name: CENTAUR_CONSOLE_PUBLIC_URL
               value: {{ $console.publicUrl | quote }}
 {{- end }}
