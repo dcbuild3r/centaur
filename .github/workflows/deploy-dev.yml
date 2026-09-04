@@ -411,13 +411,13 @@ jobs:
             --source-policy onepassword \
             --op-vault Centaur \
             --source-refs '{"NOTION_PRIVATE_MEETINGS_API_KEY":"op://Centaur/NOTION_PRIVATE_MEETINGS_API_KEY/NOTION_PRIVATE_MEETINGS_API_KEY"}' \
-            principals grant warm-pool-bootstrap --tool notion-private-meetings
+            principals grant warm-pool-bootstrap --tool notion_private_meetings
 
           kubectl --namespace "$HELM_NAMESPACE" exec \
             deployment/centaur-centaur-api-rs -- \
             /usr/local/bin/centaur-perms \
             --tools-dir /app/tools \
-            principals revoke warm-pool-bootstrap --tool notion-private-meetings
+            principals revoke warm-pool-bootstrap --tool notion_private_meetings
 
           kubectl --namespace "$HELM_NAMESPACE" exec \
             deployment/centaur-centaur-api-rs -- \
@@ -426,7 +426,7 @@ jobs:
             --source-policy onepassword \
             --op-vault Centaur \
             --source-refs '{"NOTION_PRIVATE_MEETINGS_API_KEY":"op://Centaur/NOTION_PRIVATE_MEETINGS_API_KEY/NOTION_PRIVATE_MEETINGS_API_KEY"}' \
-            principals grant workflow-meeting-automation --tool notion-private-meetings
+            principals grant workflow-meeting-automation --tool notion_private_meetings
 
           # `roles grant` deliberately requires an existing role.  Dune is a
           # newly introduced tool, so bootstrap its role through the existing
@@ -525,7 +525,7 @@ jobs:
                 deployment/centaur-centaur-api-rs -- \
                 /usr/local/bin/centaur-perms \
                 --tools-dir /app/tools \
-                principals revoke "$principal_oid" --tool notion-private-meetings
+                principals revoke "$principal_oid" --tool notion_private_meetings
             fi
           done < <(awk '$2 ~ /^prn_/ { print $1, $2 }' <<<"$principal_rows")
 
