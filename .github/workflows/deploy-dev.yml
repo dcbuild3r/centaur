@@ -401,6 +401,33 @@ jobs:
             --source-refs '{"NOTION_API_KEY":"op://Centaur/Centaur.run - NOTION_API_KEY/password"}' \
             roles grant tool-notion --tool notion
 
+          # Private meeting notes use a separate purpose-bound integration.
+          # Bootstrap its role without leaving the warm pool authorized, then
+          # assign it only to the durable meeting workflow.
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            --source-policy onepassword \
+            --op-vault Centaur \
+            --source-refs '{"NOTION_PRIVATE_MEETINGS_API_KEY":"op://Centaur/NOTION_PRIVATE_MEETINGS_API_KEY/NOTION_PRIVATE_MEETINGS_API_KEY"}' \
+            principals grant warm-pool-bootstrap --tool notion-private-meetings
+
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            principals revoke warm-pool-bootstrap --tool notion-private-meetings
+
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            --source-policy onepassword \
+            --op-vault Centaur \
+            --source-refs '{"NOTION_PRIVATE_MEETINGS_API_KEY":"op://Centaur/NOTION_PRIVATE_MEETINGS_API_KEY/NOTION_PRIVATE_MEETINGS_API_KEY"}' \
+            principals grant workflow-meeting-automation --tool notion-private-meetings
+
           # `roles grant` deliberately requires an existing role.  Dune is a
           # newly introduced tool, so bootstrap its role through the existing
           # `principals grant --tool` path (which upserts the role and refreshes
@@ -493,6 +520,13 @@ jobs:
                 --tools-dir /app/tools \
                 principals revoke "$principal_oid" --tool meeting_scheduler
             fi
+            if grep -Fq 'tool-notion-private-meetings (' <<<"$candidate_state"; then
+              kubectl --namespace "$HELM_NAMESPACE" exec \
+                deployment/centaur-centaur-api-rs -- \
+                /usr/local/bin/centaur-perms \
+                --tools-dir /app/tools \
+                principals revoke "$principal_oid" --tool notion-private-meetings
+            fi
           done < <(awk '$2 ~ /^prn_/ { print $1, $2 }' <<<"$principal_rows")
 
           # Remove historical DM/channel grants. New grants are made by api-rs
@@ -560,6 +594,8 @@ jobs:
           grep -Fq '  MEETING_OPS_SCRIPT_ID' <<<"$principal_state"
           grep -Fq 'tool-meeting-scheduler (' <<<"$principal_state"
           grep -Fq 'static ZOOM_ACCESS_TOKEN' <<<"$principal_state"
+          grep -Fq 'tool-notion-private-meetings (' <<<"$principal_state"
+          grep -Fq 'static NOTION_PRIVATE_MEETINGS_API_KEY' <<<"$principal_state"
 
           principal_rows="$(kubectl --namespace "$HELM_NAMESPACE" exec \
             deployment/centaur-centaur-api-rs -- \
@@ -581,6 +617,11 @@ jobs:
             if [[ "$foreign_id" != "workflow-meeting-automation" ]] \
               && grep -Fq 'tool-meeting-ops (' <<<"$candidate_state"; then
               echo "meeting ops remains assigned directly to $foreign_id ($principal_oid)" >&2
+              exit 1
+            fi
+            if [[ "$foreign_id" != "workflow-meeting-automation" ]] \
+              && grep -Fq 'tool-notion-private-meetings (' <<<"$candidate_state"; then
+              echo "private meeting Notion role remains assigned to $foreign_id ($principal_oid)" >&2
               exit 1
             fi
           done < <(awk '$2 ~ /^prn_/ { print $1, $2 }' <<<"$principal_rows")
@@ -622,6 +663,13 @@ jobs:
             --tools-dir /app/tools \
             secrets show tool-meeting-ops-oauth-https-oauth2-googleapis-com-token)"
           grep -Fq '"secret_ref": "op://Centaur/GOOGLE_TOKEN_JSON/credential"' <<<"$oauth_state"
+
+          private_notion_state="$(kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            secrets show tool-notion-private-meetings-notion-private-meetings-api-key)"
+          grep -Fq '"secret_ref": "op://Centaur/NOTION_PRIVATE_MEETINGS_API_KEY/NOTION_PRIVATE_MEETINGS_API_KEY"' <<<"$private_notion_state"
 
           echo "Meeting Ops role and managed secret references are present"
 

@@ -18,6 +18,7 @@ export type PendingMeetingBooking = {
   start: string
   timeZone: string
   title: string
+  visibility: 'private' | 'public'
 }
 
 const BOOKING_TTL_MS = 30 * 60 * 1000
@@ -36,6 +37,8 @@ export function parseFixedTimeMeetingRequest(
 ): PendingMeetingBooking | null {
   const clean = text.replace(/^\s*(?:<@[A-Z0-9]+(?:\|[^>]*)?>|@orbie)\s*/i, '').trim()
   if (!/^(?:schedule|book|create)\b/i.test(clean) || !/\bmeeting\b/i.test(clean)) return null
+  const visibilityMatch = clean.match(/\b(private|public)\b/i)
+  if (!visibilityMatch) return null
 
   const durationMatch = clean.match(/\b(\d{1,3})[- ]minute\b/i)
   const timeMatch = clean.match(/\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i)
@@ -68,6 +71,7 @@ export function parseFixedTimeMeetingRequest(
   if (!organizerCalendarKey) return null
   const attendeeEmails = Array.from(new Set([requesterEmail, ...emails]))
   if (!attendeeEmails.every(email => /^[^@\s]+@world\.org$/i.test(email))) return null
+  const visibility = visibilityMatch[1]!.toLowerCase() as 'private' | 'public'
   return {
     attendeeEmails,
     durationMinutes,
@@ -77,7 +81,8 @@ export function parseFixedTimeMeetingRequest(
     requesterEmail,
     start,
     timeZone,
-    title: titleMatch[1]!.trim()
+    title: titleMatch[1]!.trim(),
+    visibility
   }
 }
 
@@ -89,6 +94,7 @@ export function meetingBookingPreview(booking: PendingMeetingBooking): string {
     `• Requested by: ${booking.requesterEmail}`,
     '• Organizer: Orbie Automation',
     `• Attendees: ${booking.attendeeEmails.join(', ')}`,
+    `• Visibility: ${booking.visibility === 'private' ? 'Private' : 'Public'}`,
     '• World Foundation Zoom with automatic cloud recording',
     '',
     'Reply `confirm` within 30 minutes to create the Calendar event and Zoom room.'
@@ -112,7 +118,8 @@ export async function dispatchConfirmedMeetingBooking(
       occurrence_key: booking.occurrenceKey,
       start: booking.start,
       time_zone: booking.timeZone,
-      title: booking.title
+      title: booking.title,
+      visibility: booking.visibility
     },
     requester_slack_team_id: requester.slackTeamId,
     requester_slack_user_id: requester.slackUserId,
@@ -130,7 +137,8 @@ function slotConfirmationToken(booking: PendingMeetingBooking): string {
     duration: booking.durationMinutes,
     organizer: booking.organizerCalendarKey,
     start: booking.start,
-    time_zone: booking.timeZone
+    time_zone: booking.timeZone,
+    visibility: booking.visibility
   })
   return `slot-v1:${createHash('sha256').update(payload).digest('hex')}`
 }

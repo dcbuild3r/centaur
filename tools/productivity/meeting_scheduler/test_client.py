@@ -2289,11 +2289,13 @@ def test_public_book_meeting_forwards_alternative_host_email(monkeypatch):
         mode="ad_hoc",
         confirmation_token="confirmed",
         alternative_host_email="proposer@world.org",
+        visibility="private",
     )
 
     assert result == {"status": "booked"}
     assert "alternative_host_email" in inspect.signature(client.book_meeting).parameters
     assert calls[0][1]["alternative_host_email"] == "proposer@world.org"
+    assert calls[0][1]["visibility"] == "private"
 
 
 def _zoom_transport(monkeypatch, status_code, *, json_body=None, text=None, headers=None):

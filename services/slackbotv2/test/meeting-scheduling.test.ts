@@ -8,7 +8,7 @@ import {
 describe('fixed-time meeting scheduling ingress', () => {
   test('parses the reported Orbie DM into an exact confirmation proposal', () => {
     const booking = parseFixedTimeMeetingRequest(
-      'Schedule a 10-minute meeting called "Orbie Zoom integration smoke test" for me today at 1:15 PM Prague time. Use my verified Google Calendar, create the Zoom room, and enable automatic cloud recording.',
+      'Schedule a public 10-minute meeting called "Orbie Zoom integration smoke test" for me today at 1:15 PM Prague time. Use my verified Google Calendar, create the Zoom room, and enable automatic cloud recording.',
       'dc.builder@world.org',
       new Date('2026-08-27T10:44:10Z'),
       'orbie'
@@ -21,11 +21,24 @@ describe('fixed-time meeting scheduling ingress', () => {
       requesterEmail: 'dc.builder@world.org',
       start: '2026-08-27T11:15:00Z',
       timeZone: 'Europe/Prague',
-      title: 'Orbie Zoom integration smoke test'
+      title: 'Orbie Zoom integration smoke test',
+      visibility: 'public'
     })
     expect(meetingBookingPreview(booking!)).toContain('Requested by: dc.builder@world.org')
     expect(meetingBookingPreview(booking!)).toContain('Organizer: Orbie Automation')
     expect(meetingBookingPreview(booking!)).toContain('Reply `confirm`')
+  })
+
+  test('carries an explicit private meeting choice through confirmation', () => {
+    const booking = parseFixedTimeMeetingRequest(
+      'Schedule a private 10-minute meeting called "Private notes test" for me today at 1:15 PM Prague time.',
+      'dc.builder@world.org',
+      new Date('2026-08-27T10:44:10Z'),
+      'orbie'
+    )
+
+    expect(booking?.visibility).toBe('private')
+    expect(meetingBookingPreview(booking!)).toContain('Visibility: Private')
   })
 
   test('requires an explicit supported date, time, duration, title, and timezone', () => {
@@ -35,11 +48,17 @@ describe('fixed-time meeting scheduling ingress', () => {
       'dc.builder@world.org',
       new Date('2026-08-27T13:00:00Z')
     )).toBeNull()
+    expect(parseFixedTimeMeetingRequest(
+      'Schedule a 10-minute meeting called "Missing visibility" for me tomorrow at 1:15 PM Prague time',
+      'dc.builder@world.org',
+      new Date('2026-08-27T10:44:10Z'),
+      'orbie'
+    )).toBeNull()
   })
 
   test('parses the production 24-hour Europe/Prague request through the broker', () => {
     const booking = parseFixedTimeMeetingRequest(
-      'Schedule a fresh 10-minute Zoom end-to-end acceptance meeting for today, 3 September 2026, at 15:16 Europe/Prague. Title it “Orbie Zoom semantic summary acceptance.” Use the normal Orbie-owned Calendar and Zoom flow, invite dc.builder@world.org, make the authenticated proposer a verified Zoom alternative host with end-for-all controls, allow join before host with no waiting room or authentication requirement, and enable automatic cloud recording.',
+      'Schedule a fresh public 10-minute Zoom end-to-end acceptance meeting for today, 3 September 2026, at 15:16 Europe/Prague. Title it “Orbie Zoom semantic summary acceptance.” Use the normal Orbie-owned Calendar and Zoom flow, invite dc.builder@world.org, make the authenticated proposer a verified Zoom alternative host with end-for-all controls, allow join before host with no waiting room or authentication requirement, and enable automatic cloud recording.',
       'dc.builder@world.org',
       new Date('2026-09-03T13:11:38Z'),
       'orbie'

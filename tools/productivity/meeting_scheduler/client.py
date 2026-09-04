@@ -596,14 +596,15 @@ class MeetingSchedulerClient:
         organizer_id: str,
         attendees: list[str],
         allow_parameter_update: bool,
+        visibility: str = "public",
     ) -> tuple[dict[str, Any], bool]:
         inserted = await connection.fetchrow(
             """
             insert into orbie_meeting_occurrences
                 (occurrence_key, cadence_id, request_id, title, requested_start,
                  duration_minutes, time_zone, organizer_calendar_key,
-                 organizer_calendar_id, attendee_emails)
-            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 organizer_calendar_id, attendee_emails, metadata)
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
             on conflict (occurrence_key) do nothing
             returning occurrence_key
             """,
@@ -617,6 +618,7 @@ class MeetingSchedulerClient:
             organizer_key,
             organizer_id,
             attendees,
+            json.dumps({"visibility": visibility}),
         )
         row = await connection.fetchrow(
             "select * from orbie_meeting_occurrences where occurrence_key = $1 for update",
@@ -638,6 +640,9 @@ class MeetingSchedulerClient:
             if str(item).strip()
         ]
         stored_start = current.get("requested_start")
+        stored_metadata = current.get("metadata")
+        stored_metadata = stored_metadata if isinstance(stored_metadata, dict) else {}
+        stored_visibility = str(stored_metadata.get("visibility") or "public")
         start_matches = False
         if stored_start:
             try:
@@ -652,6 +657,7 @@ class MeetingSchedulerClient:
             and int(current.get("duration_minutes") or 0) == duration
             and str(current.get("time_zone") or "") == time_zone
             and stored_attendees == attendees
+            and stored_visibility == visibility
         )
         if not parameters_match and (
             not allow_parameter_update or current.get("status") in {"completed", "cancelled"}
@@ -663,6 +669,7 @@ class MeetingSchedulerClient:
                 update orbie_meeting_occurrences
                 set title = $2, requested_start = $3, duration_minutes = $4,
                     time_zone = $5, attendee_emails = $6, status = 'pending',
+                    metadata = metadata || $7::jsonb,
                     last_error = '', updated_at = now()
                 where occurrence_key = $1
                 """,
@@ -672,6 +679,7 @@ class MeetingSchedulerClient:
                 duration,
                 time_zone,
                 attendees,
+                json.dumps({"visibility": visibility}),
             )
             current.update(
                 {
@@ -680,6 +688,7 @@ class MeetingSchedulerClient:
                     "duration_minutes": duration,
                     "time_zone": time_zone,
                     "attendee_emails": attendees,
+                    "metadata": {**stored_metadata, "visibility": visibility},
                     "last_error": "",
                 }
             )
@@ -1602,6 +1611,7 @@ class MeetingSchedulerClient:
         mode: str = "cadence",
         confirmation_token: str | None = None,
         alternative_host_email: str | None = None,
+        visibility: str = "public",
     ) -> dict[str, Any]:
         """Create or reuse one Zoom + Calendar meeting occurrence."""
         _require_enabled()
@@ -1611,6 +1621,9 @@ class MeetingSchedulerClient:
         if mode == "ad_hoc" and not str(confirmation_token or "").strip():
             raise MeetingSchedulerError("ad-hoc booking requires explicit confirmation")
         attendees = _email_list(attendee_emails)
+        visibility = str(visibility or "").strip().lower()
+        if visibility not in {"public", "private"}:
+            raise MeetingSchedulerError("visibility must be public or private")
         alternative_host = ""
         if alternative_host_email:
             alternative_host = _email_list([alternative_host_email])[0]
@@ -1656,6 +1669,7 @@ class MeetingSchedulerClient:
                 organizer_id=organizer_id,
                 attendees=attendees,
                 alternative_host_email=alternative_host,
+                visibility=visibility,
                 allow_parameter_update=mode == "cadence",
                 check_slot_free=mode == "ad_hoc",
             )
@@ -1683,6 +1697,7 @@ class MeetingSchedulerClient:
         allow_parameter_update: bool,
         check_slot_free: bool,
         alternative_host_email: str = "",
+        visibility: str = "public",
     ) -> dict[str, Any] | _OperationFailure:
         async def operation(connection: asyncpg.Connection) -> dict[str, Any] | _OperationFailure:
             organizer_date = start_at.astimezone(_zone(time_zone)).date().isoformat()
@@ -1703,6 +1718,7 @@ class MeetingSchedulerClient:
                 organizer_id=organizer_id,
                 attendees=attendees,
                 allow_parameter_update=allow_parameter_update,
+                visibility=visibility,
             )
             if not inserted:
                 for field, value in (
@@ -2748,6 +2764,7 @@ def book_meeting(
     mode: str = "cadence",
     confirmation_token: str | None = None,
     alternative_host_email: str | None = None,
+    visibility: str = "public",
 ) -> dict[str, Any]:
     return _client().book_meeting(
         occurrence_key,
@@ -2762,6 +2779,7 @@ def book_meeting(
         mode,
         confirmation_token,
         alternative_host_email=alternative_host_email,
+        visibility=visibility,
     )
 
 

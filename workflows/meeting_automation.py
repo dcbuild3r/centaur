@@ -19,6 +19,7 @@ WORKFLOW_PRINCIPAL = True
 WORLD_SLACK_TEAM_ID = "TL1HM8UUU"
 MEETING_OPS_TOOL = "meeting-ops"
 MEETING_SCHEDULER_TOOL = "meeting-scheduler"
+PRIVATE_NOTION_TOOL = "notion-private-meetings"
 MAX_CUSTOM_INSTRUCTIONS_CHARS = 4000
 CADENCES_DATABASE_ID = "cbdf28b9-3bc7-474c-85ed-9b323eb09889"
 MEETING_REPOSITORY_DATABASE_ID = "3b5f1e63-445a-80dc-96e6-f74a49d370e8"
@@ -28,6 +29,8 @@ DEFAULT_MEETING_TIME = "10:00"
 DEFAULT_NOTIFICATION_TIME = "09:15"
 DEFAULT_PREPARATION_BUSINESS_DAYS = 1
 EMAIL_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
+SLACK_USER_ID_RE = re.compile(r"^[UW][A-Z0-9]{8,}$")
+NOTION_OBJECT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
 MANUAL_ORGANIZER_CALENDAR_KEY = "MEETING_MANUAL_ORGANIZER_CALENDAR_KEY"
 
 
@@ -49,6 +52,31 @@ def _env_positive_int(name: str, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return value if value > 0 else default
+
+
+def _private_notion_database_mapping(name: str) -> dict[str, str]:
+    raw = _env_value(name, "{}").strip()
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"{name} must be a JSON object") from error
+    if not isinstance(value, dict):
+        raise TypeError(f"{name} must be a JSON object")
+    mapping: dict[str, str] = {}
+    for raw_key, raw_database_id in value.items():
+        key = str(raw_key).strip()
+        database_id = str(raw_database_id).strip()
+        participants = key.split(",")
+        if not participants or any(
+            not SLACK_USER_ID_RE.fullmatch(participant) for participant in participants
+        ):
+            raise ValueError(f"{name} contains an invalid Slack participant key")
+        if participants != sorted(set(participants)):
+            raise ValueError(f"{name} participant keys must be sorted and unique")
+        if not NOTION_OBJECT_ID_RE.fullmatch(database_id):
+            raise ValueError(f"{name} contains an invalid Notion database ID")
+        mapping[key] = database_id
+    return mapping
 
 
 # The durable runtime wakes this workflow often enough to honor each cadence's
@@ -257,6 +285,14 @@ class MeetingOpsClient(Protocol):
         meeting_url: str,
         action_items: str,
         summary_source: str = "zoom",
+    ) -> dict[str, Any]: ...
+
+    async def publish_private_notion_meeting_summary(
+        self, database_id: str, **kwargs: Any
+    ) -> dict[str, Any]: ...
+
+    async def publish_private_meeting_reference(
+        self, database_id: str, **kwargs: Any
     ) -> dict[str, Any]: ...
 
     async def share_drive_file(self, file_id: str, email: str) -> dict[str, Any]: ...
@@ -510,7 +546,11 @@ class MeetingOpsToolClient:
         return await self._paginate_notion("users", {})
 
     async def _paginate_notion(
-        self, method: str, base_args: dict[str, Any]
+        self,
+        method: str,
+        base_args: dict[str, Any],
+        *,
+        tool: str = "notion",
     ) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         cursor: str | None = None
@@ -518,7 +558,7 @@ class MeetingOpsToolClient:
             args = {**base_args, "page_size": 100}
             if cursor:
                 args["start_cursor"] = cursor
-            result = await self._ctx.call_tool("notion", method, args)
+            result = await self._ctx.call_tool(tool, method, args)
             output = _tool_output(result)
             if isinstance(output, dict):
                 items = output.get("results", [])
@@ -655,17 +695,21 @@ class MeetingOpsToolClient:
         meeting_url: str,
         action_items: str,
         summary_source: str = "zoom",
+        database_id: str = MEETING_REPOSITORY_DATABASE_ID,
+        status_name: str = "Review",
+        _tool: str = "notion",
     ) -> dict[str, Any]:
         marker = f"ORBiE_ZOOM_SUMMARY:{occurrence_key}"
         matches = await self._paginate_notion(
             "query_database",
             {
-                "database_id": MEETING_REPOSITORY_DATABASE_ID,
+                "database_id": database_id,
                 "filter": {
                     "property": "Occurrence Key",
                     "rich_text": {"equals": occurrence_key},
                 },
             },
+            tool=_tool,
         )
         if matches:
             existing_page_id = str(matches[0].get("id") or "")
@@ -691,15 +735,15 @@ class MeetingOpsToolClient:
             *_notion_paragraph_chunks(transcript or "Transcript was not available."),
         ]
         result = await self._ctx.call_tool(
-            "notion",
+            _tool,
             "create_page",
             {
-                "parent": {"database_id": MEETING_REPOSITORY_DATABASE_ID},
+                "parent": {"database_id": database_id},
                 "properties": {
                     "Meeting Name": {"title": [{"text": {"content": title[:2000]}}]},
                     "Date": {"date": {"start": start}},
                     "Transcript Source": {"select": {"name": "Zoom"}},
-                    "Status": {"status": {"name": "Review"}},
+                    "Status": {"status": {"name": status_name}},
                     "Occurrence Key": {
                         "rich_text": [{"text": {"content": occurrence_key[:2000]}}]
                     },
@@ -721,6 +765,146 @@ class MeetingOpsToolClient:
             "marker": marker,
             "created": True,
         }
+
+    async def publish_private_notion_meeting_summary(
+        self,
+        database_id: str,
+        *,
+        participant_notion_user_ids: list[str],
+        occurrence_key: str,
+        title: str,
+        start: str,
+        summary: str,
+        transcript: str,
+        meeting_id: str,
+        meeting_url: str,
+        action_items: str,
+        summary_source: str = "zoom",
+    ) -> dict[str, Any]:
+        # The database is selected only from deployment configuration. Its
+        # participant-restricted ACL must be provisioned and verified before
+        # this mapping is enabled; Notion's public API cannot grant page ACLs.
+        marker = f"ORBiE_ZOOM_SUMMARY:{occurrence_key}"
+        matches = await self._paginate_notion(
+            "query_database",
+            {
+                "database_id": database_id,
+                "filter": {
+                    "property": "Occurrence Key",
+                    "rich_text": {"equals": occurrence_key},
+                },
+            },
+            tool=PRIVATE_NOTION_TOOL,
+        )
+        if matches:
+            return {
+                "page_id": str(matches[0].get("id") or ""),
+                "marker": marker,
+                "created": False,
+            }
+        children = [
+            _notion_paragraph(marker),
+            _notion_heading("Meeting Summary", 1),
+            _notion_heading("AI Summary", 2),
+            *_notion_paragraph_chunks(summary or "Zoom summary was not available."),
+            _notion_heading("Summary Source", 2),
+            _notion_paragraph(summary_source or "zoom"),
+            _notion_heading("Action Items", 2),
+            *_notion_paragraph_chunks(
+                action_items or "No action items were identified by Zoom."
+            ),
+            _notion_heading("Annotated Transcript", 2),
+            *_notion_paragraph_chunks(transcript or "Transcript was not available."),
+            _notion_heading("Meeting Details", 2),
+            _notion_paragraph(f"Zoom meeting ID: {meeting_id}"),
+            *(
+                [_notion_paragraph(f"Zoom meeting: {meeting_url}")]
+                if meeting_url
+                else []
+            ),
+        ]
+        result = await self._ctx.call_tool(
+            PRIVATE_NOTION_TOOL,
+            "create_page",
+            {
+                "parent": {"database_id": database_id},
+                "properties": {
+                    "Meeting": {"title": [{"text": {"content": title[:2000]}}]},
+                    "Date": {"date": {"start": start}},
+                    "Status": {"status": {"name": "Not started"}},
+                    "Participants": {
+                        "people": [
+                            {"id": notion_user_id}
+                            for notion_user_id in participant_notion_user_ids
+                        ]
+                    },
+                    "Occurrence Key": {
+                        "rich_text": [{"text": {"content": occurrence_key[:2000]}}]
+                    },
+                    "Visibility": {"select": {"name": "private"}},
+                },
+                "children": children[:100],
+            },
+        )
+        output = _tool_output(result)
+        if not isinstance(output, dict):
+            raise TypeError("Private Notion publication returned an unexpected result")
+        return {
+            "page_id": str(output.get("id") or ""),
+            "marker": marker,
+            "created": True,
+        }
+
+    async def publish_private_meeting_reference(
+        self,
+        database_id: str,
+        *,
+        occurrence_key: str,
+        title: str,
+        start: str,
+        canonical_url: str,
+        visibility: str,
+        participant_notion_user_ids: list[str],
+    ) -> dict[str, Any]:
+        matches = await self._paginate_notion(
+            "query_database",
+            {
+                "database_id": database_id,
+                "filter": {
+                    "property": "Occurrence Key",
+                    "rich_text": {"equals": occurrence_key},
+                },
+            },
+            tool=PRIVATE_NOTION_TOOL,
+        )
+        if matches:
+            return {"page_id": str(matches[0].get("id") or ""), "created": False}
+        result = await self._ctx.call_tool(
+            PRIVATE_NOTION_TOOL,
+            "create_page",
+            {
+                "parent": {"database_id": database_id},
+                "properties": {
+                    "Meeting": {"title": [{"text": {"content": title[:2000]}}]},
+                    "Date": {"date": {"start": start}},
+                    "Occurrence Key": {
+                        "rich_text": [{"text": {"content": occurrence_key[:2000]}}]
+                    },
+                    "Visibility": {"select": {"name": visibility}},
+                    "Participants": {
+                        "people": [
+                            {"id": notion_user_id}
+                            for notion_user_id in participant_notion_user_ids
+                        ]
+                    },
+                    "Canonical note": {"url": canonical_url},
+                },
+            },
+        )
+        output = _tool_output(result)
+        if not isinstance(output, dict):
+            raise TypeError("Private Notion projection returned an unexpected result")
+        return {"page_id": str(output.get("id") or ""), "created": True}
 
     async def share_drive_file(self, file_id: str, email: str) -> dict[str, Any]:
         result = await self._ctx.call_tool(
@@ -1585,22 +1769,93 @@ async def _process_post_meeting_candidate(
         candidate.get("zoom_join_url") or candidate.get("zoomJoinUrl") or ""
     ).strip()
     notion_page_id = str((cadence or {}).get("_page_id") or "")
+    attendee_ids, unresolved = _slack_ids_for_emails(
+        list(candidate.get("attendee_emails") or candidate.get("attendeeEmails") or []),
+        slack_users,
+    )
+    candidate_metadata = candidate.get("metadata")
+    candidate_metadata = (
+        candidate_metadata if isinstance(candidate_metadata, dict) else {}
+    )
+    visibility = str(
+        candidate.get("visibility")
+        or candidate_metadata.get("visibility")
+        or (cadence or {}).get("visibility")
+        or "public"
+    ).strip().lower()
+    if visibility not in {"public", "private"}:
+        raise ValueError("meeting visibility must be public or private")
+    private_databases: dict[str, str] = {}
+    private_canonical_database_id = ""
     try:
-        publication = await ctx.step(
-            f"{step_prefix}:notion:{occurrence_key}",
-            lambda: client.publish_notion_meeting_summary(
-                notion_page_id,
-                occurrence_key=occurrence_key,
-                title=title,
-                start=start,
-                summary=summary,
-                transcript=transcript,
-                meeting_id=meeting_id,
-                meeting_url=meeting_url,
-                action_items=action_items,
-                summary_source=summary_source,
-            ),
-        )
+        publication_args = {
+            "occurrence_key": occurrence_key,
+            "title": title,
+            "start": start,
+            "summary": summary,
+            "transcript": transcript,
+            "meeting_id": meeting_id,
+            "meeting_url": meeting_url,
+            "action_items": action_items,
+            "summary_source": summary_source,
+        }
+        if visibility == "private":
+            if unresolved or not attendee_ids:
+                raise ValueError("private meeting participants could not be resolved")
+            private_databases = _private_notion_database_mapping(
+                "MEETING_PRIVATE_NOTION_DATABASES_JSON"
+            )
+            unmapped_participants = [
+                user_id for user_id in attendee_ids if user_id not in private_databases
+            ]
+            if unmapped_participants:
+                raise ValueError(
+                    "private meeting participants have no registered Notion database"
+                )
+            private_notion_users = _private_notion_database_mapping(
+                "MEETING_PRIVATE_NOTION_USER_IDS_JSON"
+            )
+            unmapped_notion_users = [
+                user_id for user_id in attendee_ids if user_id not in private_notion_users
+            ]
+            if unmapped_notion_users:
+                raise ValueError(
+                    "private meeting participants have no registered Notion user"
+                )
+            participant_key = ",".join(sorted(set(attendee_ids)))
+            shared_databases = _private_notion_database_mapping(
+                "MEETING_PRIVATE_NOTION_SHARED_DATABASES_JSON"
+            )
+            private_canonical_database_id = str(
+                shared_databases.get(participant_key)
+                or (
+                    private_databases[attendee_ids[0]]
+                    if len(set(attendee_ids)) == 1
+                    else ""
+                )
+            )
+            if not private_canonical_database_id:
+                raise ValueError(
+                    "no participant-restricted Notion parent is configured"
+                )
+            publication = await ctx.step(
+                f"{step_prefix}:notion-private:{occurrence_key}",
+                lambda: client.publish_private_notion_meeting_summary(
+                    private_canonical_database_id,
+                    participant_notion_user_ids=[
+                        private_notion_users[user_id]
+                        for user_id in sorted(set(attendee_ids))
+                    ],
+                    **publication_args,
+                ),
+            )
+        else:
+            publication = await ctx.step(
+                f"{step_prefix}:notion:{occurrence_key}",
+                lambda: client.publish_notion_meeting_summary(
+                    notion_page_id, **publication_args
+                ),
+            )
     except Exception as error:
         await _mark_post_meeting_processing(
             ctx,
@@ -1623,10 +1878,28 @@ async def _process_post_meeting_candidate(
         if notion_page_id
         else ""
     )
-    attendee_ids, unresolved = _slack_ids_for_emails(
-        list(candidate.get("attendee_emails") or candidate.get("attendeeEmails") or []),
-        slack_users,
-    )
+    if visibility == "private":
+        for user_id in attendee_ids:
+            private_database_id = private_databases[user_id]
+            if private_database_id == private_canonical_database_id:
+                continue
+            await ctx.step(
+                f"{step_prefix}:notion-private-index:{occurrence_key}:{user_id}",
+                lambda private_database_id=private_database_id: (
+                    client.publish_private_meeting_reference(
+                        private_database_id,
+                        occurrence_key=occurrence_key,
+                        title=title,
+                        start=start,
+                        canonical_url=notion_url,
+                        visibility="private",
+                        participant_notion_user_ids=[
+                            private_notion_users[participant_id]
+                            for participant_id in sorted(set(attendee_ids))
+                        ],
+                    )
+                ),
+            )
     delivered_to: list[str] = []
     message = _post_meeting_message(title, summary, transcript, notion_url)
     await _mark_post_meeting_processing(
@@ -1689,8 +1962,7 @@ async def _process_post_meeting_candidate(
     ).strip()
     if (
         notify_channel
-        and str(candidate.get("visibility") or (cadence or {}).get("visibility") or "")
-        == "public"
+        and visibility == "public"
     ):
         try:
             await _mark_post_meeting_processing(
@@ -2497,6 +2769,7 @@ SCHEDULING_FIELDS = {
         "cadence_id",
         "request_id",
         "confirmation_token",
+        "visibility",
     },
     "reschedule_meeting": {
         "occurrence_key",
@@ -2557,6 +2830,10 @@ def _scheduling_args(inp: Input) -> tuple[str, dict[str, Any], str]:
             "confirmation_token",
         )
         args.setdefault("request_id", args["occurrence_key"])
+        visibility = str(args.get("visibility") or "public").strip().lower()
+        if visibility not in {"public", "private"}:
+            raise ValueError("book_meeting visibility must be public or private")
+        args["visibility"] = visibility
         args["mode"] = "ad_hoc"
     elif operation == "reschedule_meeting":
         require(

@@ -533,6 +533,42 @@ def test_manual_booking_keeps_orbie_calendar_and_zoom_ownership(monkeypatch):
         "piotr.piwowarczyk@world.org",
         "person@world.org",
     ]
+    assert scheduling_call[2]["visibility"] == "public"
+
+
+def test_manual_booking_persists_explicit_private_visibility(monkeypatch):
+    client = SchedulingFakeClient(
+        {
+            "status": "booked",
+            "actualStart": "2099-08-24T09:00:00Z",
+            "zoomJoinUrl": "https://zoom.us/j/123",
+        }
+    )
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+    monkeypatch.setenv("MEETING_MANUAL_ORGANIZER_CALENDAR_KEY", "orbie")
+
+    asyncio.run(
+        meeting_automation.handler(
+            _input(
+                slack_channel_id="",
+                scheduling_operation="book_meeting",
+                scheduling_args={
+                    "occurrence_key": "manual:private",
+                    "title": "Private planning",
+                    "start": "2099-08-24T09:00:00Z",
+                    "duration_minutes": 30,
+                    "time_zone": "UTC",
+                    "attendee_emails": ["person@world.org"],
+                    "confirmation_token": "confirmed",
+                    "visibility": "private",
+                },
+            ),
+            FakeContext(),
+        )
+    )
+
+    scheduling_call = next(call for call in client.calls if call[0] == "scheduling")
+    assert scheduling_call[2]["visibility"] == "private"
 
 
 def test_manual_booking_cannot_bypass_requester_ownership_with_cadence_id(monkeypatch):
@@ -1461,6 +1497,8 @@ class ScheduledFakeClient:
         self.post_candidates_by_zoom_id = {}
         self.post_operations = []
         self.post_publications = []
+        self.private_post_publications = []
+        self.private_references = []
 
     async def notion_cadences(self):
         return [self.row]
@@ -1572,6 +1610,14 @@ class ScheduledFakeClient:
         self.post_publications.append((page_id, kwargs))
         return {"page_id": page_id, "created": True}
 
+    async def publish_private_notion_meeting_summary(self, database_id, **kwargs):
+        self.private_post_publications.append((database_id, kwargs))
+        return {"page_id": "private-canonical-page", "created": True}
+
+    async def publish_private_meeting_reference(self, database_id, **kwargs):
+        self.private_references.append((database_id, kwargs))
+        return {"page_id": "private-index-page", "created": True}
+
 
 def _zoom_webhook(
     event="recording.transcript_completed", meeting_id="123", uuid="u-123"
@@ -1607,6 +1653,215 @@ def _post_candidate(meeting_id="123", occurrence_key="weekly-sync:2026-08-10"):
         "zoom_meeting_id": meeting_id,
         "attendee_emails": ["mandy.payne@world.org"],
     }
+
+
+def test_private_post_meeting_uses_restricted_canonical_parent_and_metadata_only_index(
+    monkeypatch,
+):
+    client = ScheduledFakeClient(_published_row())
+    candidate = {
+        **_post_candidate(),
+        "metadata": {"visibility": "private"},
+    }
+    monkeypatch.setenv(
+        "MEETING_PRIVATE_NOTION_DATABASES_JSON",
+        '{"U0BEQ8M7QSK":"private-index-db"}',
+    )
+    monkeypatch.setenv(
+        "MEETING_PRIVATE_NOTION_SHARED_DATABASES_JSON",
+        '{"U0BEQ8M7QSK":"restricted-canonical-db"}',
+    )
+    monkeypatch.setenv(
+        "MEETING_PRIVATE_NOTION_USER_IDS_JSON",
+        '{"U0BEQ8M7QSK":"notion-user-id"}',
+    )
+
+    result = asyncio.run(
+        meeting_automation._process_post_meeting_candidate(
+            FakeContext(),
+            client,
+            candidate,
+            slack_users=_slack_users(),
+            cadence=None,
+            event="recording.transcript_completed",
+            step_prefix="private-test",
+        )
+    )
+
+    assert result["status"] == "delivered"
+    assert client.post_publications == []
+    assert len(client.private_post_publications) == 1
+    canonical_database, canonical = client.private_post_publications[0]
+    assert canonical_database == "restricted-canonical-db"
+    assert canonical["participant_notion_user_ids"] == ["notion-user-id"]
+    assert len(client.private_references) == 1
+    index_database, reference = client.private_references[0]
+    assert index_database == "private-index-db"
+    assert reference == {
+        "occurrence_key": "weekly-sync:2026-08-10",
+        "title": "Weekly Sync",
+        "start": "2026-08-10T08:00:00+00:00",
+        "canonical_url": "https://www.notion.so/privatecanonicalpage",
+        "visibility": "private",
+        "participant_notion_user_ids": ["notion-user-id"],
+    }
+    assert "summary" not in reference
+    assert "transcript" not in reference
+    assert "action_items" not in reference
+
+
+def test_single_participant_private_meeting_uses_personal_database_as_canonical(
+    monkeypatch,
+):
+    client = ScheduledFakeClient(_published_row())
+    candidate = {
+        **_post_candidate(),
+        "metadata": {"visibility": "private"},
+    }
+    monkeypatch.setenv(
+        "MEETING_PRIVATE_NOTION_DATABASES_JSON",
+        '{"U0BEQ8M7QSK":"private-personal-db"}',
+    )
+    monkeypatch.setenv("MEETING_PRIVATE_NOTION_SHARED_DATABASES_JSON", "{}")
+    monkeypatch.setenv(
+        "MEETING_PRIVATE_NOTION_USER_IDS_JSON",
+        '{"U0BEQ8M7QSK":"notion-user-id"}',
+    )
+
+    result = asyncio.run(
+        meeting_automation._process_post_meeting_candidate(
+            FakeContext(),
+            client,
+            candidate,
+            slack_users=_slack_users(),
+            cadence=None,
+            event="recording.transcript_completed",
+            step_prefix="private-single-user-test",
+        )
+    )
+
+    assert result["status"] == "delivered"
+    assert client.post_publications == []
+    assert client.private_post_publications[0][0] == "private-personal-db"
+    assert client.private_references == []
+
+
+def test_private_notion_publication_uses_only_the_purpose_bound_tool():
+    class ToolContext:
+        def __init__(self):
+            self.calls = []
+
+        async def call_tool(self, tool, method, args):
+            self.calls.append((tool, method, args))
+            if method == "query_database":
+                return {"results": [], "has_more": False}
+            if method == "create_page":
+                return {"id": "private-page"}
+            raise AssertionError((tool, method))
+
+    context = ToolContext()
+    client = meeting_automation.MeetingOpsToolClient(context)
+    common = {
+        "occurrence_key": "private:test",
+        "title": "Private test",
+        "start": "2026-09-04T10:00:00+00:00",
+        "summary": "Summary",
+        "transcript": "Transcript",
+        "meeting_id": "123",
+        "meeting_url": "https://zoom.us/j/123",
+        "action_items": "None",
+    }
+
+    asyncio.run(
+        client.publish_private_notion_meeting_summary(
+            "canonical-db",
+            participant_notion_user_ids=["notion-user-id"],
+            **common,
+        )
+    )
+    asyncio.run(
+        client.publish_private_meeting_reference(
+            "index-db",
+            occurrence_key="private:test",
+            title="Private test",
+            start="2026-09-04T10:00:00+00:00",
+            canonical_url="https://www.notion.so/privatepage",
+            visibility="private",
+            participant_notion_user_ids=["notion-user-id"],
+        )
+    )
+
+    assert context.calls
+    assert {tool for tool, _method, _args in context.calls} == {
+        meeting_automation.PRIVATE_NOTION_TOOL
+    }
+    canonical_create = next(
+        args
+        for _tool, method, args in context.calls
+        if method == "create_page"
+        and args["parent"]["database_id"] == "canonical-db"
+    )
+    assert canonical_create["properties"] == {
+        "Meeting": {"title": [{"text": {"content": "Private test"}}]},
+        "Date": {"date": {"start": "2026-09-04T10:00:00+00:00"}},
+        "Status": {"status": {"name": "Not started"}},
+        "Participants": {"people": [{"id": "notion-user-id"}]},
+        "Occurrence Key": {
+            "rich_text": [{"text": {"content": "private:test"}}]
+        },
+        "Visibility": {"select": {"name": "private"}},
+    }
+
+
+def test_private_post_meeting_fails_closed_for_unregistered_participant(monkeypatch):
+    client = ScheduledFakeClient(_published_row())
+    candidate = {
+        **_post_candidate(),
+        "metadata": {"visibility": "private"},
+    }
+    monkeypatch.setenv("MEETING_PRIVATE_NOTION_DATABASES_JSON", "{}")
+    monkeypatch.setenv(
+        "MEETING_PRIVATE_NOTION_SHARED_DATABASES_JSON",
+        '{"U0BEQ8M7QSK":"restricted-canonical-db"}',
+    )
+
+    with pytest.raises(ValueError, match="no registered Notion database"):
+        asyncio.run(
+            meeting_automation._process_post_meeting_candidate(
+                FakeContext(),
+                client,
+                candidate,
+                slack_users=_slack_users(),
+                cadence=None,
+                event="recording.transcript_completed",
+                step_prefix="private-unmapped-test",
+            )
+        )
+
+    assert client.post_publications == []
+    assert client.private_post_publications == []
+    assert client.private_references == []
+    assert client.sent == []
+
+
+@pytest.mark.parametrize(
+    "environment_value,error_type",
+    [
+        ("[]", TypeError),
+        ('{"not-a-slack-id":"private-db"}', ValueError),
+        ('{"U0BEQ8M7QSK,U0BEQ8M7QSK":"private-db"}', ValueError),
+        ('{"U0BEQ8M7QSK":""}', ValueError),
+    ],
+)
+def test_private_notion_database_mapping_rejects_unsafe_configuration(
+    monkeypatch, environment_value, error_type
+):
+    monkeypatch.setenv("MEETING_PRIVATE_NOTION_DATABASES_JSON", environment_value)
+
+    with pytest.raises(error_type):
+        meeting_automation._private_notion_database_mapping(
+            "MEETING_PRIVATE_NOTION_DATABASES_JSON"
+        )
 
 
 def test_zoom_webhook_parser_reads_event_and_object_id_or_uuid():
