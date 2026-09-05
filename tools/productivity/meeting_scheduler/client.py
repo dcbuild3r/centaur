@@ -1,4 +1,4 @@
-"""Governed Calendar + Zoom scheduling operations for Centaur workflows.
+"""Calendar + Zoom scheduling operations for Centaur workflows.
 
 The tool deliberately does not expose arbitrary Calendar writes. Calendar IDs
 are resolved from a managed organizer alias, participant availability is read

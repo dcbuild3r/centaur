@@ -1,4 +1,4 @@
-"""CLI for governed Centaur meeting scheduling."""
+"""CLI for Centaur meeting scheduling."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import typer
 
 from .client import _client
 
-app = typer.Typer(name="meeting-scheduler", help="Governed Centaur Calendar and Zoom scheduling")
+app = typer.Typer(name="meeting-scheduler", help="Centaur Calendar and Zoom scheduling")
 
 
 def _print(value: Any) -> None:

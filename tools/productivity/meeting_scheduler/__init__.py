@@ -1,1 +1,1 @@
-"""Governed Calendar and Zoom scheduling tool."""
+"""Calendar and Zoom scheduling tool."""
