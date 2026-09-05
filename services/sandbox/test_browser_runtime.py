@@ -66,7 +66,7 @@ class BrowserRuntimeTest(unittest.TestCase):
     def test_codex_does_not_retry_invalid_tool_images(self) -> None:
         dockerfile = DOCKERFILE.read_text()
 
-        self.assertIn("ARG CODEX_VERSION=0.145.0", dockerfile)
+        self.assertIn("ARG CODEX_VERSION=0.153.2", dockerfile)
 
 
 if __name__ == "__main__":
