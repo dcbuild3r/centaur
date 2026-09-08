@@ -1,0 +1,10 @@
+# Applied after contrib/chart/values.aws-dev.yaml.
+agentSandbox:
+  # The existing cluster-wide controller watches Sandbox resources in all namespaces.
+  enabled: false
+
+console:
+  publicUrl: https://centaur-test.theworldnetwork.org
+
+ingress:
+  host: centaur-test.theworldnetwork.org

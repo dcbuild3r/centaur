@@ -1,0 +1,697 @@
+name: Deploy Test
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-centaur-test
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_ACCOUNT_ID: "471112601787"
+  AWS_REGION: eu-central-1
+  ECR_REGISTRY: 471112601787.dkr.ecr.eu-central-1.amazonaws.com
+  EKS_CLUSTER_NAME: eu-central-1-dev
+  HELM_RELEASE: centaur-test
+  HELM_NAMESPACE: centaur-test
+  AWS_ROLE_ARN: arn:aws:iam::471112601787:role/oidc/github-deploy
+
+jobs:
+  build:
+    name: Build ${{ matrix.image }}
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: dev
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: centaur-api-rs
+            repository: centaur-api-rs
+            tagPrefix: ""
+            context: .
+            dockerfile: services/api-rs/Dockerfile
+            target: ""
+          - image: centaur-agent
+            repository: centaur-agent
+            tagPrefix: ""
+            context: .
+            dockerfile: services/sandbox/Dockerfile
+            target: sandbox
+            cache-mode: max
+          - image: centaur-iron-proxy
+            repository: centaur-iron-proxy
+            tagPrefix: ""
+            context: .
+            dockerfile: services/iron-proxy/Dockerfile
+            target: ""
+          - image: centaur-slackbotv2
+            repository: centaur-slackbotv2
+            tagPrefix: ""
+            context: .
+            dockerfile: services/slackbotv2/Dockerfile
+            target: ""
+          - image: centaur-githubbot
+            repository: common-app
+            tagPrefix: centaur-githubbot-
+            context: .
+            dockerfile: services/githubbot/Dockerfile
+            target: ""
+          - image: centaur-console
+            repository: common-app
+            tagPrefix: centaur-console-
+            context: services/console
+            dockerfile: services/console/Dockerfile
+            target: ""
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Free disk space for agent image
+        if: matrix.image == 'centaur-agent'
+        run: |
+          sudo rm -rf \
+            /opt/ghc \
+            /opt/hostedtoolcache \
+            /usr/local/.ghcup \
+            /usr/local/lib/android \
+            /usr/share/dotnet
+          docker system prune --all --force --volumes
+          df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to Amazon ECR
+        run: aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+
+      - name: Check for existing immutable image tag
+        id: check_tag
+        env:
+          ECR_REPOSITORY: ${{ matrix.repository }}
+          IMAGE_TAG: ${{ format('{0}{1}', matrix.tagPrefix, github.sha) }}
+        run: |
+          set -euo pipefail
+          output="$(aws ecr describe-images \
+            --region "$AWS_REGION" \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-ids "imageTag=$IMAGE_TAG" \
+            2>&1)" && status=0 || status=$?
+          if [[ "$status" -eq 0 ]]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Using existing immutable image tag $ECR_REPOSITORY:$IMAGE_TAG"
+          elif grep -Fq ImageNotFoundException <<<"$output"; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            printf '%s\n' "$output" >&2
+            exit "$status"
+          fi
+
+      - name: Build and push ${{ matrix.image }}
+        if: steps.check_tag.outputs.exists != 'true'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}
+          push: true
+          # ECR caps referrer artifacts per image subject. These internal Dev
+          # images do not consume BuildKit provenance/SBOM attestations, so do
+          # not create referrers that eventually block otherwise valid pushes.
+          provenance: false
+          sbom: false
+          tags: ${{ env.ECR_REGISTRY }}/${{ matrix.repository }}:${{ matrix.tagPrefix }}${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=${{ matrix.cache-mode || 'max' }},scope=${{ matrix.image }}
+
+  deploy:
+    name: Helm deploy
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: dev
+    needs: build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.0
+
+      - name: Configure kubeconfig
+        run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER_NAME" --alias "$EKS_CLUSTER_NAME"
+
+      - name: Verify test deployment target
+        run: |
+          test "$HELM_NAMESPACE" = "centaur-test"
+          test "$HELM_RELEASE" = "centaur-test"
+          test "$(kubectl config current-context)" = "$EKS_CLUSTER_NAME"
+          kubectl get namespace "$HELM_NAMESPACE"
+          kubectl --namespace "$HELM_NAMESPACE" get secret centaur-infra-env
+
+      - name: Load deployment secrets from 1Password
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          GITHUBBOT_TOKEN: op://Centaur/oged7xfyssmixegfj3kf3piymm/credential
+          GITHUBBOT_TOKEN_WORLDFND: op://Centaur/wlsn2v5vzsr4bikftn45mfbily/credential
+          GITHUBBOT_API_KEY: op://Centaur/GITHUBBOT_API_KEY/credential
+          GITHUBBOT_WEBHOOK_SECRET: op://Centaur/GITHUBBOT_WEBHOOK_SECRET/credential
+          ZOOM_WEBHOOK_SECRET: op://Centaur/ZOOM_WEBHOOK_SECRET/credential
+
+      - name: Configure Zoom webhook secret
+        run: |
+          test -n "$ZOOM_WEBHOOK_SECRET"
+          jq --null-input \
+            --arg zoom_webhook_secret "$ZOOM_WEBHOOK_SECRET" \
+            '{stringData: {ZOOM_WEBHOOK_SECRET: $zoom_webhook_secret}}' \
+            | kubectl --namespace "$HELM_NAMESPACE" patch secret centaur-infra-env \
+                --type merge \
+                --patch-file /dev/stdin
+
+      - name: Configure GitHubbot secrets
+        run: |
+          test -n "$GITHUBBOT_TOKEN"
+          test -n "$GITHUBBOT_TOKEN_WORLDFND"
+          test -n "$GITHUBBOT_API_KEY"
+          test -n "$GITHUBBOT_WEBHOOK_SECRET"
+          jq --null-input \
+            --arg token "$GITHUBBOT_TOKEN" \
+            --arg worldfnd_token "$GITHUBBOT_TOKEN_WORLDFND" \
+            --arg api_key "$GITHUBBOT_API_KEY" \
+            --arg webhook_secret "$GITHUBBOT_WEBHOOK_SECRET" \
+            '{
+              stringData: {
+                GITHUBBOT_TOKEN: $token,
+                GITHUBBOT_TOKEN_WORLDFND: $worldfnd_token,
+                GITHUBBOT_API_KEY: $api_key,
+                GITHUBBOT_WEBHOOK_SECRET: $webhook_secret
+              }
+            }' \
+            | kubectl --namespace "$HELM_NAMESPACE" patch secret centaur-infra-env \
+                --type merge \
+                --patch-file /dev/stdin
+
+      - name: Configure Console secrets
+        env:
+          IRON_CONTROL_INITIAL_API_KEY: ${{ secrets.IRON_CONTROL_INITIAL_API_KEY }}
+          IRON_CONTROL_INITIAL_USER_EMAIL: ${{ secrets.IRON_CONTROL_INITIAL_USER_EMAIL }}
+          IRON_CONTROL_INITIAL_USER_PASSWORD: ${{ secrets.IRON_CONTROL_INITIAL_USER_PASSWORD }}
+          IRON_CONTROL_SECRET_KEY_BASE: ${{ secrets.IRON_CONTROL_SECRET_KEY_BASE }}
+          IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY: ${{ secrets.IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY }}
+          IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY: ${{ secrets.IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY }}
+          IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT: ${{ secrets.IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT }}
+          IRON_CONTROL_GOOGLE_CLIENT_ID: ${{ secrets.IRON_CONTROL_GOOGLE_CLIENT_ID }}
+          IRON_CONTROL_GOOGLE_CLIENT_SECRET: ${{ secrets.IRON_CONTROL_GOOGLE_CLIENT_SECRET }}
+        run: |
+          [[ "$IRON_CONTROL_INITIAL_API_KEY" =~ ^iak_[0-9a-f]{64}$ ]] \
+            || { echo "IRON_CONTROL_INITIAL_API_KEY has an invalid format" >&2; exit 1; }
+          [[ "$IRON_CONTROL_INITIAL_USER_EMAIL" == *@*.* ]] \
+            || { echo "IRON_CONTROL_INITIAL_USER_EMAIL has an invalid format" >&2; exit 1; }
+          (( ${#IRON_CONTROL_INITIAL_USER_PASSWORD} >= 12 )) \
+            || { echo "IRON_CONTROL_INITIAL_USER_PASSWORD must be at least 12 characters" >&2; exit 1; }
+          test -n "$IRON_CONTROL_GOOGLE_CLIENT_ID" \
+            || { echo "IRON_CONTROL_GOOGLE_CLIENT_ID is required when Google OAuth is enabled" >&2; exit 1; }
+          test -n "$IRON_CONTROL_GOOGLE_CLIENT_SECRET" \
+            || { echo "IRON_CONTROL_GOOGLE_CLIENT_SECRET is required when Google OAuth is enabled" >&2; exit 1; }
+
+          database_url="$(
+            kubectl --namespace "$HELM_NAMESPACE" get secret centaur-infra-env \
+              --output jsonpath='{.data.DATABASE_URL}' \
+              | base64 --decode
+          )"
+          iron_control_database_url="$(
+            DATABASE_URL="$database_url" python3 - <<'PY'
+          import os
+          from urllib.parse import quote, urlsplit, urlunsplit
+
+          parsed = urlsplit(os.environ["DATABASE_URL"])
+          _, separator, host = parsed.netloc.rpartition("@")
+          if not separator:
+              raise SystemExit("DATABASE_URL must include credentials")
+          _, password_separator, password = parsed.netloc[:-(len(host) + 1)].partition(":")
+          userinfo = quote("tempo", safe="") + (":" + password if password_separator else "")
+          print(urlunsplit((parsed.scheme, userinfo + "@" + host, "", parsed.query, parsed.fragment)))
+          PY
+          )"
+          scheduler_database_url="$(
+            DATABASE_URL="$iron_control_database_url" python3 - <<'PY'
+          import os
+          from urllib.parse import urlsplit, urlunsplit
+
+          parsed = urlsplit(os.environ["DATABASE_URL"])
+          print(urlunsplit((parsed.scheme, parsed.netloc, "/ai_v2", parsed.query, parsed.fragment)))
+          PY
+          )"
+          jq --null-input \
+            --arg database_url "$iron_control_database_url" \
+            --arg scheduler_database_url "$scheduler_database_url" \
+            --arg api_key "$IRON_CONTROL_INITIAL_API_KEY" \
+            --arg email "$IRON_CONTROL_INITIAL_USER_EMAIL" \
+            --arg password "$IRON_CONTROL_INITIAL_USER_PASSWORD" \
+            --arg secret_key_base "$IRON_CONTROL_SECRET_KEY_BASE" \
+            --arg primary_key "$IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY" \
+            --arg deterministic_key "$IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY" \
+            --arg derivation_salt "$IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT" \
+            --arg google_client_id "$IRON_CONTROL_GOOGLE_CLIENT_ID" \
+            --arg google_client_secret "$IRON_CONTROL_GOOGLE_CLIENT_SECRET" \
+            '{
+              stringData: {
+                IRON_CONTROL_DATABASE_URL: $database_url,
+                CENTAUR_POSTGRES_DSN: $scheduler_database_url,
+                IRON_CONTROL_INITIAL_API_KEY: $api_key,
+                IRON_CONTROL_INITIAL_USER_EMAIL: $email,
+                IRON_CONTROL_INITIAL_USER_PASSWORD: $password,
+                IRON_CONTROL_SECRET_KEY_BASE: $secret_key_base,
+                IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY: $primary_key,
+                IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY: $deterministic_key,
+                IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT: $derivation_salt,
+                IRON_CONTROL_GOOGLE_CLIENT_ID: $google_client_id,
+                IRON_CONTROL_GOOGLE_CLIENT_SECRET: $google_client_secret
+              }
+            }' \
+            | kubectl --namespace "$HELM_NAMESPACE" patch secret centaur-infra-env \
+                --type merge \
+                --patch-file /dev/stdin
+
+      - name: Add Helm repositories
+        run: helm repo add 1password https://1password.github.io/connect-helm-charts
+
+      - name: Build chart dependencies
+        run: helm dependency build contrib/chart
+
+      - name: Configure 1Password bootstrap secret
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+        run: |
+          test -n "$OP_SERVICE_ACCOUNT_TOKEN"
+          token_b64="$(printf %s "$OP_SERVICE_ACCOUNT_TOKEN" | base64 | tr -d '\n')"
+          jq --null-input \
+            --arg token "$token_b64" \
+            '{
+              apiVersion: "v1",
+              kind: "Secret",
+              metadata: {
+                name: "centaur-onepassword-bootstrap",
+                namespace: "centaur-test",
+                labels: {
+                  "app.kubernetes.io/managed-by": "github-actions",
+                  "app.kubernetes.io/name": "centaur"
+                }
+              },
+              type: "Opaque",
+              data: {
+                OP_SERVICE_ACCOUNT_TOKEN: $token
+              }
+            }' \
+            | kubectl apply --filename -
+
+      - name: Recover interrupted Helm operation
+        run: |
+          release_status="$(
+            helm status "$HELM_RELEASE" \
+              --namespace "$HELM_NAMESPACE" \
+              --output json \
+              2>/dev/null \
+              | jq --raw-output '.info.status // "not-installed"'
+          )"
+          if [[ "$release_status" == pending-* ]]; then
+            deployed_revision="$(
+              helm history "$HELM_RELEASE" \
+                --namespace "$HELM_NAMESPACE" \
+                --output json \
+                | jq --raw-output \
+                    '[.[] | select(.status == "deployed") | .revision | tonumber] | max // empty'
+            )"
+            [[ -n "$deployed_revision" ]] \
+              || { echo "No deployed Helm revision is available for recovery" >&2; exit 1; }
+            helm rollback "$HELM_RELEASE" "$deployed_revision" \
+              --namespace "$HELM_NAMESPACE" \
+              --wait \
+              --timeout 5m
+          fi
+
+      - name: Deploy chart
+        run: |
+          # repo-cache runs the agent image, which is several GB because it
+          # includes the browser runtime. Allow fresh nodes to pull it before
+          # Helm declares the DaemonSet unavailable.
+          helm upgrade --install "$HELM_RELEASE" contrib/chart \
+            --namespace "$HELM_NAMESPACE" \
+            --values contrib/chart/values.aws-dev.yaml \
+            --values deploy/test/values.yaml \
+            --set "apiRs.image.repository=$ECR_REGISTRY/centaur-api-rs" \
+            --set "apiRs.image.tag=$GITHUB_SHA" \
+            --set "sandbox.image.repository=$ECR_REGISTRY/centaur-agent" \
+            --set "sandbox.image.tag=$GITHUB_SHA" \
+            --set "ironProxy.image.repository=$ECR_REGISTRY/centaur-iron-proxy" \
+            --set "ironProxy.image.tag=$GITHUB_SHA" \
+            --set "console.enabled=true" \
+            --set "console.image.repository=$ECR_REGISTRY/common-app" \
+            --set "console.image.tag=centaur-console-$GITHUB_SHA" \
+            --set "slackbotv2.enabled=true" \
+            --set "slackbotv2.image.repository=$ECR_REGISTRY/centaur-slackbotv2" \
+            --set "slackbotv2.image.tag=$GITHUB_SHA" \
+            --set "githubbot.enabled=true" \
+            --set "githubbot.image.repository=$ECR_REGISTRY/common-app" \
+            --set "githubbot.image.tag=centaur-githubbot-$GITHUB_SHA" \
+            --wait \
+            --timeout 30m
+
+      - name: Reconcile test tool policy
+        run: |
+          # Refresh shared tool roles from the current 1Password values without
+          # assigning them to any principal. This repairs rotated or stale role
+          # secrets while keeping principal access fail-closed.
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-test-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            --source-policy onepassword \
+            --op-vault Centaur \
+            --source-refs '{"NOTION_API_KEY":"op://Centaur/Centaur.run - NOTION_API_KEY/password"}' \
+            roles grant tool-notion --tool notion
+
+          # Private meeting notes use a separate purpose-bound integration.
+          # Bootstrap its role without leaving the warm pool authorized, then
+          # assign it only to the durable meeting workflow.
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-test-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            --source-policy onepassword \
+            --op-vault Centaur \
+            --source-refs '{"NOTION_PRIVATE_MEETINGS_API_KEY":"op://Centaur/NOTION_PRIVATE_MEETINGS_API_KEY/NOTION_PRIVATE_MEETINGS_API_KEY"}' \
+            principals grant warm-pool-bootstrap --tool notion_private_meetings
+
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-test-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            principals revoke warm-pool-bootstrap --tool notion_private_meetings
+
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-test-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            --source-policy onepassword \
+            --op-vault Centaur \
+            --source-refs '{"NOTION_PRIVATE_MEETINGS_API_KEY":"op://Centaur/NOTION_PRIVATE_MEETINGS_API_KEY/NOTION_PRIVATE_MEETINGS_API_KEY"}' \
+            principals grant workflow-meeting-automation --tool notion_private_meetings
+
+          # `roles grant` deliberately requires an existing role.  Dune is a
+          # newly introduced tool, so bootstrap its role through the existing
+          # `principals grant --tool` path (which upserts the role and refreshes
+          # its secrets), then remove the temporary warm-pool assignment.  The
+          # role and its secret grants remain available for the channel policy,
+          # while the warm-pool principal stays roleless.
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-test-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            --source-policy onepassword \
+            --op-vault Centaur \
+            --source-refs '{"DUNE_API_KEY":"op://Centaur/DUNE_API_KEY/credential"}' \
+            principals grant warm-pool-bootstrap --tool dune
+
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-test-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            principals revoke warm-pool-bootstrap --tool dune
+
+          # Bootstrap the Meeting Ops role and refresh both Google secret
+          # references without leaving the warm-pool principal authorized.
+          # The script ID is path-bound by the tool metadata, so callers cannot
+          # redirect the OAuth grant to another Apps Script project.
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-test-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            --source-policy onepassword \
+            --op-vault Centaur \
+            --source-refs '{"GOOGLE_TOKEN_JSON":"op://Centaur/GOOGLE_TOKEN_JSON/credential","MEETING_OPS_SCRIPT_ID":"op://Centaur/MEETING_OPS_SCRIPT_ID/credential"}' \
+            principals grant warm-pool-bootstrap --tool meeting_ops
+
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-test-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            principals revoke warm-pool-bootstrap --tool meeting_ops
+
+          # Only the durable workflow principal receives the shared Google
+          # worker and outbox authority. Slack users submit caller-bound broker
+          # requests; their session principals never receive this role.
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-test-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            --source-policy onepassword \
+            --op-vault Centaur \
+            --source-refs '{"GOOGLE_TOKEN_JSON":"op://Centaur/GOOGLE_TOKEN_JSON/credential","MEETING_OPS_SCRIPT_ID":"op://Centaur/MEETING_OPS_SCRIPT_ID/credential"}' \
+            principals grant workflow-meeting-automation --tool meeting_ops
+
+          # The same durable workflow principal owns the narrower Calendar +
+          # Zoom scheduler. Its Zoom bearer is supplied by the Console-managed
+          # broker credential; no static access token is stored in Kubernetes.
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-test-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            principals grant workflow-meeting-automation --tool meeting_scheduler
+
+          # The workflow principal is the only principal allowed to hold the
+          # raw meeting roles. Enumerate persisted state instead of naming
+          # historical Slack principal variants: an unknown or future session
+          # principal must not retain a path around the authenticated broker.
+          principal_rows="$(kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-test-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            principals list)"
+          while read -r foreign_id principal_oid; do
+            [[ -n "$principal_oid" ]] || continue
+            [[ "$foreign_id" != "workflow-meeting-automation" ]] || continue
+            candidate_state="$(kubectl --namespace "$HELM_NAMESPACE" exec \
+              deployment/centaur-test-centaur-api-rs -- \
+              /usr/local/bin/centaur-perms \
+              --tools-dir /app/tools \
+              principals show "$principal_oid")"
+            if grep -Fq 'tool-meeting-ops (' <<<"$candidate_state"; then
+              kubectl --namespace "$HELM_NAMESPACE" exec \
+                deployment/centaur-test-centaur-api-rs -- \
+                /usr/local/bin/centaur-perms \
+                --tools-dir /app/tools \
+                principals revoke "$principal_oid" --tool meeting_ops
+            fi
+            if grep -Fq 'tool-meeting-scheduler (' <<<"$candidate_state"; then
+              kubectl --namespace "$HELM_NAMESPACE" exec \
+                deployment/centaur-test-centaur-api-rs -- \
+                /usr/local/bin/centaur-perms \
+                --tools-dir /app/tools \
+                principals revoke "$principal_oid" --tool meeting_scheduler
+            fi
+            if grep -Fq 'tool-notion-private-meetings (' <<<"$candidate_state"; then
+              kubectl --namespace "$HELM_NAMESPACE" exec \
+                deployment/centaur-test-centaur-api-rs -- \
+                /usr/local/bin/centaur-perms \
+                --tools-dir /app/tools \
+                principals revoke "$principal_oid" --tool notion_private_meetings
+            fi
+          done < <(awk '$2 ~ /^prn_/ { print $1, $2 }' <<<"$principal_rows")
+
+          # Remove historical DM/channel grants. New grants are made by api-rs
+          # only for the explicit World Foundation channel policy; the session
+          # registrar also revokes stale grants on disallowed Slack principals
+          # when they next send a message.
+          # Keep the production operator's 1:1 DM principals explicitly
+          # authorized. SessionRegistrar intentionally preserves manual role
+          # changes for existing principals, so revoking these IDs leaves an
+          # existing DM with the NOTION_API_KEY placeholder and produces a
+          # misleading Notion HTTP 401.
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-test-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            --source-policy onepassword \
+            --op-vault Centaur \
+            --source-refs '{"NOTION_API_KEY":"op://Centaur/Centaur.run - NOTION_API_KEY/password"}' \
+            principals grant slack-user-tl1hm8uuu-u03tn0duqp --tool notion
+
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-test-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            --source-policy onepassword \
+            --op-vault Centaur \
+            --source-refs '{"NOTION_API_KEY":"op://Centaur/Centaur.run - NOTION_API_KEY/password"}' \
+            principals grant slack-user-u03tn0duqp --tool notion
+
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-test-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            principals revoke slack-channel-d0b9rvcgube --tool notion
+
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-test-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            principals revoke slack-channel-tl1hm8uuu-d0b9rvcgube --tool notion
+
+          # Also repair the persisted duplicate principal used by older WF DM
+          # sessions. This is idempotent and does not broaden channel access.
+          kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-test-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            --source-policy onepassword \
+            --op-vault Centaur \
+            --source-refs '{"NOTION_API_KEY":"op://Centaur/Centaur.run - NOTION_API_KEY/password"}' \
+            principals grant prn_3hpCsrtk --tool notion
+
+      - name: Verify Meeting Ops credential wiring
+        run: |
+          set -euo pipefail
+
+          principal_state="$(kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-test-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            principals show workflow-meeting-automation)"
+          grep -Fq 'tool-meeting-ops (' <<<"$principal_state"
+          grep -Fq 'oauth_token OAuth refresh_token' <<<"$principal_state"
+          grep -Fq 'static MEETING_OPS_SCRIPT_ID' <<<"$principal_state"
+          grep -Fq '  MEETING_OPS_SCRIPT_ID' <<<"$principal_state"
+          grep -Fq 'tool-meeting-scheduler (' <<<"$principal_state"
+          grep -Fq 'static ZOOM_ACCESS_TOKEN' <<<"$principal_state"
+          grep -Fq 'tool-notion-private-meetings (' <<<"$principal_state"
+          grep -Fq 'static NOTION_PRIVATE_MEETINGS_API_KEY' <<<"$principal_state"
+
+          principal_rows="$(kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-test-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            principals list)"
+          while read -r foreign_id principal_oid; do
+            [[ -n "$principal_oid" ]] || continue
+            candidate_state="$(kubectl --namespace "$HELM_NAMESPACE" exec \
+              deployment/centaur-test-centaur-api-rs -- \
+              /usr/local/bin/centaur-perms \
+              --tools-dir /app/tools \
+              principals show "$principal_oid")"
+            if [[ "$foreign_id" != "workflow-meeting-automation" ]] \
+              && grep -Fq 'tool-meeting-scheduler (' <<<"$candidate_state"; then
+              echo "raw meeting scheduler remains assigned to $foreign_id ($principal_oid)" >&2
+              exit 1
+            fi
+            if [[ "$foreign_id" != "workflow-meeting-automation" ]] \
+              && grep -Fq 'tool-meeting-ops (' <<<"$candidate_state"; then
+              echo "meeting ops remains assigned directly to $foreign_id ($principal_oid)" >&2
+              exit 1
+            fi
+            if [[ "$foreign_id" != "workflow-meeting-automation" ]] \
+              && grep -Fq 'tool-notion-private-meetings (' <<<"$candidate_state"; then
+              echo "private meeting Notion role remains assigned to $foreign_id ($principal_oid)" >&2
+              exit 1
+            fi
+          done < <(awk '$2 ~ /^prn_/ { print $1, $2 }' <<<"$principal_rows")
+
+          postgres_state="$(kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-test-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            secrets show centaur-postgres)"
+          grep -Fq '"source_type": "env"' <<<"$postgres_state"
+          grep -Fq '"var": "CENTAUR_POSTGRES_DSN"' <<<"$postgres_state"
+
+          zoom_state="$(kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-test-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            secrets show tool-meeting-scheduler-zoom-access-token)"
+          grep -Fq '"source_type": "token_broker"' <<<"$zoom_state"
+          grep -Fq '"credential_id": "zoom-orbie-general-oauth"' <<<"$zoom_state"
+
+          role_state="$(kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-test-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            roles show tool-meeting-ops)"
+          grep -Fq 'MEETING_OPS_SCRIPT_ID' <<<"$role_state"
+          grep -Fq 'OAuth refresh_token' <<<"$role_state"
+
+          script_state="$(kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-test-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            secrets show tool-meeting-ops-meeting-ops-script-id)"
+          grep -Fq '"secret_ref": "op://Centaur/MEETING_OPS_SCRIPT_ID/credential"' <<<"$script_state"
+
+          oauth_state="$(kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-test-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            secrets show tool-meeting-ops-oauth-https-oauth2-googleapis-com-token)"
+          grep -Fq '"secret_ref": "op://Centaur/GOOGLE_TOKEN_JSON/credential"' <<<"$oauth_state"
+
+          private_notion_state="$(kubectl --namespace "$HELM_NAMESPACE" exec \
+            deployment/centaur-test-centaur-api-rs -- \
+            /usr/local/bin/centaur-perms \
+            --tools-dir /app/tools \
+            secrets show tool-notion-private-meetings-notion-private-meetings-api-key)"
+          grep -Fq '"secret_ref": "op://Centaur/NOTION_PRIVATE_MEETINGS_API_KEY/NOTION_PRIVATE_MEETINGS_API_KEY"' <<<"$private_notion_state"
+
+          echo "Meeting Ops role and managed secret references are present"
+
+      - name: Collect deployment diagnostics
+        if: failure()
+        run: |
+          kubectl --namespace "$HELM_NAMESPACE" get jobs,pods -o wide
+          kubectl --namespace "$HELM_NAMESPACE" describe pods \
+            --selector app.kubernetes.io/component=repo-cache \
+            || true
+          kubectl --namespace "$HELM_NAMESPACE" logs \
+            --selector app.kubernetes.io/component=repo-cache \
+            --all-containers=true \
+            --prefix=true \
+            --tail=200 \
+            || true
+          kubectl --namespace "$HELM_NAMESPACE" logs \
+            --selector app.kubernetes.io/component=repo-cache \
+            --all-containers=true \
+            --prefix=true \
+            --previous \
+            --tail=200 \
+            || true
+          kubectl --namespace "$HELM_NAMESPACE" logs \
+            job/"$HELM_RELEASE-centaur-postgres-role-migration" \
+            --all-containers=true \
+            --prefix=true \
+            || true
+          kubectl --namespace "$HELM_NAMESPACE" get events \
+            --sort-by=.lastTimestamp \
+            | tail -100
