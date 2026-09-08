@@ -65,16 +65,14 @@ def format_date(iso_str: str | None) -> str:
 
 
 def extract_id(url_or_id: str) -> str:
-    """Extract Notion ID from URL or return as-is."""
-    if "notion.so" in url_or_id or "notion.site" in url_or_id:
-        parts = url_or_id.rstrip("/").split("/")
-        last = parts[-1]
-        if "-" in last:
-            last = last.split("-")[-1]
-        if "?" in last:
-            last = last.split("?")[0]
-        return last
-    return url_or_id.replace("-", "")
+    """Extract and normalize a Notion object ID from a URL or bare ID."""
+    from .client import _notion_object_id
+
+    value = url_or_id.strip()
+    normalized = _notion_object_id(value)
+    if normalized:
+        return normalized
+    return value.replace("-", "")
 
 
 # -----------------------------------------------------------------------------
@@ -267,10 +265,14 @@ def get_page(
     """
     client = get_client()
     pg_id = extract_id(page_id)
-    result = client.page(pg_id)
+    result = client.page_or_database(pg_id)
 
     if content:
-        blocks = client.get_page_content(pg_id)
+        blocks = (
+            client.get_all_pages(pg_id)
+            if result.get("object") == "database"
+            else client.get_page_content(pg_id)
+        )
         result["_content"] = blocks
 
     if json_output:
@@ -283,6 +285,13 @@ def get_page(
     console.print(f"URL: {result.get('url')}")
     console.print(f"Created: {format_date(result.get('created_time'))}")
     console.print(f"Last Edited: {format_date(result.get('last_edited_time'))}")
+
+    if result.get("object") == "database":
+        console.print(f"Inline: {result.get('is_inline', False)}")
+        if content and "_content" in result:
+            console.print(f"\n[bold]Rows ({len(result['_content'])}):[/]")
+        return
+
     console.print(f"Archived: {result.get('archived', False)}")
 
     parent = result.get("parent", {})

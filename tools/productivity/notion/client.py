@@ -329,6 +329,29 @@ class NotionClient:
         """Retrieve a page."""
         return self._get(f"/pages/{page_id}")
 
+    def page_or_database(self, object_id: str) -> dict[str, Any]:
+        """Retrieve a Notion page or database by object ID.
+
+        Notion share links can point at a database view even when the caller
+        describes it as a page. The API reports that case as a validation
+        error from ``/pages``; retry that specific response through the
+        database endpoint so URL-based lookups remain useful without a
+        global search.
+        """
+        try:
+            return self.page(object_id)
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code != 400:
+                raise
+            try:
+                details = error.response.json()
+            except ValueError:
+                raise
+            message = str(details.get("message") or "").casefold()
+            if details.get("code") != "validation_error" or "database" not in message:
+                raise
+            return self.database(object_id)
+
     def page_property(
         self,
         page_id: str,
