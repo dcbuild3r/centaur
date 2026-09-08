@@ -2912,6 +2912,8 @@ fn validate_meeting_scheduling_request(
 struct SlackMeetingAutomationRunRequest {
     cadence_query: String,
     #[serde(default)]
+    cadence_request: bool,
+    #[serde(default)]
     custom_instructions: Option<String>,
     requester_slack_user_id: String,
     requester_slack_team_id: String,
@@ -2953,6 +2955,7 @@ fn slack_meeting_automation_workflow_request(
     );
     let mut input = json!({
         "cadence_query": request.cadence_query,
+        "metadata": {"explicit_cadence_request": request.cadence_request},
         "requester_slack_user_id": request.requester_slack_user_id,
         "requester_slack_team_id": request.requester_slack_team_id,
         "requester_slack_email": request.requester_slack_email,
@@ -3144,6 +3147,7 @@ mod slack_meeting_automation_request_tests {
     fn request() -> SlackMeetingAutomationRunRequest {
         SlackMeetingAutomationRunRequest {
             cadence_query: "  private weekly  ".to_owned(),
+            cadence_request: true,
             custom_instructions: None,
             requester_slack_user_id: "U123ABC".to_owned(),
             requester_slack_team_id: WORLD_FOUNDATION_SLACK_TEAM_ID.to_owned(),

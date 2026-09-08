@@ -108,6 +108,7 @@ export async function dispatchMeetingAutomationCommand(
 
   const request: SlackMeetingAutomationRunRequest = {
     cadence_query: command.cadenceQuery,
+    cadence_request: true,
     requester_slack_team_id: requester.slackTeamId,
     requester_slack_user_id: requester.slackUserId,
     slack_channel_id: requester.slackChannelId,

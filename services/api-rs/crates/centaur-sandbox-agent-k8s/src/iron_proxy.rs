@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use centaur_iron_control::EffectivePgDsn;
 use centaur_iron_proxy::{ProxyFragment, SourceKind, SourcePolicy};
 use centaur_sandbox_core::{
     ResourceRequirements, SandboxError, SandboxId, SandboxResult, SandboxSpec,
@@ -211,8 +212,7 @@ impl AgentSandboxBackend {
                 "iron-proxy sandbox spec is missing its iron-control principal".to_owned(),
             )
         })?;
-        let pg = self.resolved_pg();
-        let replace_placeholders = self.effective_replace_placeholders(&principal_id).await?;
+        let runtime = self.effective_proxy_runtime(&principal_id, None).await?;
         let labels = spec.iron_control_proxy_labels.clone();
 
         Ok(Some(self.resolved_iron_proxy_for_principal(
@@ -221,21 +221,22 @@ impl AgentSandboxBackend {
             spec.iron_control_requester_principal.clone(),
             labels,
             ResolvedIronProxyRuntime {
-                pg,
-                replace_placeholders,
                 observability_enabled: spec.capabilities.observability_enabled,
+                ..runtime
             },
         )))
     }
 
-    /// Read the principal's effective config from iron-control for the
-    /// replace-secret placeholders set as sandbox env (so tools send the value
-    /// the proxy swaps for the real secret). The Postgres DSN catalog is
-    /// provided as one fixed local DSN instead — see [`Self::resolved_pg`].
-    async fn effective_replace_placeholders(
+    /// Resolve all api-rs-owned runtime wiring from one authoritative
+    /// iron-control effective-config response. In particular, Postgres is
+    /// available only when the assigned principal currently has at least one
+    /// effective pg_dsn route; a role/grant change therefore removes the
+    /// listener and sandbox DSN on the next lifecycle reconciliation.
+    async fn effective_proxy_runtime(
         &self,
         principal: &str,
-    ) -> SandboxResult<BTreeMap<String, String>> {
+        sandbox: Option<&crate::crd::Sandbox>,
+    ) -> SandboxResult<ResolvedIronProxyRuntime> {
         let iron_control = &self.config.iron_control;
         let effective = iron_control
             .client
@@ -243,14 +244,25 @@ impl AgentSandboxBackend {
             .await
             .map_err(|err| SandboxError::backend_source("iron-control effective_config", err))?;
 
-        Ok(effective
+        let replace_placeholders = effective
             .secrets
             .iter()
             .filter_map(|secret| secret.replace.as_ref())
             .map(|replace| replace.proxy_value.trim().to_owned())
             .filter(|value| !value.is_empty() && !value.contains('='))
             .map(|value| (value.clone(), value))
-            .collect())
+            .collect();
+        let pg = if !has_effective_postgres_route(&effective.postgres) {
+            None
+        } else {
+            self.resolved_pg_for_recreation(sandbox)
+        };
+
+        Ok(ResolvedIronProxyRuntime {
+            pg,
+            replace_placeholders,
+            observability_enabled: false,
+        })
     }
 
     /// Build the single local Postgres listener every managed iron-proxy
@@ -258,7 +270,7 @@ impl AgentSandboxBackend {
     /// choose the database name, and iron-control decides which upstream
     /// credential/role backs that database for the currently assigned
     /// principal.
-    fn resolved_pg(&self) -> Option<ResolvedPg> {
+    fn new_resolved_pg(&self) -> Option<ResolvedPg> {
         self.config.iron_proxy.as_ref()?;
         Some(ResolvedPg {
             listen: format!("0.0.0.0:{PG_LISTENER_PORT}"),
@@ -297,8 +309,6 @@ impl AgentSandboxBackend {
         let requester_principal_id = annotations
             .and_then(|annotations| annotations.get(crate::IRON_CONTROL_REQUESTER_ANNOTATION))
             .cloned();
-        let pg = self.resolved_pg_for_recreation(Some(&sandbox));
-        let replace_placeholders = self.effective_replace_placeholders(&principal_id).await?;
         let observability_enabled = resolve_resume_capability(
             sandbox_observability_enabled(&sandbox, &self.config.container_name),
             sandbox.metadata.labels.as_ref(),
@@ -306,17 +316,25 @@ impl AgentSandboxBackend {
             "observability",
             id.as_str(),
         );
-        Ok(Some(self.resolved_iron_proxy_for_principal(
+        let runtime = self
+            .effective_proxy_runtime(&principal_id, Some(&sandbox))
+            .await?;
+        let resolved = self.resolved_iron_proxy_for_principal(
             id,
             principal_id,
             requester_principal_id,
             BTreeMap::new(),
             ResolvedIronProxyRuntime {
-                pg,
-                replace_placeholders,
                 observability_enabled,
+                ..runtime
             },
-        )))
+        );
+        let template_changed = self
+            .reconcile_sandbox_postgres_env(id, Some(&sandbox), &resolved)
+            .await?;
+        self.recycle_sandbox_agent_if_needed(id, template_changed)
+            .await?;
+        Ok(Some(resolved))
     }
 
     fn resolved_iron_proxy_for_principal(
@@ -533,22 +551,66 @@ impl AgentSandboxBackend {
         requester_principal_id: Option<&str>,
         labels: &BTreeMap<String, String>,
     ) -> SandboxResult<()> {
+        if self.config.iron_proxy.is_none() {
+            return Err(SandboxError::Unsupported {
+                backend: crate::BACKEND_NAME,
+                operation: "assign_iron_control_proxy_principal",
+            });
+        }
         let iron_control = &self.config.iron_control;
+        let sandbox = self.get_sandbox(id).await?;
+        let runtime = self
+            .effective_proxy_runtime(principal_id, sandbox.as_ref())
+            .await?;
+        let observability_enabled = sandbox
+            .as_ref()
+            .map(|sandbox| {
+                resolve_resume_capability(
+                    sandbox_observability_enabled(sandbox, &self.config.container_name),
+                    sandbox.metadata.labels.as_ref(),
+                    OBSERVABILITY_ENABLED_LABEL,
+                    "observability",
+                    id.as_str(),
+                )
+            })
+            .unwrap_or_else(|| {
+                tracing::warn!(
+                    sandbox_id = id.as_str(),
+                    "sandbox CR missing during proxy assignment; failing closed for observability network policy"
+                );
+                false
+            });
+        let resolved = self.resolved_iron_proxy_for_principal(
+            id,
+            principal_id.to_owned(),
+            requester_principal_id.map(ToOwned::to_owned),
+            labels.clone(),
+            ResolvedIronProxyRuntime {
+                observability_enabled,
+                ..runtime
+            },
+        );
+        let template_changed = self
+            .reconcile_sandbox_postgres_env(id, sandbox.as_ref(), &resolved)
+            .await?;
+        self.recycle_sandbox_agent_if_needed(id, template_changed)
+            .await?;
         let mut proxy_id = self.proxy_id_for_sandbox(id).await?;
-        if proxy_id.is_none() || !self.has_usable_iron_proxy_resources(id).await? {
+        let needs_recreation = proxy_id.is_none()
+            || !self.has_usable_iron_proxy_resources(id).await?
+            || !self
+                .proxy_pg_route_matches(id, resolved.pg.is_some())
+                .await?;
+        if needs_recreation {
             tracing::warn!(
                 sandbox_id = id.as_str(),
                 principal_id,
-                "iron-proxy resources are missing or not running; recreating before assignment"
+                postgres_route = resolved.pg.is_some(),
+                "iron-proxy resources are stale or missing; recreating before assignment"
             );
             proxy_id = Some(
-                self.recreate_iron_proxy_resources_for_principal(
-                    id,
-                    principal_id,
-                    requester_principal_id,
-                    labels,
-                )
-                .await?,
+                self.recreate_iron_proxy_resources_for_resolved(id, &resolved, sandbox.as_ref())
+                    .await?,
             );
         }
         let proxy_id = proxy_id.ok_or_else(|| {
@@ -580,56 +642,15 @@ impl AgentSandboxBackend {
         requester_principal_id: Option<&str>,
         labels: &BTreeMap<String, String>,
     ) -> SandboxResult<()> {
-        if self.config.iron_proxy.is_none() {
-            return Ok(());
-        }
-        let proxy_id = self.proxy_id_for_sandbox(id).await?;
-        if let Some(proxy_id) = proxy_id
-            && self.has_usable_iron_proxy_resources(id).await?
-        {
-            let iron_control = &self.config.iron_control;
-            // Reassign on every reuse. The sandbox annotations only record the
-            // selected principal/requester, not the effective secret source or
-            // path rules. A deployment or grant change can therefore leave a
-            // warm proxy serving stale configuration even when those values are
-            // unchanged. The assignment refreshes iron-control's config hash,
-            // and the barrier below waits until the proxy has applied it before
-            // the caller sends its first request.
-            let proxy = iron_control
-                .client
-                .assign_proxy_principal(&proxy_id, principal_id, requester_principal_id, labels)
-                .await
-                .map_err(|err| SandboxError::backend_source("iron-control assign proxy", err))?;
-            self.patch_iron_control_principal_annotation(id, principal_id, requester_principal_id)
-                .await?;
-            self.wait_for_proxy_principal_applied(id, principal_id, proxy.config_hash.as_deref())
-                .await;
-            return Ok(());
-        }
-
-        tracing::warn!(
-            sandbox_id = id.as_str(),
-            principal_id,
-            "iron-proxy resources are missing or not running; recreating before reuse"
-        );
-        self.recreate_iron_proxy_resources_for_principal(
-            id,
-            principal_id,
-            requester_principal_id,
-            labels,
-        )
-        .await?;
-        self.patch_iron_control_principal_annotation(id, principal_id, requester_principal_id)
-            .await?;
-        Ok(())
+        self.assign_proxy_principal(id, principal_id, requester_principal_id, labels)
+            .await
     }
 
-    async fn recreate_iron_proxy_resources_for_principal(
+    async fn recreate_iron_proxy_resources_for_resolved(
         &self,
         id: &SandboxId,
-        principal_id: &str,
-        requester_principal_id: Option<&str>,
-        labels: &BTreeMap<String, String>,
+        resolved: &ResolvedIronProxy,
+        sandbox: Option<&crate::crd::Sandbox>,
     ) -> SandboxResult<String> {
         if self.config.iron_proxy.is_none() {
             return Err(SandboxError::Unsupported {
@@ -637,47 +658,9 @@ impl AgentSandboxBackend {
                 operation: "assign_iron_control_proxy_principal",
             });
         }
-        let sandbox = match self.sandboxes().get(id.as_str()).await {
-            Ok(sandbox) => Some(sandbox),
-            Err(err) if is_not_found(&err) => None,
-            Err(err) => return Err(map_kube_error("get sandbox for iron-proxy repair", err)),
-        };
-        let pg = self.resolved_pg_for_recreation(sandbox.as_ref());
-        let principal_id = principal_id.to_owned();
-        let replace_placeholders = self.effective_replace_placeholders(&principal_id).await?;
-        let observability_enabled = sandbox
-            .as_ref()
-            .map(|sandbox| {
-                resolve_resume_capability(
-                    sandbox_observability_enabled(sandbox, &self.config.container_name),
-                    sandbox.metadata.labels.as_ref(),
-                    OBSERVABILITY_ENABLED_LABEL,
-                    "observability",
-                    id.as_str(),
-                )
-            })
-            .unwrap_or_else(|| {
-                tracing::warn!(
-                    sandbox_id = id.as_str(),
-                    "sandbox CR missing during proxy repair; failing closed for observability network policy"
-                );
-                false
-            });
-        let resolved = self.resolved_iron_proxy_for_principal(
-            id,
-            principal_id,
-            requester_principal_id.map(ToOwned::to_owned),
-            labels.clone(),
-            ResolvedIronProxyRuntime {
-                pg,
-                replace_placeholders,
-                observability_enabled,
-            },
-        );
-        self.create_iron_proxy_resources(id, Some(&resolved))
-            .await?;
+        self.create_iron_proxy_resources(id, Some(resolved)).await?;
         if let Some(sandbox) = sandbox
-            && let Err(error) = self.adopt_iron_proxy_resources(id, &sandbox).await
+            && let Err(error) = self.adopt_iron_proxy_resources(id, sandbox).await
         {
             tracing::warn!(
                 sandbox_id = id.as_str(),
@@ -704,7 +687,7 @@ impl AgentSandboxBackend {
         &self,
         sandbox: Option<&crate::crd::Sandbox>,
     ) -> Option<ResolvedPg> {
-        let fallback = self.resolved_pg()?;
+        let fallback = self.new_resolved_pg()?;
         sandbox
             .and_then(|sandbox| {
                 pg_from_sandbox_env(
@@ -948,6 +931,160 @@ impl AgentSandboxBackend {
         }
     }
 
+    /// Check the two durable Kubernetes surfaces that must agree before a
+    /// reassigned proxy can be reused. A route grant disappearing must remove
+    /// both the proxy listener and its Service port; a route appearing must
+    /// create both before the sandbox is returned to the caller.
+    async fn proxy_pg_route_matches(
+        &self,
+        id: &SandboxId,
+        should_have_route: bool,
+    ) -> SandboxResult<bool> {
+        let service = match self.services().get(&iron_proxy_service_name(id)).await {
+            Ok(service) => service,
+            Err(error) if is_not_found(&error) => return Ok(false),
+            Err(error) => return Err(map_kube_error("get iron-proxy service", error)),
+        };
+        let service_has_listener = service
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.ports.as_ref())
+            .is_some_and(|ports| {
+                ports
+                    .iter()
+                    .any(|port| port.port == PG_LISTENER_PORT as i32)
+            });
+        let params = ListParams::default().labels(&format!(
+            "{IRON_PROXY_LABEL}=true,{SANDBOX_ID_LABEL}={}",
+            id.as_str()
+        ));
+        let pods = self
+            .pods()
+            .list(&params)
+            .await
+            .map_err(|err| map_kube_error("list iron-proxy pods", err))?;
+        let pod_has_listener = pods.items.iter().any(|pod| {
+            pod.spec.as_ref().is_some_and(|spec| {
+                spec.containers.iter().any(|container| {
+                    container.env.as_ref().is_some_and(|env| {
+                        env.iter().any(|entry| {
+                            entry.name == PG_LISTEN_ENV
+                                && entry.value.as_deref().and_then(listen_port)
+                                    == Some(PG_LISTENER_PORT)
+                        })
+                    })
+                })
+            })
+        });
+        Ok(service_has_listener == should_have_route && pod_has_listener == should_have_route)
+    }
+
+    /// Reconcile the sandbox's durable tool environment with the effective
+    /// principal config. This is deliberately a full-container-list merge
+    /// patch because Kubernetes merge patches replace arrays; rebuilding the
+    /// current list preserves init containers and all unrelated agent env.
+    async fn reconcile_sandbox_postgres_env(
+        &self,
+        id: &SandboxId,
+        sandbox: Option<&crate::crd::Sandbox>,
+        resolved: &ResolvedIronProxy,
+    ) -> SandboxResult<bool> {
+        let Some(sandbox) = sandbox else {
+            return Ok(false);
+        };
+        let mut containers = serde_json::to_value(&sandbox.spec.pod_template.spec.containers)
+            .map_err(|err| {
+                SandboxError::InvalidSpec(format!("invalid sandbox containers: {err}"))
+            })?;
+        let Some(container_values) = containers.as_array_mut() else {
+            return Err(SandboxError::InvalidSpec(
+                "sandbox pod template containers are not an array".to_owned(),
+            ));
+        };
+        let mut found = false;
+        for container in container_values.iter_mut() {
+            let Some(container_object) = container.as_object_mut() else {
+                continue;
+            };
+            if container_object.get("name").and_then(Value::as_str)
+                != Some(self.config.container_name.as_str())
+            {
+                continue;
+            }
+            found = true;
+            let mut env = container_object
+                .remove("env")
+                .unwrap_or_else(|| Value::Array(Vec::new()));
+            let Some(env_values) = env.as_array_mut() else {
+                return Err(SandboxError::InvalidSpec(
+                    "sandbox agent env is not an array".to_owned(),
+                ));
+            };
+            env_values.retain(|entry| {
+                entry.get("name").and_then(Value::as_str) != Some(CENTAUR_POSTGRES_DSN_ENV)
+            });
+            if let Some(pg) = &resolved.pg {
+                env_values.push(json!({
+                    "name": CENTAUR_POSTGRES_DSN_ENV,
+                    "value": format!(
+                        "postgresql://{}:{}@{}:{}",
+                        pg.user, pg.password, resolved.proxy_host, pg.port
+                    ),
+                }));
+            }
+            if env_values.is_empty() {
+                container_object.remove("env");
+            } else {
+                container_object.insert("env".to_owned(), env);
+            }
+            break;
+        }
+        if !found {
+            return Err(SandboxError::InvalidSpec(format!(
+                "sandbox pod template is missing container {}",
+                self.config.container_name
+            )));
+        }
+        let current =
+            serde_json::to_value(&sandbox.spec.pod_template.spec.containers).map_err(|err| {
+                SandboxError::InvalidSpec(format!("invalid sandbox containers: {err}"))
+            })?;
+        let changed = containers != current;
+        if changed {
+            self.patch_sandbox_merge(
+                id,
+                json!({"spec": {"podTemplate": {"spec": {"containers": containers}}}}),
+            )
+            .await?;
+        }
+        Ok(changed)
+    }
+
+    /// A Sandbox controller does not restart an already-running agent when a
+    /// pod-template env value is patched. Recycle it when the effective
+    /// Postgres capability changes so the running process cannot retain a DSN
+    /// that the current principal no longer has (or miss a newly granted DSN).
+    async fn recycle_sandbox_agent_if_needed(
+        &self,
+        id: &SandboxId,
+        template_changed: bool,
+    ) -> SandboxResult<()> {
+        if !template_changed {
+            return Ok(());
+        }
+        let Some(pod) = self.get_pod(id).await? else {
+            return Ok(());
+        };
+        if !pod_running(&pod) {
+            return Ok(());
+        }
+        self.pods()
+            .delete(id.as_str(), &DeleteParams::default())
+            .await
+            .map_err(|err| map_kube_error("recycle sandbox agent pod", err))?;
+        self.wait_until_running(id).await
+    }
+
     async fn patch_iron_control_principal_annotation(
         &self,
         id: &SandboxId,
@@ -1187,15 +1324,17 @@ pub(crate) fn apply_proxy_env(spec: &mut SandboxSpec, resolved: &ResolvedIronPro
     for (name, value) in &resolved.replace_placeholders {
         set_missing_env(spec, name, value);
     }
-    // The sandbox always gets one local Postgres base DSN. Tools choose the
-    // database name they connect to; iron-proxy routes that database to the
-    // assigned principal's effective pg_dsn secret.
+    // The sandbox gets one local Postgres base DSN only when the assigned
+    // principal has an effective pg_dsn route. Remove a previously injected
+    // value before applying the current decision so warm/reused specs cannot
+    // retain a stale database capability.
+    remove_env(spec, CENTAUR_POSTGRES_DSN_ENV);
     if let Some(pg) = &resolved.pg {
         let value = format!(
             "postgresql://{}:{}@{}:{}",
             pg.user, pg.password, resolved.proxy_host, pg.port,
         );
-        set_missing_env(spec, CENTAUR_POSTGRES_DSN_ENV, &value);
+        set_env(spec, CENTAUR_POSTGRES_DSN_ENV, &value);
     }
     if !resolved.console_url.is_empty() {
         set_missing_env(spec, CENTAUR_CONSOLE_URL_ENV, &resolved.console_url);
@@ -1511,6 +1650,7 @@ fn build_iron_proxy_network_policies(
                     },
                 ]),
                 egress: Some(proxy_egress_rules(
+                    resolved,
                     iron_proxy,
                     control_target,
                     otlp_egress,
@@ -1528,25 +1668,33 @@ fn sandbox_to_proxy_ports(resolved: &ResolvedIronProxy) -> Vec<NetworkPolicyPort
 }
 
 fn proxy_egress_rules(
+    resolved: &ResolvedIronProxy,
     iron_proxy: &IronProxyConfig,
     control_target: &ControlPlaneEgressTarget,
     otlp_egress: Option<&OtlpEgressTarget>,
     observability_enabled: bool,
 ) -> Vec<NetworkPolicyEgressRule> {
-    // Upstream egress: 443/5432 for normal traffic, plus the iron-control port
-    // (deduped) so a sync-mode proxy can reach the control plane. Public
-    // upstreams are always constrained away from private/cluster CIDRs; any
-    // intra-cluster destination must be added as an explicit rule below.
-    let upstream_ports = vec![network_port(443), network_port(5432)];
+    // Upstream egress: 443 for normal traffic, plus Postgres only when the
+    // assigned principal has an effective pg_dsn route. Public upstreams are
+    // always constrained away from private/cluster CIDRs; any intra-cluster
+    // destination must be added as an explicit rule below.
+    let upstream_ports = vec![network_port(443)];
     let mut rules = vec![dns_egress_rule()];
     rules.push(egress_to(
         vec![control_target.peer.clone()],
         vec![network_port(control_target.port)],
     ));
-    rules.push(egress_to(
-        vec![all_namespaces_peer()],
-        vec![network_port(PG_LISTENER_PORT)],
-    ));
+    if resolved.pg.is_some() {
+        rules.push(egress_to(
+            vec![all_namespaces_peer()],
+            vec![network_port(PG_LISTENER_PORT)],
+        ));
+    }
+    let upstream_ports = if resolved.pg.is_some() {
+        vec![network_port(443), network_port(5432)]
+    } else {
+        upstream_ports
+    };
     rules.push(egress_to(vec![public_ipv4_peer()], upstream_ports));
     if observability_enabled {
         rules.push(egress_to(
@@ -1718,6 +1866,10 @@ fn set_env(spec: &mut SandboxSpec, name: &str, value: &str) {
     }
 }
 
+fn remove_env(spec: &mut SandboxSpec, name: &str) {
+    spec.env.retain(|env| env.name != name);
+}
+
 fn env_value(spec: &SandboxSpec, name: &str) -> Option<String> {
     spec.env
         .iter()
@@ -1821,6 +1973,12 @@ fn pg_from_sandbox_dsn(dsn: &str, listen: &str, port: u16) -> Option<ResolvedPg>
         user: user.to_owned(),
         password: password.to_owned(),
     })
+}
+
+fn has_effective_postgres_route(routes: &[EffectivePgDsn]) -> bool {
+    routes
+        .iter()
+        .any(|route| !route.foreign_id.trim().is_empty() && !route.database.trim().is_empty())
 }
 
 fn current_env_values<const N: usize>(spec: &SandboxSpec, names: [&str; N]) -> Vec<String> {
@@ -2095,6 +2253,18 @@ mod tests {
     fn resolved_with_observability(observability_enabled: bool) -> ResolvedIronProxy {
         ResolvedIronProxy {
             observability_enabled,
+            ..resolved()
+        }
+    }
+
+    fn resolved_with_pg() -> ResolvedIronProxy {
+        ResolvedIronProxy {
+            pg: Some(ResolvedPg {
+                listen: "0.0.0.0:5432".to_owned(),
+                port: PG_LISTENER_PORT,
+                user: "pg-user-test".to_owned(),
+                password: "pg-password-test".to_owned(),
+            }),
             ..resolved()
         }
     }
@@ -2599,7 +2769,7 @@ mod tests {
 
         let policies = build_iron_proxy_network_policies(
             &id,
-            &resolved(),
+            &resolved_with_pg(),
             &iron_proxy,
             &control_target,
             Some(&target),
@@ -2742,6 +2912,61 @@ mod tests {
     fn pg_recreation_ignores_unparseable_sandbox_dsn() {
         assert!(pg_from_sandbox_dsn("not-a-postgres-dsn", "0.0.0.0:5432", 5432).is_none());
         assert!(pg_from_sandbox_dsn("postgresql://@host:5432", "0.0.0.0:5432", 5432).is_none());
+    }
+
+    #[test]
+    fn only_effective_postgres_routes_enable_the_capability() {
+        assert!(!has_effective_postgres_route(&[]));
+        assert!(!has_effective_postgres_route(&[EffectivePgDsn {
+            foreign_id: "  ".to_owned(),
+            database: "ai_v2".to_owned(),
+        }]));
+        assert!(!has_effective_postgres_route(&[EffectivePgDsn {
+            foreign_id: "pg-scheduler".to_owned(),
+            database: "  ".to_owned(),
+        }]));
+        assert!(has_effective_postgres_route(&[EffectivePgDsn {
+            foreign_id: "pg-scheduler".to_owned(),
+            database: "ai_v2".to_owned(),
+        }]));
+    }
+
+    #[test]
+    fn proxy_policy_omits_postgres_egress_without_an_effective_route() {
+        let id = SandboxId::new("asbx-test");
+        let iron_proxy = IronProxyConfig::new("proxy:test", "ca-cert", "ca-key");
+        let policies = build_iron_proxy_network_policies(
+            &id,
+            &resolved(),
+            &iron_proxy,
+            &control_target(),
+            None,
+            true,
+        );
+        let egress = policies[1].spec.as_ref().unwrap().egress.as_ref().unwrap();
+
+        assert!(
+            !egress
+                .iter()
+                .any(|rule| rule_allows_all_namespaces_port(rule, 5432))
+        );
+    }
+
+    #[test]
+    fn apply_proxy_env_removes_stale_postgres_dsn_without_an_effective_route() {
+        let mut spec = SandboxSpec::new("centaur-agent:latest").env(
+            CENTAUR_POSTGRES_DSN_ENV,
+            "postgresql://stale-user:stale-password@stale-proxy:5432",
+        );
+
+        apply_proxy_env(&mut spec, &resolved());
+
+        assert!(
+            !spec
+                .env
+                .iter()
+                .any(|env| env.name == CENTAUR_POSTGRES_DSN_ENV)
+        );
     }
 
     #[test]

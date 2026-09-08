@@ -21,6 +21,14 @@ apiRs:
   opVault: Centaur
   sandboxReadyTimeoutSecs: 240
   sandboxWarmPoolSize: 3
+  # Dev intentionally exercises the governed private-meeting path. Keep the
+  # live scheduler contract in the checked-in overlay instead of relying on
+  # stale Helm release values from an earlier manual enablement.
+  meetingScheduler:
+    enabled: true
+    manualOrganizerCalendarKey: orbie
+    organizerCalendars: '{"orbie":"orbie-automation@world.org"}'
+    zoomHostUserId: orbie-automation@world.org
   extraEnv:
     MEETING_OPS_SCHEDULER_ENABLED: "true"
     MEETING_OPS_SCHEDULER_CRON: "*/15 * * * *"

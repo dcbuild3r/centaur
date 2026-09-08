@@ -355,6 +355,9 @@ def gmail_reply(
 # Calendar functions
 
 
+_WRITABLE_CALENDAR_ACCESS_ROLES = frozenset({"writer", "owner"})
+
+
 def calendar_list() -> list[dict]:
     """List all calendars.
 
@@ -375,6 +378,37 @@ def calendar_list() -> list[dict]:
         }
         for cal in results.get("items", [])
     ]
+
+
+def calendar_resolve_owner(owner_email: str) -> str:
+    """Resolve a calendar owner and require event-write access."""
+
+    normalized_owner = owner_email.strip().lower()
+    if not normalized_owner or "@" not in normalized_owner:
+        raise ValueError("owner_email must be a calendar owner's email address")
+
+    calendars = calendar_list()
+    matching = next(
+        (
+            calendar
+            for calendar in calendars
+            if str(calendar.get("id", "")).strip().lower() == normalized_owner
+        ),
+        None,
+    )
+    if matching is None:
+        raise PermissionError(
+            f"No visible Google Calendar was found for owner {owner_email}; "
+            "the owner must share a calendar with Orbie first"
+        )
+
+    access_role = str(matching.get("access_role", "")).strip().lower()
+    if access_role not in _WRITABLE_CALENDAR_ACCESS_ROLES:
+        raise PermissionError(
+            f"Calendar {owner_email} has access role {access_role or 'none'}, "
+            "but writer or owner access is required to create invitations"
+        )
+    return str(matching["id"])
 
 
 def calendar_get_timezone(calendar_id: str = "primary") -> str:
@@ -477,6 +511,7 @@ def calendar_create_event(
     description: str | None = None,
     location: str | None = None,
     attendees: list[str] | None = None,
+    owner_email: str | None = None,
 ) -> dict:
     """Create a calendar event.
 
@@ -488,10 +523,15 @@ def calendar_create_event(
         description: Event description
         location: Event location
         attendees: List of attendee emails
+        owner_email: Email of the calendar owner/organizer. The owner must
+            grant Orbie writer or owner access to that calendar.
 
     Returns:
-        Dict with id, html_link
+        Dict with id, html_link, organizer_email
     """
+    if owner_email:
+        calendar_id = calendar_resolve_owner(owner_email)
+
     service = get_calendar_service()
 
     event = {
@@ -525,6 +565,7 @@ def calendar_create_event(
     return {
         "id": result.get("id", ""),
         "html_link": result.get("htmlLink", ""),
+        "organizer_email": (result.get("organizer") or {}).get("email", "") or owner_email or "",
     }
 
 
@@ -2812,6 +2853,7 @@ class GSuiteClient:
         description: str | None = None,
         location: str | None = None,
         attendees: list[str] | None = None,
+        owner_email: str | None = None,
     ) -> dict:
         """Create a calendar event.
 
@@ -2823,9 +2865,11 @@ class GSuiteClient:
             description: Event description
             location: Event location
             attendees: List of attendee emails
+            owner_email: Email of the calendar owner/organizer. The owner
+                must grant Orbie writer or owner access to that calendar.
 
         Returns:
-            Dict with id, html_link
+            Dict with id, html_link, organizer_email
         """
         return calendar_create_event(
             summary,
@@ -2835,6 +2879,7 @@ class GSuiteClient:
             description=description,
             location=location,
             attendees=attendees,
+            owner_email=owner_email,
         )
 
     def calendar_update_event(

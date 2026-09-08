@@ -162,6 +162,7 @@ describe('meeting automation dispatch', () => {
     expect(requests[0]?.headers.get('authorization')).toBe('Bearer broker-key')
     expect(requests[0]?.body).toEqual({
       cadence_query: 'weekly team sync',
+      cadence_request: true,
       requester_slack_team_id: WORLD_FOUNDATION_SLACK_TEAM_ID,
       requester_slack_user_id: USER_ID,
       slack_channel_id: DM_CHANNEL_ID,

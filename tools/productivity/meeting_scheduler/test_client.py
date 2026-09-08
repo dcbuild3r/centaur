@@ -13,6 +13,15 @@ async def _async_value(value):
     return value
 
 
+@pytest.fixture(autouse=True)
+def scheduler_readiness_bypass(monkeypatch):
+    """Provider/unit tests use fake persistence unless they opt into readiness."""
+
+    real_check = client._assert_scheduler_persistence_ready
+    monkeypatch.setattr(client, "_assert_scheduler_persistence_ready", lambda: None)
+    return real_check
+
+
 def test_find_availability_uses_freebusy_only_and_returns_slots(monkeypatch):
     monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
     monkeypatch.setenv("MEETING_ORGANIZER_CALENDARS", json.dumps({"wf": "organizer@world.org"}))
@@ -52,6 +61,196 @@ def test_find_availability_uses_freebusy_only_and_returns_slots(monkeypatch):
     ]
     assert result["candidates"][0]["start"] == "2026-08-17T10:00:00Z"
     assert "summary" not in calls[0]
+
+
+def test_email_organizer_requires_a_visible_writable_calendar(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    monkeypatch.setenv("MEETING_ORGANIZER_CALENDARS", "{}")
+    calls = []
+
+    class FakeCalendarList:
+        def list(self, **kwargs):
+            calls.append(("list", kwargs))
+            return self
+
+        def execute(self):
+            return {
+                "items": [
+                    {"id": "owner@example.com", "accessRole": "writer"},
+                ]
+            }
+
+    class FakeFreebusy:
+        def query(self, **kwargs):
+            calls.append(("freebusy", kwargs))
+            return self
+
+        def execute(self):
+            return {
+                "calendars": {
+                    "owner@example.com": {"busy": []},
+                    "person@world.org": {"busy": []},
+                }
+            }
+
+    class FakeService:
+        def calendarList(self):
+            return FakeCalendarList()
+
+        def freebusy(self):
+            return FakeFreebusy()
+
+    monkeypatch.setattr(client, "get_calendar_service", lambda: FakeService())
+    result = client.MeetingSchedulerClient().find_availability(
+        "OWNER@example.com",
+        ["person@world.org"],
+        "2026-08-17T09:00:00Z",
+        "2026-08-17T10:00:00Z",
+        30,
+    )
+
+    assert result["candidates"]
+    assert calls[0][0] == "list"
+    assert calls[1][0] == "freebusy"
+
+
+@pytest.mark.parametrize("operation", ["availability", "booking"])
+def test_scheduler_db_refusal_fails_before_calendar_work(
+    monkeypatch, scheduler_readiness_bypass, operation
+):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    monkeypatch.setenv("CENTAUR_POSTGRES_DSN", "postgresql://scheduler:secret@db:5432/ai_v2")
+    monkeypatch.setenv("MEETING_ORGANIZER_CALENDARS", '{"wf":"organizer@world.org"}')
+
+    async def refused_connect(*_args, **_kwargs):
+        raise ConnectionRefusedError("connection refused")
+
+    monkeypatch.setattr(client.asyncpg, "connect", refused_connect)
+    monkeypatch.setattr(
+        client,
+        "_assert_scheduler_persistence_ready",
+        scheduler_readiness_bypass,
+    )
+    monkeypatch.setattr(
+        client,
+        "get_calendar_service",
+        lambda: pytest.fail("Calendar must not be touched when scheduler persistence is down"),
+    )
+
+    with pytest.raises(client.MeetingSchedulerError, match="scheduler persistence unavailable"):
+        if operation == "availability":
+            client.MeetingSchedulerClient().find_availability(
+                "wf",
+                ["person@world.org"],
+                "2099-08-17T09:00:00Z",
+                "2099-08-17T10:00:00Z",
+                30,
+            )
+        else:
+            confirmation = client._slot_confirmation_token(
+                start=client._parse_rfc3339("2099-08-17T09:00:00Z", field="start"),
+                duration=30,
+                time_zone="UTC",
+                attendees=["person@world.org"],
+                organizer_calendar_key="wf",
+            )
+            client.MeetingSchedulerClient().book_meeting(
+                "request:db-refused",
+                "Planning",
+                "2099-08-17T09:00:00Z",
+                30,
+                "UTC",
+                ["person@world.org"],
+                "wf",
+                mode="ad_hoc",
+                confirmation_token=confirmation,
+            )
+
+
+def test_scheduler_readiness_checks_ai_v2_migration_and_role_grants(
+    monkeypatch, scheduler_readiness_bypass
+):
+    monkeypatch.setenv("CENTAUR_POSTGRES_DSN", "postgresql://scheduler:secret@db:5432/ai_v2")
+    calls = []
+
+    class Connection:
+        async def fetchrow(self, query):
+            calls.append(query)
+            if "to_regclass" in query:
+                return {
+                    "database_name": "ai_v2",
+                    "occurrence_table": "public.orbie_meeting_occurrences",
+                }
+            return {
+                "scheduler_role_exists": True,
+                "scheduler_role_member": True,
+                "can_connect": True,
+                "scheduler_can_connect": True,
+                "scheduler_schema_usage": True,
+                "scheduler_can_select": True,
+                "scheduler_can_insert": True,
+                "scheduler_can_update": True,
+            }
+
+        async def close(self):
+            calls.append("close")
+
+    async def connect(*_args, **_kwargs):
+        return Connection()
+
+    monkeypatch.setattr(client.asyncpg, "connect", connect)
+    monkeypatch.setattr(
+        client,
+        "_assert_scheduler_persistence_ready",
+        scheduler_readiness_bypass,
+    )
+    client._assert_scheduler_persistence_ready()
+
+    assert len(calls) == 3
+    assert "to_regclass('public.orbie_meeting_occurrences')" in calls[0]
+    assert "centaur_meeting_scheduler" in calls[1]
+    assert "pg_has_role(current_user" in calls[1]
+    assert "has_database_privilege" in calls[1]
+
+
+def test_scheduler_readiness_rejects_missing_scheduler_role_membership(
+    monkeypatch, scheduler_readiness_bypass
+):
+    monkeypatch.setenv("CENTAUR_POSTGRES_DSN", "postgresql://scheduler:secret@db:5432/ai_v2")
+
+    class Connection:
+        async def fetchrow(self, query):
+            if "to_regclass" in query:
+                return {
+                    "database_name": "ai_v2",
+                    "occurrence_table": "public.orbie_meeting_occurrences",
+                }
+            return {
+                "scheduler_role_exists": True,
+                "scheduler_role_member": False,
+                "can_connect": True,
+                "scheduler_can_connect": True,
+                "scheduler_schema_usage": True,
+                "scheduler_can_select": True,
+                "scheduler_can_insert": True,
+                "scheduler_can_update": True,
+            }
+
+        async def close(self):
+            pass
+
+    async def connect(*_args, **_kwargs):
+        return Connection()
+
+    monkeypatch.setattr(client.asyncpg, "connect", connect)
+    monkeypatch.setattr(
+        client,
+        "_assert_scheduler_persistence_ready",
+        scheduler_readiness_bypass,
+    )
+
+    with pytest.raises(client.SchedulerPersistenceError, match="scheduler persistence is not ready"):
+        client._assert_scheduler_persistence_ready()
 
 
 def test_ad_hoc_booking_requires_confirmation(monkeypatch):

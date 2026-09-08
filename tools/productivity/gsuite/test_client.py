@@ -142,6 +142,43 @@ class _FakeGmailService:
         return self.users_api
 
 
+class _FakeCalendarListApi:
+    def __init__(self, items: list[dict]):
+        self.items = items
+        self.list_calls: list[dict] = []
+
+    def list(self, **kwargs):
+        self.list_calls.append(kwargs)
+        return _CreateRequest({"items": self.items})
+
+
+class _FakeCalendarEventsApi:
+    def __init__(self):
+        self.insert_calls: list[dict] = []
+
+    def insert(self, **kwargs):
+        self.insert_calls.append(kwargs)
+        return _CreateRequest(
+            {
+                "id": "event-123",
+                "htmlLink": "https://calendar.google.com/event/event-123",
+                "organizer": {"email": "owner@example.com"},
+            }
+        )
+
+
+class _FakeCalendarService:
+    def __init__(self, items: list[dict]):
+        self.calendar_list_api = _FakeCalendarListApi(items)
+        self.events_api = _FakeCalendarEventsApi()
+
+    def calendarList(self):
+        return self.calendar_list_api
+
+    def events(self):
+        return self.events_api
+
+
 class _FakeSheetsValuesApi:
     def __init__(self):
         self.update_calls: list[dict] = []
@@ -1147,3 +1184,52 @@ def test_docs_insert_passes_expected_revision_id_through(monkeypatch):
     assert len(calls) == 2
     assert "writeControl" not in calls[0]["body"]
     assert calls[1]["body"]["writeControl"] == {"requiredRevisionId": "rev-99"}
+
+
+def test_calendar_create_event_uses_writable_owner_calendar(monkeypatch):
+    fake_service = _FakeCalendarService(
+        [
+            {
+                "id": "owner@example.com",
+                "summary": "Owner",
+                "accessRole": "writer",
+                "timeZone": "Europe/Prague",
+            }
+        ]
+    )
+    monkeypatch.setattr(client, "get_calendar_service", lambda: fake_service)
+
+    result = client.calendar_create_event(
+        "Planning",
+        "2026-08-21T10:00:00Z",
+        "2026-08-21T11:00:00Z",
+        attendees=["guest@example.com"],
+        owner_email="OWNER@example.com",
+    )
+
+    insert_call = fake_service.events_api.insert_calls[0]
+    assert insert_call["calendarId"] == "owner@example.com"
+    assert insert_call["sendUpdates"] == "all"
+    assert insert_call["body"]["attendees"] == [{"email": "guest@example.com"}]
+    assert result == {
+        "id": "event-123",
+        "html_link": "https://calendar.google.com/event/event-123",
+        "organizer_email": "owner@example.com",
+    }
+
+
+def test_calendar_create_event_rejects_read_only_owner_before_insert(monkeypatch):
+    fake_service = _FakeCalendarService(
+        [{"id": "owner@example.com", "summary": "Owner", "accessRole": "reader"}]
+    )
+    monkeypatch.setattr(client, "get_calendar_service", lambda: fake_service)
+
+    with pytest.raises(PermissionError, match="writer or owner"):
+        client.calendar_create_event(
+            "Planning",
+            "2026-08-21T10:00:00Z",
+            "2026-08-21T11:00:00Z",
+            owner_email="owner@example.com",
+        )
+
+    assert fake_service.events_api.insert_calls == []

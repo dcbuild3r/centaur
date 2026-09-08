@@ -376,15 +376,25 @@ def calendar_create(
     description: str = typer.Option(None, "--description", "-d", help="Event description"),
     location: str = typer.Option(None, "--location", "-l", help="Event location"),
     attendees: str = typer.Option(None, "--attendees", "-a", help="Comma-separated emails"),
+    owner: str = typer.Option(
+        None,
+        "--owner",
+        help="Calendar owner/organizer email; requires writer or owner access",
+    ),
 ):
     """Create a calendar event.
 
     Examples:
         gsuite calendar create "Team Meeting" "2024-01-15T10:00:00Z" "2024-01-15T11:00:00Z"
         gsuite calendar create "All-day event" "2024-01-15" "2024-01-16"
-        gsuite calendar create "Meeting" "..." "..." -a "a@b.com,c@d.com" -l "Room 1"
+        gsuite calendar create "Meeting" "..." "..." --owner owner@example.com \
+            -a "a@b.com,c@d.com" -l "Room 1"
     """
     from .client import calendar_create_event
+
+    if owner and calendar != "primary":
+        console.print("[red]Use either --owner or --calendar, not both[/]")
+        raise typer.Exit(1)
 
     attendee_list = [a.strip() for a in attendees.split(",")] if attendees else None
 
@@ -397,8 +407,11 @@ def calendar_create(
             description=description,
             location=location,
             attendees=attendee_list,
+            owner_email=owner,
         )
         console.print("[green]✓ Event created[/]")
+        if result.get("organizer_email"):
+            console.print(f"[dim]Organizer: {result['organizer_email']}[/]")
         console.print(f"[dim]{result['html_link']}[/]")
     except Exception as e:
         console.print(f"[red]Error: {e}[/]")

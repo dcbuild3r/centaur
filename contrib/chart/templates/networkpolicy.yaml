@@ -321,7 +321,9 @@ spec:
         - protocol: TCP
           port: 5432
 {{- end }}
-    # Per-sandbox iron-proxy listeners (HTTP proxy + postgres + management API).
+    # Per-sandbox iron-proxy HTTP and management listeners. Postgres is a
+    # sandbox-to-proxy data path and is conditionally rendered by api-rs only
+    # for principals with an effective pg_dsn route; api-rs never uses it.
     - to:
         - podSelector:
             matchLabels:
@@ -329,8 +331,6 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.ironProxy.service.proxyPort }}
-        - protocol: TCP
-          port: {{ .Values.ironProxy.service.pgPort }}
         - protocol: TCP
           port: {{ .Values.ironProxy.service.managementPort }}
     # console control plane: register principals/roles/grants and per-sandbox proxies.
