@@ -1,7 +1,11 @@
 import type { RustSessionStreamEvent } from '@centaur/harness-events'
 import type { Attachment, LinkPreview, Message } from 'chat'
 import { createHmac } from 'node:crypto'
-import { renderSlackDisplayText, slackMessagePromptText } from './slack-display-text'
+import {
+  normalizeSlackAutoLinkedEmails,
+  renderSlackDisplayText,
+  slackMessagePromptText
+} from './slack-display-text'
 import type {
   ForwardSessionInput,
   JsonObject,
@@ -233,7 +237,8 @@ export async function serializeMessage(
       attachments.push(await serializeAttachment(attachment, options))
     }
   }
-  const displayText = renderSlackDisplayText({ raw: message.raw, text: message.text })
+  const text = normalizeSlackAutoLinkedEmails(message.text)
+  const displayText = renderSlackDisplayText({ raw: message.raw, text })
 
   return {
     attachments,
@@ -253,7 +258,7 @@ export async function serializeMessage(
     rawSlackAttachmentCount: displayText.rawAttachmentCount,
     rawSlackBlockCount: displayText.rawBlockCount,
     teamId: slackTeamId(message.raw) as string,
-    text: message.text,
+    text,
     threadId: message.threadId,
     timestamp: message.metadata.dateSent.toISOString()
   }
