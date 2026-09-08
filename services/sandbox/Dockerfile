@@ -55,7 +55,6 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     httplib2>=0.20.0 \
     httpx>=0.28.0 \
     "openai>=2.53.0" \
-    opentelemetry-proto==1.42.1 \
     "psycopg[binary]>=3.2.0" \
     "githubkit>=0.16.1" \
     pysocks>=1.7.1 \
@@ -284,7 +283,7 @@ RUN uv tool install "playwright==${PLAYWRIGHT_VERSION}" \
 
 # ── Agent skills + workspace setup (rarely changes) ─────────────────────────
 RUN --mount=type=cache,target=/home/agent/.npm,uid=1001,gid=1001,sharing=locked \
-    npx -y skills add vercel-labs/agent-browser
+    npx -y skills add vercel-labs/agent-browser --agent codex -y
 # git-branch configures each writable clone with the publishing GitHub account.
 # A baked agent identity would reappear as a co-author when GitHub squash-merges its commits.
 RUN mkdir -p ~/.amp/bin ~/.config/amp ~/.codex ~/.pi/agent ~/github ~/workspace \
@@ -323,6 +322,7 @@ COPY --link --chmod=755 services/workflow-python/workflow_host.py /usr/local/bin
 COPY --link services/workflow-python/api/ /usr/local/bin/api/
 COPY --link --chmod=755 services/sandbox/git-branch.sh /usr/local/bin/git-branch
 COPY --link --chmod=755 services/sandbox/install_tool_shims.py /usr/local/bin/install-tool-shims
+COPY --link --chmod=755 services/sandbox/seed_hermes_codex_auth.py /usr/local/bin/seed-hermes-codex-auth
 COPY --link --chmod=755 services/sandbox/centaur_tool_host.py /usr/local/bin/centaur-tool-host
 COPY --link --chmod=755 services/sandbox/compose_system_prompt.py /usr/local/bin/compose-system-prompt
 COPY --link --chmod=755 services/sandbox/repo_cache_sync.py /usr/local/bin/repo-cache-sync

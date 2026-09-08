@@ -46,6 +46,7 @@ function slackMessage(
 describe('meeting automation command parsing', () => {
   test.each([
     ['run cadence weekly team sync', 'weekly team sync'],
+    ['cadence run weekly team sync', 'weekly team sync'],
     ['run meeting automation "Leadership 1:1"', 'Leadership 1:1'],
     ['meeting ops private cadence', 'private cadence'],
     [`<@${BOT_USER_ID}|orbie> run cadence  weekly team sync  `, 'weekly team sync'],
@@ -161,6 +162,7 @@ describe('meeting automation dispatch', () => {
     expect(requests[0]?.headers.get('authorization')).toBe('Bearer broker-key')
     expect(requests[0]?.body).toEqual({
       cadence_query: 'weekly team sync',
+      cadence_request: true,
       requester_slack_team_id: WORLD_FOUNDATION_SLACK_TEAM_ID,
       requester_slack_user_id: USER_ID,
       slack_channel_id: DM_CHANNEL_ID,

@@ -26,7 +26,26 @@ DEFAULT_CADENCE_TIME_ZONE = "Europe/Prague"
 DEFAULT_MEETING_TIME = "10:00"
 DEFAULT_NOTIFICATION_TIME = "09:15"
 DEFAULT_PREPARATION_BUSINESS_DAYS = 1
-EMAIL_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
+MANUAL_ORGANIZER_CALENDAR_KEY = "orbie"
+EMAIL_RE = re.compile(
+    r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$"
+)
+PRIVATE_MEETING_REQUEST_RE = re.compile(
+    r"\b(?:schedule|book|arrange)\b.*\bprivate\s+meeting\b|\bprivate\s+meeting\b.*\b(?:schedule|book|booked|arrange)\b",
+    re.IGNORECASE,
+)
+PRIVATE_MEETING_INTAKE_FIELDS = [
+    "title",
+    "attendee_emails",
+    "date_or_range",
+    "time_zone",
+    "duration_minutes",
+    "recording_preference",
+]
+
+
+class NotionUnavailableError(ValueError):
+    """A safe, user-facing failure for an unavailable caller-scoped Notion lookup."""
 
 
 def _env_value(name: str, default: str) -> str:
@@ -632,6 +651,60 @@ def _is_scheduled(inp: Input) -> bool:
     return inp.metadata.get("source") == "workflow_schedule"
 
 
+def _is_private_meeting_intake_request(inp: Input) -> bool:
+    return (
+        not str(inp.scheduling_operation or "").strip()
+        and PRIVATE_MEETING_REQUEST_RE.search(str(inp.cadence_query or "")) is not None
+    )
+
+
+def _is_explicit_cadence_request(inp: Input) -> bool:
+    """Only an explicitly marked cadence request may query caller-scoped Notion."""
+
+    return inp.metadata.get("explicit_cadence_request") is True
+
+
+async def _private_meeting_intake(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
+    message = (
+        "Please provide the meeting title, invitee email addresses, date or date range, "
+        "timezone, duration, and recording preference."
+    )
+    delivered = None
+    if inp.slack_channel_id:
+        delivered = await ctx.post_to_slack(
+            inp.slack_channel_id,
+            message,
+            **_slack_post_args(inp),
+        )
+    return {
+        "status": "needs_input",
+        "reason": "private_meeting_details_required",
+        "missing": list(PRIVATE_MEETING_INTAKE_FIELDS),
+        "delivered": [delivered] if delivered is not None else [],
+    }
+
+
+async def _notion_unavailable_result(
+    inp: Input, ctx: WorkflowContext
+) -> dict[str, Any]:
+    """Return one safe response for every caller-scoped Notion outage."""
+
+    rejection = await ctx.step(
+        _step_name("reject_notion_unavailable", inp.request_message_id),
+        lambda: ctx.post_to_slack(
+            inp.slack_channel_id,
+            "I can't check private cadence details in Notion right now. "
+            "Please try again later.",
+            **_slack_post_args(inp),
+        ),
+    )
+    return {
+        "status": "rejected",
+        "reason": "notion_unavailable",
+        "delivered": [rejection],
+    }
+
+
 def _parse_now(value: str | None) -> dt.datetime:
     if not value:
         return dt.datetime.now(dt.UTC)
@@ -1033,6 +1106,18 @@ def _parse_clock(value: Any, default: str) -> dt.time:
     return dt.time(int(match.group(1)), int(match.group(2)))
 
 
+def _default_doc_name_template(title: str, frequency: str) -> str:
+    """Return the human-facing default for legacy rows without a template."""
+
+    if frequency == "weekly" and re.search(
+        r"\bweekly\b.*\ball\s+hands\b|\ball\s+hands\b.*\bweekly\b",
+        title,
+        re.IGNORECASE,
+    ):
+        return f"CW{{week}} {title}"
+    return f"{title} — {{YYYY-MM-DD}}"
+
+
 def _zone(name: Any) -> ZoneInfo:
     zone_name = str(name or DEFAULT_CADENCE_TIME_ZONE).strip()
     try:
@@ -1095,8 +1180,10 @@ def _next_occurrence(value: dt.datetime, frequency: str) -> dt.datetime:
 def _resolve_booking_attendees(
     value: Any,
     slack_users: list[dict[str, Any]],
+    *,
+    require_slack_identity: bool = True,
 ) -> list[str]:
-    """Resolve Auto-book participants to one active World Slack identity."""
+    """Normalize attendees and optionally require an active World Slack identity."""
 
     if isinstance(value, (list, tuple)):
         raw = [str(item).strip().lower() for item in value if str(item).strip()]
@@ -1112,19 +1199,20 @@ def _resolve_booking_attendees(
     for email in raw:
         if not EMAIL_RE.fullmatch(email):
             raise ValueError("Auto-book Participants must be exact email addresses")
-        matches = [
-            user
-            for user in slack_users
-            if str(user.get("email") or "").strip().lower() == email
-            and user.get("team_id") == WORLD_SLACK_TEAM_ID
-            and not user.get("deleted")
-            and not user.get("is_deleted")
-            and not user.get("is_bot")
-        ]
-        if len(matches) != 1:
-            raise ValueError(
-                f"Auto-book participant {email} must resolve to exactly one active World user"
-            )
+        if require_slack_identity:
+            matches = [
+                user
+                for user in slack_users
+                if str(user.get("email") or "").strip().lower() == email
+                and user.get("team_id") == WORLD_SLACK_TEAM_ID
+                and not user.get("deleted")
+                and not user.get("is_deleted")
+                and not user.get("is_bot")
+            ]
+            if len(matches) != 1:
+                raise ValueError(
+                    f"Auto-book participant {email} must resolve to exactly one active World user"
+                )
         if email not in attendees:
             attendees.append(email)
     return attendees
@@ -1144,12 +1232,12 @@ def normalize_notion_cadence(
     allowed_statuses = {"Published", "Draft"} if allow_draft else {"Published"}
     if status not in allowed_statuses:
         raise ValueError("cadence is not available for this workflow")
-    title = str(_property_value(row, "Ritual") or "").strip()
+    title = str(_property_value(row, "Cadence") or "").strip()
     cadence_id = str(
         _property_value(row, "Automation ID") or row.get("id") or ""
     ).strip()
     if not title or not cadence_id:
-        raise ValueError("published cadence requires Ritual and Automation ID")
+        raise ValueError("published cadence requires Cadence and Automation ID")
     frequency = str(_property_value(row, "Frequency") or "").strip().lower()
     frequency = frequency.replace(" ", "-")
     if frequency not in {"weekly", "bi-weekly", "monthly", "quarterly"}:
@@ -1295,7 +1383,7 @@ def normalize_notion_cadence(
         "notesDelayMin": _property_value(row, "Notes delay (min)"),
         "durationMin": _property_value(row, "Duration (min)"),
         "docNameTemplate": _property_value(row, "Document name template")
-        or f"{title} — {{YYYY-MM-DD}}",
+        or _default_doc_name_template(title, frequency),
         "templateTabName": "Format",
         "notesTabName": "Meeting Notes",
         "attendees": attendees,
@@ -1494,7 +1582,6 @@ SCHEDULING_OPERATIONS = frozenset(
 )
 SCHEDULING_FIELDS = {
     "find_availability": {
-        "organizer_calendar_key",
         "attendee_emails",
         "time_min",
         "time_max",
@@ -1510,7 +1597,6 @@ SCHEDULING_FIELDS = {
         "duration_minutes",
         "time_zone",
         "attendee_emails",
-        "organizer_calendar_key",
         "cadence_id",
         "request_id",
         "confirmation_token",
@@ -1553,7 +1639,6 @@ def _scheduling_args(inp: Input) -> tuple[str, dict[str, Any], str]:
 
     if operation == "find_availability":
         require(
-            "organizer_calendar_key",
             "attendee_emails",
             "time_min",
             "time_max",
@@ -1567,7 +1652,6 @@ def _scheduling_args(inp: Input) -> tuple[str, dict[str, Any], str]:
             "duration_minutes",
             "time_zone",
             "attendee_emails",
-            "organizer_calendar_key",
             "confirmation_token",
         )
         args.setdefault("request_id", args["occurrence_key"])
@@ -1629,6 +1713,15 @@ def _public_scheduling_result(
             "actualStart": actual_start,
             "zoomJoinUrl": join_url,
         }
+        organizer_email = str(
+            result.get("organizer_calendar_id")
+            or result.get("organizerCalendarId")
+            or result.get("organizer_calendar_key")
+            or result.get("organizerCalendarKey")
+            or ""
+        ).strip()
+        if organizer_email:
+            public["organizerEmail"] = organizer_email
         event_link = str(
             result.get("calendarHtmlLink") or result.get("calendar_html_link") or ""
         ).strip()
@@ -1807,14 +1900,38 @@ async def _authorize_scheduling_cadence_operation(
 async def _scheduling_handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     client = _client(ctx)
     operation, args, request_key = _scheduling_args(inp)
+    if operation in {"find_availability", "book_meeting"} and args.get("cadence_id"):
+        raise ValueError("manual meeting scheduling cannot target a cadence")
+    slack_users: list[dict[str, Any]] | None = None
     if "attendee_emails" in args:
         slack_users = await ctx.step(
             f"scheduling:list_slack_users:{request_key}",
             lambda: client.slack_users(),
         )
         args["attendee_emails"] = _resolve_booking_attendees(
-            args["attendee_emails"], slack_users
+            args["attendee_emails"],
+            slack_users,
+            require_slack_identity=not (
+                operation == "find_availability"
+                or (operation == "book_meeting" and args.get("mode") == "ad_hoc")
+            ),
         )
+    if operation in {"find_availability", "book_meeting"}:
+        if inp.requester_slack_team_id != WORLD_SLACK_TEAM_ID:
+            raise ValueError(
+                "manual meeting ownership requires a verified World Slack requester"
+            )
+        if slack_users is None:
+            slack_users = await ctx.step(
+                f"scheduling:list_slack_users:{request_key}",
+                lambda: client.slack_users(),
+            )
+        # Ad-hoc private meetings are hosted by Orbie's managed calendar. The
+        # requester is still authenticated above and attendee emails remain
+        # caller-provided, but no requester-owned calendar write is required.
+        # This keeps external guests on the free/busy path instead of treating
+        # their calendar as the event organizer.
+        args["organizer_calendar_key"] = MANUAL_ORGANIZER_CALENDAR_KEY
     preflight: dict[str, Any] | None = None
     if operation in {
         "reschedule_meeting",
@@ -1918,10 +2035,13 @@ async def _resolve_manual_notion_cadence(
 ) -> dict[str, Any]:
     """Resolve an owner-scoped Draft/Published Notion cadence for manual use."""
 
-    rows = await ctx.step(
-        _step_name("list_manual_notion_cadences", inp.request_message_id),
-        lambda: client.notion_cadences(),
-    )
+    try:
+        rows = await ctx.step(
+            _step_name("list_manual_notion_cadences", inp.request_message_id),
+            lambda: client.notion_cadences(),
+        )
+    except Exception as error:
+        raise NotionUnavailableError("Notion cadence lookup is unavailable") from error
     query = inp.cadence_query.strip().casefold()
     matched_rows = [
         row
@@ -1933,15 +2053,18 @@ async def _resolve_manual_notion_cadence(
             str(
                 _property_value(row, "Automation ID") or row.get("id") or ""
             ).casefold(),
-            str(_property_value(row, "Ritual") or "").casefold(),
+            str(_property_value(row, "Cadence") or "").casefold(),
         }
     ]
     if len(matched_rows) != 1:
         raise ValueError("manual Notion cadence must resolve exactly once")
-    notion_users = await ctx.step(
-        _step_name("list_manual_notion_users", inp.request_message_id),
-        lambda: client.notion_users(),
-    )
+    try:
+        notion_users = await ctx.step(
+            _step_name("list_manual_notion_users", inp.request_message_id),
+            lambda: client.notion_users(),
+        )
+    except Exception as error:
+        raise NotionUnavailableError("Notion cadence lookup is unavailable") from error
     slack_users = await ctx.step(
         _step_name("list_manual_slack_users", inp.request_message_id),
         lambda: client.slack_users(),
@@ -2284,19 +2407,40 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     if str(inp.scheduling_operation or "").strip():
         return await _scheduling_handler(inp, ctx)
     _validate_input(inp)
+    if _is_private_meeting_intake_request(inp):
+        return await _private_meeting_intake(inp, ctx)
+    if not _is_explicit_cadence_request(inp):
+        rejection = await ctx.step(
+            _step_name("reject_cadence", inp.request_message_id),
+            lambda: ctx.post_to_slack(
+                inp.slack_channel_id,
+                "Please make an explicit cadence request with its exact cadence ID or title.",
+                **_slack_post_args(inp),
+            ),
+        )
+        return {
+            "status": "rejected",
+            "reason": "explicit_cadence_request_required",
+            "delivered": [rejection],
+        }
     client = _client(ctx)
     user_id = inp.requester_slack_user_id
     team_id = inp.requester_slack_team_id
 
-    cadences = await ctx.step(
-        _step_name("list_authorized_cadences", inp.request_message_id),
-        lambda: client.authorized_cadences(user_id, team_id),
-    )
+    try:
+        cadences = await ctx.step(
+            _step_name("list_authorized_cadences", inp.request_message_id),
+            lambda: client.authorized_cadences(user_id, team_id),
+        )
+    except Exception:  # noqa: BLE001 - connector failures must map to one safe result
+        return await _notion_unavailable_result(inp, ctx)
     try:
         cadence = _resolve_cadence(cadences, inp.cadence_query)
     except ValueError:
         try:
             cadence = await _resolve_manual_notion_cadence(inp, ctx, client)
+        except NotionUnavailableError:
+            return await _notion_unavailable_result(inp, ctx)
         except ValueError:
             rejection = await ctx.step(
                 _step_name("reject_cadence", inp.request_message_id),

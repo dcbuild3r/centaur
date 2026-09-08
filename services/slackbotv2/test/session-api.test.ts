@@ -342,6 +342,49 @@ describe('session interruption', () => {
 })
 
 describe('Slack display text fallback', () => {
+  test('normalizes Slack auto-linked invitee email wrappers for the agent', async () => {
+    const message = await serializeMessage({
+      attachments: [],
+      author: {
+        fullName: 'Test User',
+        isBot: false,
+        isMe: false,
+        userId: 'U1',
+        userName: 'test'
+      },
+      id: '1700000000.000100',
+      isMention: true,
+      metadata: { dateSent: new Date('2026-06-10T00:00:00.000Z') },
+      raw: { team_id: 'T1' },
+      text: 'attendee <mailto:guest@example.com> and <mailto:second@example.com|second@example.com>',
+      threadId: 'slack:C1:1700000000.000100'
+    } as unknown as Parameters<typeof serializeMessage>[0])
+
+    expect(message.text).toBe('attendee guest@example.com and second@example.com')
+    expect(message.displayText).toBe('attendee guest@example.com and second@example.com')
+  })
+
+  test('preserves non-canonical mailto markup for strict downstream validation', async () => {
+    const message = await serializeMessage({
+      attachments: [],
+      author: {
+        fullName: 'Test User',
+        isBot: false,
+        isMe: false,
+        userId: 'U1',
+        userName: 'test'
+      },
+      id: '1700000000.000100',
+      isMention: true,
+      metadata: { dateSent: new Date('2026-06-10T00:00:00.000Z') },
+      raw: { team_id: 'T1' },
+      text: 'attendee <mailto:guest@example.com|Guest Name>',
+      threadId: 'slack:C1:1700000000.000100'
+    } as unknown as Parameters<typeof serializeMessage>[0])
+
+    expect(message.text).toBe('attendee <mailto:guest@example.com|Guest Name>')
+  })
+
   test('serializeMessage extracts raw Slack blocks when adapter text is empty', async () => {
     const raw = {
       blocks: [
@@ -797,36 +840,57 @@ describe('forwardToSessionApi harness restart', () => {
     expect('on_harness_conflict' in (create?.body as object)).toBe(false)
   })
 
-  test('reports the harness resolved by api-rs', async () => {
+  test('records a Slack-owned harness assignment on session creation and execution', async () => {
     const { fetchFn, requests } = fakeApi({
       createSession: [
         {
           body: {
             harness_switched: false,
-            harness_type: 'nanocodex',
-            harness_assignment: {
-              experiment: 'codex_nanocodex_ab',
-              requested_harness: 'codex',
-              cohort: 'nanocodex',
-              rollout_percent: 50
-            }
+            harness_type: 'nanocodex'
           },
           status: 200
         }
       ]
     })
+    const harnessAssignment = {
+      experiment: 'codex_nanocodex_ab',
+      requestedHarness: 'codex',
+      cohort: 'nanocodex',
+      rolloutPercent: 50
+    }
     let resolvedHarness: string | undefined
     let resolvedExperiment: string | undefined
 
-    await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')), {
-      onSessionCreated: async outcome => {
-        resolvedHarness = outcome.harnessType
-        resolvedExperiment = outcome.harnessAssignment?.experiment
+    await forwardToSessionApi(
+      options(fetchFn),
+      forwardInput(apiMessage('hi'), {
+        harnessAssignment,
+        harnessType: 'nanocodex',
+        restartOnHarnessConflict: false
+      }),
+      {
+        onSessionCreated: async outcome => {
+          resolvedHarness = outcome.harnessType
+          resolvedExperiment = outcome.harnessAssignment?.experiment
+        }
       }
-    })
+    )
 
     expect(resolvedHarness).toBe('nanocodex')
     expect(resolvedExperiment).toBe('codex_nanocodex_ab')
+    const create = requests.find(request => request.url.endsWith('.000100'))
+    expect(create?.body).toMatchObject({
+      harness_type: 'nanocodex',
+      metadata: {
+        harness_assignment: {
+          experiment: 'codex_nanocodex_ab',
+          requested_harness: 'codex',
+          cohort: 'nanocodex',
+          rollout_percent: 50
+        }
+      }
+    })
+    expect('on_harness_conflict' in (create?.body as object)).toBe(false)
     expect(executeBody(requests).metadata).toMatchObject({
       harness_type: 'nanocodex',
       harness_assignment: {

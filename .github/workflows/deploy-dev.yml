@@ -137,6 +137,11 @@ jobs:
           tags: ${{ env.ECR_REGISTRY }}/${{ matrix.repository }}:${{ matrix.tagPrefix }}${{ github.sha }}
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=${{ matrix.cache-mode || 'max' }},scope=${{ matrix.image }}
+          # The iron-proxy source is intentionally unchanged across many Dev
+          # releases, so its immutable digest accumulates BuildKit provenance
+          # referrers until ECR's 100-referrer-per-subject limit is reached.
+          # Keep attestations on the other images while making this repeatable.
+          provenance: ${{ matrix.image != 'centaur-iron-proxy' }}
 
   deploy:
     name: Helm deploy

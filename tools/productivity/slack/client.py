@@ -560,6 +560,54 @@ class SlackClient:
                 return ch["id"]
         raise RuntimeError(f"Channel '{channel}' not found or bot not a member")
 
+    def resolve_channel_ref(self, channel: str) -> dict[str, Any]:
+        """Resolve a human Slack channel reference for a cadence destination.
+
+        This is intentionally channel-only: cadence creation must not turn an
+        accidental user mention into a DM destination. The channel list uses
+        the existing cache and rate-limit behavior, so resolving a name does
+        not add an uncached API call on top of the normal lookup.
+        """
+
+        raw = str(channel).strip()
+        if not raw:
+            raise ValueError("channel is required")
+        if self._looks_like_user_id(raw) or raw.startswith("@"):
+            raise ValueError("cadence Slack destinations must be channels, not users")
+
+        normalized = self._clean_channel_ref(raw)
+        channels = self.list_bot_channels()
+        channel_id: str | None = None
+        channel_entry: dict[str, Any] | None = None
+        if self._looks_like_channel_id(normalized):
+            channel_id = normalized.upper()
+            channel_entry = next(
+                (item for item in channels if str(item.get("id", "")).upper() == channel_id),
+                None,
+            )
+        else:
+            matches = [
+                item
+                for item in channels
+                if str(item.get("name", "")).casefold() == normalized.casefold()
+            ]
+            if len(matches) != 1:
+                raise RuntimeError(f"Channel '{channel}' not found or bot not a member")
+            channel_entry = matches[0]
+            channel_id = str(channel_entry.get("id") or "").upper()
+
+        if not channel_id or not channel_id.startswith(("C", "G")):
+            raise ValueError("cadence Slack destinations must be C... or G... channels")
+        if channel_entry is None:
+            raise RuntimeError(f"Channel '{channel}' not found or bot not a member")
+
+        channel_name = str(channel_entry.get("name") or normalized).strip()
+        return {
+            "id": channel_id,
+            "name": f"#{channel_name.lstrip('#')}",
+            "is_private": bool(channel_entry.get("is_private")),
+        }
+
     def _open_dm_channel(self, user_id: str) -> str:
         """Open or reuse a one-on-one DM channel with a Slack user."""
         normalized = self._clean_user_ref(user_id).upper()
@@ -2580,6 +2628,12 @@ def get_user_cache(client: SlackClient | None = None) -> dict[str, str]:
 
 def list_bot_channels(*args, **kwargs):
     return _client().list_bot_channels(*args, **kwargs)
+
+
+def resolve_channel(*args, **kwargs):
+    """Resolve a channel name, mention, or ID without exposing it in UX copy."""
+
+    return _client().resolve_channel_ref(*args, **kwargs)
 
 
 def resolve_mentions(

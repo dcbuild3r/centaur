@@ -21,6 +21,24 @@ export function slackRichTextMentionsUser(raw: unknown, userId: string | undefin
 
 const MAX_RAW_DISPLAY_TEXT_CHARS = 24_000
 
+const PLAIN_EMAIL = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/
+const SLACK_MAILTO_WRAPPER = /<mailto:([^|>\s]+)(?:\|([^>]*))?>/gi
+
+/**
+ * Slack may represent a user-entered bare email as a canonical mailto link
+ * before the message reaches the agent. Keep strict tool arguments plain by
+ * removing only the exact transport wrappers whose optional label is the
+ * same email; leave arbitrary mailto markup untouched for downstream checks.
+ */
+export function normalizeSlackAutoLinkedEmails(text: string): string {
+  return text.replace(SLACK_MAILTO_WRAPPER, (match, address: string, label?: string) => {
+    const email = address.trim().toLowerCase()
+    if (!PLAIN_EMAIL.test(email)) return match
+    if (label !== undefined && label.trim().toLowerCase() !== email) return match
+    return email
+  })
+}
+
 type UnknownRecord = Record<string, unknown>
 
 export function renderSlackDisplayText(input: { raw: unknown; text: string }): SlackDisplayText {
@@ -33,7 +51,7 @@ export function renderSlackDisplayText(input: { raw: unknown; text: string }): S
       rawAttachmentCount,
       rawBlockCount,
       source: 'text',
-      text: input.text
+      text: normalizeSlackAutoLinkedEmails(input.text)
     }
   }
 
@@ -43,7 +61,7 @@ export function renderSlackDisplayText(input: { raw: unknown; text: string }): S
       rawAttachmentCount,
       rawBlockCount,
       source: 'raw_blocks',
-      text: blockText
+      text: normalizeSlackAutoLinkedEmails(blockText)
     }
   }
 
@@ -53,7 +71,7 @@ export function renderSlackDisplayText(input: { raw: unknown; text: string }): S
       rawAttachmentCount,
       rawBlockCount,
       source: 'raw_attachments',
-      text: attachmentText
+      text: normalizeSlackAutoLinkedEmails(attachmentText)
     }
   }
 

@@ -86,6 +86,8 @@ class RequestRpc(FakeRpc):
                 "run_id": "run-child",
                 "created": True,
             }
+        if message_type == "ctx.post_to_slack":
+            return {"channel": payload["channel"], "ts": "1710000000.000100"}
         if message_type == "ctx.sleep":
             return {"slept": True}
         if message_type == "ctx.event.wait":
@@ -433,6 +435,41 @@ class WorkflowHostTests(unittest.TestCase):
             ],
         )
 
+    def test_post_to_slack_sends_optional_custom_identity(self) -> None:
+        host = load_workflow_host()
+        rpc = RequestRpc()
+        ctx = host.WorkflowContext(
+            rpc,
+            run_id="run-123",
+            task_id="task-456",
+            workflow_name="sample",
+        )
+
+        result = asyncio.run(
+            ctx.post_to_slack(
+                "U12345678",
+                "Your date is approaching.",
+                username="The Date Goblin",
+                icon_emoji=":female_mage:",
+            )
+        )
+
+        self.assertEqual(result["channel"], "U12345678")
+        self.assertEqual(
+            rpc.requests,
+            [
+                {
+                    "type": "ctx.post_to_slack",
+                    "channel": "U12345678",
+                    "text": "Your date is approaching.",
+                    "args": {
+                        "username": "The Date Goblin",
+                        "icon_emoji": ":female_mage:",
+                    },
+                }
+            ],
+        )
+
     def test_create_pool_retries_transient_connection_failure(self) -> None:
         host = load_workflow_host()
         calls = []
@@ -597,7 +634,7 @@ class WorkflowHostTests(unittest.TestCase):
         assert registered is not None
         self.assertEqual(host.normalize_principal(registered), True)
 
-    def test_load_workflow_file_reads_workflow_principal_foreign_id(self) -> None:
+    def test_load_workflow_file_reads_workflow_principal_reference(self) -> None:
         host = load_workflow_host()
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "principal_workflow.py"
@@ -611,6 +648,9 @@ class WorkflowHostTests(unittest.TestCase):
 
         assert registered is not None
         self.assertEqual(host.normalize_principal(registered), "finance-automation")
+
+        registered.principal = " prn_01k2m3n4p5 "
+        self.assertEqual(host.normalize_principal(registered), "prn_01k2m3n4p5")
 
     def test_workflow_name_from_source_reads_string_constant(self) -> None:
         host = load_workflow_host()

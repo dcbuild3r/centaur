@@ -42,11 +42,18 @@ DEFAULT_DATABASE = "ai_v2"
 DEFAULT_TIME_ZONE = "UTC"
 MAX_CANDIDATES = 32
 SCHEDULER_STATUSES = {"pending", "booked", "blocked", "completed", "cancelled"}
-EMAIL_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
+EMAIL_RE = re.compile(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
+WRITABLE_CALENDAR_ACCESS_ROLES = frozenset({"writer", "owner"})
 
 
 class MeetingSchedulerError(RuntimeError):
     """Raised for fail-closed scheduling or provider errors."""
+
+
+class SchedulerPersistenceError(MeetingSchedulerError):
+    """A typed, safe failure for scheduler database readiness/connectivity."""
+
+    code = "scheduler_persistence_unavailable"
 
 
 @dataclass(frozen=True)
@@ -164,9 +171,35 @@ def _organizer_calendar_map() -> dict[str, str]:
 def _resolve_organizer(alias: str) -> str:
     alias = str(alias or "").strip()
     calendar_id = _organizer_calendar_map().get(alias)
-    if not calendar_id:
+    if calendar_id:
+        return calendar_id
+    if not EMAIL_RE.fullmatch(alias):
         raise MeetingSchedulerError(f"organizer calendar {alias!r} is not allowlisted")
-    return calendar_id
+
+    # Ad-hoc scheduling uses a managed Orbie organizer alias. Raw email keys
+    # remain supported only for explicitly allowlisted automated-cadence
+    # configuration; they are never inferred from an attendee or Slack caller.
+    try:
+        calendars = (
+            get_calendar_service().calendarList().list(showHidden=False).execute().get("items", [])
+        )
+    except Exception as error:
+        raise MeetingSchedulerError("Google Calendar organizer lookup failed") from error
+    matching = next(
+        (
+            calendar
+            for calendar in calendars
+            if isinstance(calendar, dict)
+            and str(calendar.get("id") or "").strip().lower() == alias.lower()
+        ),
+        None,
+    )
+    if matching is None:
+        raise MeetingSchedulerError(f"organizer calendar {alias!r} is not visible to Orbie")
+    access_role = str(matching.get("accessRole") or "").strip().lower()
+    if access_role not in WRITABLE_CALENDAR_ACCESS_ROLES:
+        raise MeetingSchedulerError(f"organizer calendar {alias!r} requires writer or owner access")
+    return str(matching["id"])
 
 
 def _database_url() -> str:
@@ -181,10 +214,82 @@ def _database_url() -> str:
     return value
 
 
+async def _connect_scheduler() -> asyncpg.Connection:
+    try:
+        database_url = _database_url()
+    except MeetingSchedulerError as error:
+        raise SchedulerPersistenceError("scheduler persistence unavailable") from error
+    try:
+        return await asyncpg.connect(database_url, command_timeout=30)
+    except Exception as error:
+        raise SchedulerPersistenceError("scheduler persistence unavailable") from error
+
+
+async def _check_scheduler_persistence() -> None:
+    connection = await _connect_scheduler()
+    try:
+        database = await connection.fetchrow(
+            "select current_database() as database_name, "
+            "to_regclass('public.orbie_meeting_occurrences')::text as occurrence_table"
+        )
+        database_values = dict(database or {})
+        if database_values.get("database_name") != DEFAULT_DATABASE:
+            raise SchedulerPersistenceError("scheduler persistence is not ready")
+        if database_values.get("occurrence_table") != "public.orbie_meeting_occurrences":
+            raise SchedulerPersistenceError("scheduler persistence is not ready")
+
+        access = await connection.fetchrow(
+            "select "
+            "exists(select 1 from pg_roles where rolname = 'centaur_meeting_scheduler') "
+            "as scheduler_role_exists, "
+            "pg_has_role(current_user, 'centaur_meeting_scheduler', 'member') "
+            "as scheduler_role_member, "
+            "has_database_privilege(current_user, current_database(), 'CONNECT') "
+            "as can_connect, "
+            "has_database_privilege('centaur_meeting_scheduler', current_database(), 'CONNECT') "
+            "as scheduler_can_connect, "
+            "has_schema_privilege('centaur_meeting_scheduler', 'public', 'USAGE') "
+            "as scheduler_schema_usage, "
+            "has_table_privilege('centaur_meeting_scheduler', "
+            "'public.orbie_meeting_occurrences', 'SELECT') as scheduler_can_select, "
+            "has_table_privilege('centaur_meeting_scheduler', "
+            "'public.orbie_meeting_occurrences', 'INSERT') as scheduler_can_insert, "
+            "has_table_privilege('centaur_meeting_scheduler', "
+            "'public.orbie_meeting_occurrences', 'UPDATE') as scheduler_can_update"
+        )
+        access_values = dict(access or {})
+        if not (
+            access_values.get("scheduler_role_exists")
+            and access_values.get("scheduler_role_member")
+            and access_values.get("can_connect")
+            and access_values.get("scheduler_can_connect")
+            and access_values.get("scheduler_schema_usage")
+            and access_values.get("scheduler_can_select")
+            and access_values.get("scheduler_can_insert")
+            and access_values.get("scheduler_can_update")
+        ):
+            raise SchedulerPersistenceError("scheduler persistence is not ready")
+    except SchedulerPersistenceError:
+        raise
+    except Exception as error:
+        raise SchedulerPersistenceError("scheduler persistence readiness check failed") from error
+    finally:
+        await connection.close()
+
+
+def _assert_scheduler_persistence_ready() -> None:
+    try:
+        asyncio.run(_check_scheduler_persistence())
+    except SchedulerPersistenceError:
+        raise
+    except Exception as error:
+        raise SchedulerPersistenceError("scheduler persistence readiness check failed") from error
+
+
 async def _with_connection(
     operation: Callable[[asyncpg.Connection], Awaitable[Any]],
 ) -> Any:
-    connection = await asyncpg.connect(_database_url(), command_timeout=30)
+    connection = await _connect_scheduler()
     try:
         return await operation(connection)
     finally:
@@ -197,7 +302,7 @@ async def _with_occurrence_lock(
 ) -> Any:
     """Run one occurrence operation under a cross-replica transaction lock."""
 
-    connection = await asyncpg.connect(_database_url(), command_timeout=30)
+    connection = await _connect_scheduler()
     try:
         async with connection.transaction():
             await connection.execute("select pg_advisory_xact_lock(hashtextextended($1, 0))", key)
@@ -362,6 +467,7 @@ class MeetingSchedulerClient:
     ) -> dict[str, Any]:
         """Return free/busy-derived candidate slots without event details."""
         _require_enabled()
+        _assert_scheduler_persistence_ready()
         attendees = _email_list(attendee_emails)
         duration = _positive_int(duration_minutes, "duration_minutes")
         start = _parse_rfc3339(time_min, field="time_min")
@@ -497,8 +603,7 @@ class MeetingSchedulerClient:
             and stored_attendees == attendees
         )
         if not parameters_match and (
-            not allow_parameter_update
-            or current.get("status") in {"completed", "cancelled"}
+            not allow_parameter_update or current.get("status") in {"completed", "cancelled"}
         ):
             raise MeetingSchedulerError("occurrence parameters cannot be changed by a retry")
         if current.get("status") not in {"booked", "completed", "cancelled"}:
@@ -773,6 +878,7 @@ class MeetingSchedulerClient:
     ) -> dict[str, Any]:
         """Create or reuse one Zoom + Calendar meeting occurrence."""
         _require_enabled()
+        _assert_scheduler_persistence_ready()
         key = _require_occurrence_key(occurrence_key)
         if mode not in {"cadence", "ad_hoc"}:
             raise MeetingSchedulerError("mode must be cadence or ad_hoc")
@@ -1055,9 +1161,7 @@ class MeetingSchedulerClient:
         if not actual_start_value or not requested_start_value:
             raise MeetingSchedulerError("booked meeting has no occurrence start")
         actual_start = _parse_rfc3339(str(actual_start_value), field="actual_start")
-        requested_start = _parse_rfc3339(
-            str(requested_start_value), field="requested_start"
-        )
+        requested_start = _parse_rfc3339(str(requested_start_value), field="requested_start")
         if actual_start <= dt.datetime.now(dt.UTC):
             raise MeetingSchedulerError("started meetings cannot be automatically changed")
 
@@ -1311,6 +1415,7 @@ class MeetingSchedulerClient:
     ) -> dict[str, Any]:
         """Move the existing provider pair before the occurrence starts."""
         _require_enabled()
+        _assert_scheduler_persistence_ready()
         key = _require_occurrence_key(occurrence_key)
         if mode not in {"cadence", "ad_hoc"}:
             raise MeetingSchedulerError("mode must be cadence or ad_hoc")
@@ -1514,6 +1619,7 @@ class MeetingSchedulerClient:
         confirmation_token: str | None = None,
     ) -> dict[str, Any]:
         _require_enabled()
+        _assert_scheduler_persistence_ready()
         key = _require_occurrence_key(occurrence_key)
         if not str(confirmation_token or "").strip():
             raise MeetingSchedulerError("cancellation requires explicit confirmation")
@@ -1586,6 +1692,7 @@ class MeetingSchedulerClient:
 
     def get_or_reconcile_meeting(self, occurrence_key: str) -> dict[str, Any]:
         _require_enabled()
+        _assert_scheduler_persistence_ready()
         key = _require_occurrence_key(occurrence_key)
 
         async def reconcile(connection: asyncpg.Connection) -> dict[str, Any]:

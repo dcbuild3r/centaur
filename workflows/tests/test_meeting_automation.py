@@ -232,7 +232,13 @@ class SchedulingFakeClient:
                 "email": "piotr.piwowarczyk@world.org",
                 "team_id": "TL1HM8UUU",
                 "is_bot": False,
-            }
+            },
+            {
+                "id": "UPERSON",
+                "email": "person@world.org",
+                "team_id": "TL1HM8UUU",
+                "is_bot": False,
+            },
         ]
 
     async def update_notion_booking(self, page_id, status, **kwargs):
@@ -253,7 +259,9 @@ def test_notion_tool_client_discovers_marked_private_cadence_databases():
         "row-private-db",
     ]
     assert rows[1]["_cadence_database_id"] == "private-db"
-    assert not any(args.get("database_id") == "unrelated-db" for _, _, args in context.calls)
+    assert not any(
+        args.get("database_id") == "unrelated-db" for _, _, args in context.calls
+    )
 
 
 def _input(query="AI Workstream", **overrides):
@@ -265,6 +273,7 @@ def _input(query="AI Workstream", **overrides):
         "slack_conversation_kind": "dm",
         "request_message_id": "1700000000.000001",
         "requester_slack_email": "piotr.piwowarczyk@world.org",
+        "metadata": {"explicit_cadence_request": True},
     }
     values.update(overrides)
     if not values["slack_channel_id"].startswith("D"):
@@ -428,6 +437,143 @@ def test_scheduling_args_reject_unknown_provider_fields():
                 },
             )
         )
+
+
+def test_manual_scheduling_uses_the_managed_orbie_organizer(monkeypatch):
+    client = SchedulingFakeClient(
+        {
+            "status": "ok",
+            "candidates": [
+                {
+                    "start": "2026-08-24T09:00:00Z",
+                    "end": "2026-08-24T09:30:00Z",
+                    "timezone": "UTC",
+                }
+            ],
+        }
+    )
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+
+    result = asyncio.run(
+        meeting_automation.handler(
+            _input(
+                slack_channel_id="",
+                scheduling_operation="find_availability",
+                scheduling_args={
+                    "attendee_emails": ["person@world.org"],
+                    "time_min": "2026-08-24T09:00:00Z",
+                    "time_max": "2026-08-24T10:00:00Z",
+                    "duration_minutes": 30,
+                },
+            ),
+            FakeContext(),
+        )
+    )
+
+    assert result["status"] == "ok"
+    scheduling_call = next(call for call in client.calls if call[0] == "scheduling")
+    assert scheduling_call[2]["organizer_calendar_key"] == "orbie"
+
+
+def test_manual_scheduling_accepts_external_plain_email_guests(monkeypatch):
+    client = SchedulingFakeClient(
+        {
+            "status": "ok",
+            "candidates": [
+                {"start": "2026-08-24T09:00:00Z", "end": "2026-08-24T09:30:00Z"}
+            ],
+        }
+    )
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+
+    result = asyncio.run(
+        meeting_automation.handler(
+            _input(
+                slack_channel_id="",
+                scheduling_operation="find_availability",
+                scheduling_args={
+                    "attendee_emails": ["external@example.com"],
+                    "time_min": "2026-08-24T09:00:00Z",
+                    "time_max": "2026-08-24T10:00:00Z",
+                    "duration_minutes": 30,
+                },
+            ),
+            FakeContext(),
+        )
+    )
+
+    assert result["status"] == "ok"
+    scheduling_call = next(call for call in client.calls if call[0] == "scheduling")
+    assert scheduling_call[2]["attendee_emails"] == ["external@example.com"]
+
+
+@pytest.mark.parametrize(
+    "attendee",
+    [
+        "<@U123>",
+        "mailto:external@example.com",
+        "<mailto:external@example.com|external@example.com>",
+    ],
+)
+def test_manual_scheduling_rejects_non_plain_email_guests(attendee):
+    with pytest.raises(ValueError, match="exact email addresses"):
+        meeting_automation._resolve_booking_attendees(attendee, [])
+
+
+def test_generic_private_meeting_request_returns_intake_without_notion(monkeypatch):
+    client = FakeClient([])
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+    context = FakeContext()
+
+    result = asyncio.run(
+        meeting_automation.handler(_input("please schedule a private meeting"), context)
+    )
+
+    assert result["status"] == "needs_input"
+    assert result["reason"] == "private_meeting_details_required"
+    assert result["missing"] == [
+        "title",
+        "attendee_emails",
+        "date_or_range",
+        "time_zone",
+        "duration_minutes",
+        "recording_preference",
+    ]
+    assert context.posts == [
+        (
+            "D123456",
+            "Please provide the meeting title, invitee email addresses, date or date range, timezone, duration, and recording preference.",
+        )
+    ]
+    assert client.calls == []
+
+
+def test_manual_booking_cannot_bypass_requester_ownership_with_cadence_id(monkeypatch):
+    client = SchedulingFakeClient({"status": "ok", "candidates": []})
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+
+    with pytest.raises(ValueError, match="cannot target a cadence"):
+        asyncio.run(
+            meeting_automation.handler(
+                _input(
+                    slack_channel_id="",
+                    scheduling_operation="book_meeting",
+                    scheduling_args={
+                        "occurrence_key": "manual:1",
+                        "title": "Planning",
+                        "start": "2099-08-24T09:00:00Z",
+                        "duration_minutes": 30,
+                        "time_zone": "UTC",
+                        "attendee_emails": ["person@world.org"],
+                        "cadence_id": "managed-cadence",
+                        "confirmation_token": "confirmed",
+                    },
+                ),
+                FakeContext(),
+            )
+        )
+
+    assert not any(call[0] == "scheduling" for call in client.calls)
 
 
 def test_reschedule_updates_the_existing_notion_cadence_booking(monkeypatch):
@@ -947,18 +1093,55 @@ def test_handler_hides_unknown_and_unauthorized_cadence_names(monkeypatch):
     context = FakeContext()
 
     result = asyncio.run(
-        meeting_automation.handler(_input("secret leadership"), context)
+        meeting_automation.handler(
+            _input("secret leadership", metadata={"explicit_cadence_request": False}),
+            context,
+        )
     )
 
     assert result["status"] == "rejected"
-    assert [call[0] for call in client.calls] == ["authorized_cadences"]
+    assert result["reason"] == "explicit_cadence_request_required"
+    assert client.calls == []
     assert context.posts == [
         (
             "D123456",
-            "I couldn't find one cadence you are allowed to run with that name. "
-            + "Use its exact cadence ID or title and try again.",
+            "Please make an explicit cadence request with its exact cadence ID or title.",
         )
     ]
+
+
+def test_handler_maps_authorized_cadence_notion_outage_to_safe_message(monkeypatch):
+    client = FakeClient([])
+
+    async def unavailable(*_args):
+        raise RuntimeError("caller-scoped Notion authorization details")
+
+    client.authorized_cadences = unavailable
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+    context = FakeContext()
+
+    result = asyncio.run(
+        meeting_automation.handler(
+            _input("private cadence", metadata={"explicit_cadence_request": True}),
+            context,
+        )
+    )
+
+    assert result == {
+        "status": "rejected",
+        "reason": "notion_unavailable",
+        "delivered": [{"sent": True, "channel": "D123456"}],
+    }
+    assert context.posts == [
+        (
+            "D123456",
+            (
+                "I can't check private cadence details in Notion right now. "
+                "Please try again later."
+            ),
+        )
+    ]
+    assert all("authorization" not in str(post) for post in context.posts)
 
 
 def test_private_cadence_without_due_notification_reports_noop(monkeypatch):
@@ -1007,7 +1190,7 @@ def test_input_rejects_oversized_or_control_character_instructions():
 def _published_row(**overrides):
     row = {
         "id": "notion-page-1",
-        "Ritual": "Weekly Sync",
+        "Cadence": "Weekly Sync",
         "Automation ID": "weekly-sync",
         "Automation status": "Published",
         "Frequency": "Weekly",
@@ -1367,7 +1550,7 @@ class ManualNotionFakeClient(FakeClient):
 def test_manual_run_resolves_owner_scoped_draft_notion_cadence(monkeypatch):
     row = _published_row(
         **{
-            "Ritual": "Weekly Sync Spotlight Demo",
+            "Cadence": "Weekly Sync Spotlight Demo",
             "Automation ID": "orbie-weekly-sync-spotlight-demo",
             "Automation status": "Draft",
             "Owner / DRI": '["user://owner-dc"]',
@@ -1384,6 +1567,7 @@ def test_manual_run_resolves_owner_scoped_draft_notion_cadence(monkeypatch):
                 "Weekly Sync Spotlight Demo",
                 requester_slack_user_id="UDC",
                 requester_slack_email="dc.builder@world.org",
+                metadata={"explicit_cadence_request": True},
             ),
             FakeContext(),
         )

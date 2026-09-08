@@ -19,7 +19,7 @@ export type MeetingAutomationDispatchResult = {
   response: JsonObject
 }
 
-const MEETING_AUTOMATION_COMMAND = /^(?:run\s+cadence|run\s+meeting\s+automation|meeting\s+ops)\s+(.+)$/is
+const MEETING_AUTOMATION_COMMAND = /^(?:run\s+cadence|cadence\s+run|run\s+meeting\s+automation|meeting\s+ops)\s+(.+)$/is
 export const MAX_CUSTOM_INSTRUCTIONS_CHARS = 4000
 
 export function parseMeetingAutomationCommand(
@@ -108,6 +108,7 @@ export async function dispatchMeetingAutomationCommand(
 
   const request: SlackMeetingAutomationRunRequest = {
     cadence_query: command.cadenceQuery,
+    cadence_request: true,
     requester_slack_team_id: requester.slackTeamId,
     requester_slack_user_id: requester.slackUserId,
     slack_channel_id: requester.slackChannelId,

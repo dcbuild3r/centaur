@@ -35,6 +35,20 @@ test('resolves the date placeholder without changing other text', () => {
     .toBe('All Hands — 2026-08-03')
 })
 
+test('resolves the two-digit ISO week placeholder', () => {
+  expect(pure.resolveDocName(
+    'CW{week} World Foundation Weekly All Hands',
+    new Date('2026-08-03T10:00:00Z'),
+    'UTC',
+  )).toBe('CW32 World Foundation Weekly All Hands')
+})
+
+test('ISO week placeholder follows year boundaries', () => {
+  expect(pure.isoWeek(new Date('2026-12-31T10:00:00Z'), 'UTC')).toBe('53')
+  expect(pure.isoWeek(new Date('2027-01-01T10:00:00Z'), 'UTC')).toBe('53')
+  expect(pure.isoWeek(new Date('2027-01-04T10:00:00Z'), 'UTC')).toBe('01')
+})
+
 test('escapes regex metacharacters for Apps Script replaceText', () => {
   expect(pure.escapeRegExp('{date}')).toBe('\\{date\\}')
 })

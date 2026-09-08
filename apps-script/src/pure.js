@@ -11,8 +11,20 @@ var MeetingOpsPure = (function () {
     return Utilities.formatDate(date, timeZone, 'yyyy-MM-dd');
   }
 
+  function isoWeek(date, timeZone) {
+    var parts = dateKey(date, timeZone).split('-').map(Number);
+    var localDate = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+    var weekday = localDate.getUTCDay() || 7;
+    localDate.setUTCDate(localDate.getUTCDate() + 4 - weekday);
+    var yearStart = new Date(Date.UTC(localDate.getUTCFullYear(), 0, 4));
+    var week = 1 + Math.round((localDate - yearStart) / (7 * 24 * 60 * 60 * 1000));
+    return ('0' + week).slice(-2);
+  }
+
   function resolveDocName(template, date, timeZone) {
-    return String(template).replace('{YYYY-MM-DD}', dateKey(date, timeZone));
+    return String(template)
+      .split('{YYYY-MM-DD}').join(dateKey(date, timeZone))
+      .split('{week}').join(isoWeek(date, timeZone));
   }
 
   function isWithinAgendaWindow(now, occurrence, leadMin, staleWindowMin) {
@@ -244,6 +256,7 @@ var MeetingOpsPure = (function () {
     notificationRecipients: notificationRecipients,
     notificationKey: notificationKey,
     authorizedCadences: authorizedCadences,
+    isoWeek: isoWeek,
     resolveDocName: resolveDocName,
     shouldPost: shouldPost,
     wasNotificationDelivered: wasNotificationDelivered
