@@ -26,6 +26,7 @@ import { clearRequesterIdentityCacheForTests } from '../src/session-api'
 import { slackbotMetrics } from '../src/metrics'
 import { createOpenAiMessageOverridesStrategy } from '../src/message-overrides-strategy'
 import claudeSettings from '../../../harness/claude/settings.json'
+import codexConfig from '../../../harness/codex/config.toml'
 
 const BOT_TOKEN = 'xoxb-slackbotv2-emulate'
 const USER_TOKEN = 'xoxp-slackbotv2-user'
@@ -36,6 +37,19 @@ const USER_ID = 'USLACKBOTV2USER'
 const USER_B_ID = 'USLACKBOTV2USERB'
 const TEAM_ID = 'T000000001'
 const CHANNEL_ID = 'C000000001'
+const CODEX_REASONING_DISPLAY: Record<string, string> = {
+  none: 'None',
+  minimal: 'Minimal',
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'XHigh',
+  max: 'Max'
+}
+const BAKED_CODEX_REASONING_DISPLAY =
+  CODEX_REASONING_DISPLAY[
+    String((codexConfig as { model_reasoning_effort: string }).model_reasoning_effort).toLowerCase()
+  ]
 /** How real Slack renders a streamed message whose stream broke or was never stopped. */
 const BROKEN_STREAM_TEXT = ':warning: Something went wrong'
 
@@ -1050,7 +1064,7 @@ describe('slackbotv2', () => {
         .filter(call => call.method === 'chat.stopStream')
         .flatMap(call => (Array.isArray(call.body.blocks) ? (call.body.blocks as unknown[]) : []))
         .map(block => JSON.stringify(block))
-        .filter(text => text.includes('GPT-5.6-SOL'))
+        .filter(text => text.includes(' · Codex · '))
 
     const parent = await postUserMessage('Response metadata thread context.')
     const firstMention = await postUserMessage(`<@${BOT_USER_ID}> start`, parent.ts)
@@ -1076,7 +1090,7 @@ describe('slackbotv2', () => {
     await Promise.all(firstWaits)
     expect(metadataBlockTexts(slackApi.calls)).toHaveLength(1)
     expect(metadataBlockTexts(slackApi.calls)[0]).toContain('Codex')
-    expect(metadataBlockTexts(slackApi.calls)[0]).toContain('Low')
+    expect(metadataBlockTexts(slackApi.calls)[0]).toContain(BAKED_CODEX_REASONING_DISPLAY)
     expect(metadataBlockTexts(slackApi.calls)[0]).not.toContain('Fast')
     expect(metadataBlockTexts(slackApi.calls)[0]).not.toContain('Open chat in Console')
 
@@ -1119,7 +1133,7 @@ describe('slackbotv2', () => {
         .filter(call => call.method === 'chat.stopStream')
         .flatMap(call => (Array.isArray(call.body.blocks) ? (call.body.blocks as unknown[]) : []))
         .map(block => JSON.stringify(block))
-        .filter(text => text.includes('GPT-5.6-SOL'))
+        .filter(text => text.includes(' · Codex · '))
 
     const parent = await postUserMessage('Service tier thread context.')
     const firstMention = await postUserMessage(`<@${BOT_USER_ID}> start`, parent.ts)
@@ -1219,7 +1233,7 @@ describe('slackbotv2', () => {
       .map(block => JSON.stringify(block))
       .find(text => text.includes('Open chat in Console'))
     expect(footer).toContain('Nanocodex')
-    expect(footer).toContain('Low')
+    expect(footer).toContain(BAKED_CODEX_REASONING_DISPLAY)
     expect(footer).not.toContain('Codex*')
     expect(codexApi.creates[0]?.body.harness_type).toBe('nanocodex')
     expect(codexApi.creates[0]?.body.metadata.harness_assignment).toEqual(harnessAssignment)
