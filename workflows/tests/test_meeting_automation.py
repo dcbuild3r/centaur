@@ -259,7 +259,9 @@ def test_notion_tool_client_discovers_marked_private_cadence_databases():
         "row-private-db",
     ]
     assert rows[1]["_cadence_database_id"] == "private-db"
-    assert not any(args.get("database_id") == "unrelated-db" for _, _, args in context.calls)
+    assert not any(
+        args.get("database_id") == "unrelated-db" for _, _, args in context.calls
+    )
 
 
 def _input(query="AI Workstream", **overrides):
@@ -437,7 +439,7 @@ def test_scheduling_args_reject_unknown_provider_fields():
         )
 
 
-def test_manual_scheduling_uses_the_verified_requester_as_organizer(monkeypatch):
+def test_manual_scheduling_uses_the_managed_orbie_organizer(monkeypatch):
     client = SchedulingFakeClient(
         {
             "status": "ok",
@@ -470,14 +472,16 @@ def test_manual_scheduling_uses_the_verified_requester_as_organizer(monkeypatch)
 
     assert result["status"] == "ok"
     scheduling_call = next(call for call in client.calls if call[0] == "scheduling")
-    assert scheduling_call[2]["organizer_calendar_key"] == "piotr.piwowarczyk@world.org"
+    assert scheduling_call[2]["organizer_calendar_key"] == "orbie"
 
 
 def test_manual_scheduling_accepts_external_plain_email_guests(monkeypatch):
     client = SchedulingFakeClient(
         {
             "status": "ok",
-            "candidates": [{"start": "2026-08-24T09:00:00Z", "end": "2026-08-24T09:30:00Z"}],
+            "candidates": [
+                {"start": "2026-08-24T09:00:00Z", "end": "2026-08-24T09:30:00Z"}
+            ],
         }
     )
     monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
@@ -505,7 +509,11 @@ def test_manual_scheduling_accepts_external_plain_email_guests(monkeypatch):
 
 @pytest.mark.parametrize(
     "attendee",
-    ["<@U123>", "mailto:external@example.com", "<mailto:external@example.com|external@example.com>"],
+    [
+        "<@U123>",
+        "mailto:external@example.com",
+        "<mailto:external@example.com|external@example.com>",
+    ],
 )
 def test_manual_scheduling_rejects_non_plain_email_guests(attendee):
     with pytest.raises(ValueError, match="exact email addresses"):

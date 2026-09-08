@@ -26,10 +26,14 @@ DEFAULT_CADENCE_TIME_ZONE = "Europe/Prague"
 DEFAULT_MEETING_TIME = "10:00"
 DEFAULT_NOTIFICATION_TIME = "09:15"
 DEFAULT_PREPARATION_BUSINESS_DAYS = 1
+MANUAL_ORGANIZER_CALENDAR_KEY = "orbie"
 EMAIL_RE = re.compile(
     r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$"
 )
-PRIVATE_MEETING_REQUEST_RE = re.compile(r"\b(?:schedule|book|arrange)\b.*\bprivate\s+meeting\b|\bprivate\s+meeting\b.*\b(?:schedule|book|booked|arrange)\b", re.IGNORECASE)
+PRIVATE_MEETING_REQUEST_RE = re.compile(
+    r"\b(?:schedule|book|arrange)\b.*\bprivate\s+meeting\b|\bprivate\s+meeting\b.*\b(?:schedule|book|booked|arrange)\b",
+    re.IGNORECASE,
+)
 PRIVATE_MEETING_INTAKE_FIELDS = [
     "title",
     "attendee_emails",
@@ -1214,37 +1218,6 @@ def _resolve_booking_attendees(
     return attendees
 
 
-def _resolve_requester_calendar_email(
-    inp: Input,
-    slack_users: list[dict[str, Any]],
-) -> str:
-    """Resolve the authenticated manual scheduler to one calendar identity."""
-
-    requester_id = str(inp.requester_slack_user_id or "").strip()
-    matches = [
-        user
-        for user in slack_users
-        if str(user.get("id") or "").strip() == requester_id
-        and str(user.get("team_id") or "").strip() == WORLD_SLACK_TEAM_ID
-        and not user.get("deleted")
-        and not user.get("is_deleted")
-        and not user.get("is_bot")
-    ]
-    if len(matches) != 1:
-        raise ValueError(
-            "manual meeting organizer must resolve to exactly one active Slack user"
-        )
-    email = str(matches[0].get("email") or "").strip().lower()
-    if not EMAIL_RE.fullmatch(email):
-        raise ValueError("manual meeting organizer has no verified calendar email")
-    supplied_email = str(inp.requester_slack_email or "").strip().lower()
-    if supplied_email and supplied_email != email:
-        raise ValueError(
-            "requester Slack email does not match the verified Slack directory"
-        )
-    return email
-
-
 def normalize_notion_cadence(
     row: dict[str, Any],
     notion_users: list[dict[str, Any]],
@@ -1953,11 +1926,12 @@ async def _scheduling_handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any
                 f"scheduling:list_slack_users:{request_key}",
                 lambda: client.slack_users(),
             )
-        # Manual meetings are owned by the person who proposed them. The
-        # caller cannot choose a different calendar through scheduling_args.
-        args["organizer_calendar_key"] = _resolve_requester_calendar_email(
-            inp, slack_users
-        )
+        # Ad-hoc private meetings are hosted by Orbie's managed calendar. The
+        # requester is still authenticated above and attendee emails remain
+        # caller-provided, but no requester-owned calendar write is required.
+        # This keeps external guests on the free/busy path instead of treating
+        # their calendar as the event organizer.
+        args["organizer_calendar_key"] = MANUAL_ORGANIZER_CALENDAR_KEY
     preflight: dict[str, Any] | None = None
     if operation in {
         "reschedule_meeting",

@@ -8,8 +8,9 @@ description: Run owner-scoped Google Docs cadences and governed Calendar/Zoom bo
 World Foundation Slack users can run an authorized meeting cadence by sending
 Orbie a direct message or mentioning Orbie in a deployment-allowlisted channel.
 No per-user Google OAuth identity or Centaur Console role is required. For a
-manual meeting, the proposer must share their Google Calendar with Orbie at
-`writer` or `owner` access so the invitation can be owned by that proposer.
+manual meeting, Orbie creates the Calendar event in its managed organizer
+calendar. The requester must be an authenticated World Slack user, while each
+attendee email only needs the free/busy access required for availability.
 
 Use one of these forms:
 
@@ -144,9 +145,8 @@ Before enabling `MEETING_SCHEDULER_ENABLED` in Dev:
 
 1. Share each participant calendar with `orbie-automation@world.org` at
    free/busy level only.
-2. Grant `writer` or `owner` access to each approved manual proposer's
-   calendar, and grant write access only to explicitly designated automated
-   cadence calendars. Map automated calendar IDs through
+2. Grant free/busy access to approved attendee calendars and keep the managed
+   Orbie organizer calendar writable. Map automated calendar IDs through
    `MEETING_ORGANIZER_CALENDARS`; never map `primary` or accept a raw calendar
    ID from a caller.
 3. Create the World Foundation Zoom Server-to-Server OAuth app with a licensed

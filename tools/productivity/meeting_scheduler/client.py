@@ -42,9 +42,7 @@ DEFAULT_DATABASE = "ai_v2"
 DEFAULT_TIME_ZONE = "UTC"
 MAX_CANDIDATES = 32
 SCHEDULER_STATUSES = {"pending", "booked", "blocked", "completed", "cancelled"}
-EMAIL_RE = re.compile(
-    r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$"
-)
+EMAIL_RE = re.compile(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
 WRITABLE_CALENDAR_ACCESS_ROLES = frozenset({"writer", "owner"})
 
 
@@ -178,9 +176,9 @@ def _resolve_organizer(alias: str) -> str:
     if not EMAIL_RE.fullmatch(alias):
         raise MeetingSchedulerError(f"organizer calendar {alias!r} is not allowlisted")
 
-    # Manual Slack scheduling supplies the verified proposer's email after the
-    # workflow has resolved it from Slack. Require an exact, writable calendar
-    # match before allowing that identity to become the event organizer.
+    # Ad-hoc scheduling uses a managed Orbie organizer alias. Raw email keys
+    # remain supported only for explicitly allowlisted automated-cadence
+    # configuration; they are never inferred from an attendee or Slack caller.
     try:
         calendars = (
             get_calendar_service().calendarList().list(showHidden=False).execute().get("items", [])
@@ -605,8 +603,7 @@ class MeetingSchedulerClient:
             and stored_attendees == attendees
         )
         if not parameters_match and (
-            not allow_parameter_update
-            or current.get("status") in {"completed", "cancelled"}
+            not allow_parameter_update or current.get("status") in {"completed", "cancelled"}
         ):
             raise MeetingSchedulerError("occurrence parameters cannot be changed by a retry")
         if current.get("status") not in {"booked", "completed", "cancelled"}:
@@ -1164,9 +1161,7 @@ class MeetingSchedulerClient:
         if not actual_start_value or not requested_start_value:
             raise MeetingSchedulerError("booked meeting has no occurrence start")
         actual_start = _parse_rfc3339(str(actual_start_value), field="actual_start")
-        requested_start = _parse_rfc3339(
-            str(requested_start_value), field="requested_start"
-        )
+        requested_start = _parse_rfc3339(str(requested_start_value), field="requested_start")
         if actual_start <= dt.datetime.now(dt.UTC):
             raise MeetingSchedulerError("started meetings cannot be automatically changed")
 
