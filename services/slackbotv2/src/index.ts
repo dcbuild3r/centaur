@@ -181,7 +181,7 @@ const RENDER_RECOVERY_MAX_THREAD_FAILURES = 5
 const RENDER_RETRY_INITIAL_DELAY_MS = 250
 const RENDER_RETRY_MAX_DELAY_MS = 5_000
 const ASSISTANT_STATUS_MAX_CHARS = 50
-const SLACK_TASK_DETAILS_MAX_CHARS = 500
+const SLACK_TASK_DETAILS_MAX_CHARS = 256
 const SLACK_FALLBACK_TEXT_MAX_CHARS = 35_000
 const POSTGRES_CONNECT_INITIAL_DELAY_MS = 250
 const POSTGRES_CONNECT_MAX_DELAY_MS = 10_000
@@ -322,10 +322,14 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   const userName = options.userName ?? 'centaur'
   const logger = options.logger ?? noopLogger
   const slack = createSlackAdapter({
+    agentView: options.agentViewEnabled === true,
+    // Titles come from durable session events, including recovery.
+    sessionTitle: false,
     apiUrl: options.slackApiUrl,
     botToken: options.botToken,
     botUserId: options.botUserId,
     signingSecret: options.signingSecret,
+    streamSegmentMaxAgeMs: Number(process.env.SLACK_STREAM_SEGMENT_MAX_AGE_MS) || undefined,
     userName,
     logger
   })
@@ -404,6 +408,43 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
       workflow_event_name: `slack.block_action.${payload.action_id}`
     })
   })
+
+  if (options.agentViewEnabled) {
+    chat.onDirectMessage(async (_thread, message) => {
+      if (!(await isAllowedSlackMessage(message, options, logger))) return
+      const raw = isJsonObject(message.raw) ? message.raw : {}
+      const channel = stringValue(raw.channel)
+      const threadTs = stringValue(raw.thread_ts) ?? stringValue(raw.ts)
+      if (!channel || !threadTs) return
+      // Legacy DMs leave a conversation-wide subscription behind. The SDK
+      // preserves that routing for proactive bots; our agent sessions always
+      // follow Slack's thread roots, including after toggling modes.
+      const threadId = slack.encodeThreadId({ channel, threadTs })
+      const thread = chat.thread(threadId)
+      const directMessage = new ChatSdkMessage({
+        attachments: message.attachments,
+        author: message.author,
+        formatted: message.formatted,
+        id: message.id,
+        isMention: true,
+        links: message.links,
+        metadata: message.metadata,
+        raw: message.raw,
+        text: message.text,
+        threadId
+      })
+      lateSlackFiles.rememberFilelessMention(thread, directMessage)
+      await handleSlackMessageHandoff(thread, directMessage, {
+        assistantStatusRequested: true,
+        mode: 'execute',
+        options,
+        state,
+        steeringReactions,
+        subscribe: true,
+        trigger: 'direct_message'
+      })
+    })
+  }
 
   chat.onNewMention(async (thread, message) => {
     if (!(await isAllowedSlackMessage(message, options, logger))) return
@@ -2786,7 +2827,7 @@ async function renderExecutionStream(
       // chat.stopStream. The Console link is only included on the first assistant
       // message; optional response metadata may be appended on every live response.
       ...(responseContextBlock ? { stopBlocks: [responseContextBlock] } : {})
-    })
+    }) ?? await thread.post(visibleStream)
     return { diverged: capture.diverged, messageId: sent?.id }
   } finally {
     await setAssistantStatus(thread, '', options, trace)
@@ -2836,7 +2877,7 @@ async function renderRecoveredExecutionStream(
         recipientUserId: message.author.userId,
         ...(taskDisplayMode === 'none' ? {} : { taskDisplayMode })
       }
-    )
+    ) ?? await thread.post(visibleStream)
     return { diverged: capture.diverged, messageId: sent?.id }
   } finally {
     await setAssistantStatus(thread, '', options, trace)
@@ -3010,7 +3051,10 @@ function truncateSlackText(value: string, maxChars: number, label: string): stri
   let omitted = value.length - maxChars
   while (true) {
     const suffix = `\n[truncated ${omitted} chars from ${label}]`
-    const keep = Math.max(0, maxChars - suffix.length)
+    let keep = Math.max(0, maxChars - suffix.length)
+    // Keep a Unicode surrogate pair together at the truncation boundary.
+    const lastCode = value.charCodeAt(keep - 1)
+    if (lastCode >= 0xd800 && lastCode <= 0xdbff) keep -= 1
     const actualOmitted = value.length - keep
     if (actualOmitted === omitted) return `${value.slice(0, keep).trimEnd()}${suffix}`
     omitted = actualOmitted

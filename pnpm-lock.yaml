@@ -11,9 +11,9 @@ patchedDependencies:
   '@chat-adapter/linear@4.39.0':
     hash: 237d9afdc1f965a46c979d5c6a1948c3e542427f4d9ec8b27946e8a260fec164
     path: patches/@chat-adapter__linear@4.39.0.patch
-  '@chat-adapter/slack@4.39.0':
-    hash: a90fdb144f1e7fd58a7ca92d8059c40841932d7d50ad2d74e16c606052f08e78
-    path: patches/@chat-adapter__slack@4.39.0.patch
+  '@chat-adapter/slack@4.40.0':
+    hash: 0e3cd8d89b08aafaa2fbc463e7e121e4eaef6729795f87791cdd611b00b06d9e
+    path: patches/@chat-adapter__slack@4.40.0.patch
   '@chat-adapter/state-pg@4.39.0':
     hash: 66f3872b9ef25b0565c887d66b91b870d786f2aa4ff96150fe4bb83657894fa9
     path: patches/@chat-adapter__state-pg@4.39.0.patch
@@ -219,14 +219,14 @@ importers:
         specifier: workspace:*
         version: link:../../packages/rendering
       '@chat-adapter/slack':
-        specifier: ^4.39.0
-        version: 4.39.0(patch_hash=a90fdb144f1e7fd58a7ca92d8059c40841932d7d50ad2d74e16c606052f08e78)(zod@4.4.3)
+        specifier: 4.40.0
+        version: 4.40.0(patch_hash=0e3cd8d89b08aafaa2fbc463e7e121e4eaef6729795f87791cdd611b00b06d9e)(zod@4.4.3)
       '@chat-adapter/state-pg':
-        specifier: ^4.39.0
-        version: 4.39.0(patch_hash=66f3872b9ef25b0565c887d66b91b870d786f2aa4ff96150fe4bb83657894fa9)(zod@4.4.3)
+        specifier: 4.40.0
+        version: 4.40.0(zod@4.4.3)
       chat:
-        specifier: ^4.39.0
-        version: 4.39.0(zod@4.4.3)
+        specifier: 4.40.0
+        version: 4.40.0(zod@4.4.3)
       hono:
         specifier: ^4.12.18
         version: 4.12.25
@@ -235,11 +235,11 @@ importers:
         version: 8.21.0
     devDependencies:
       '@chat-adapter/state-memory':
-        specifier: ^4.39.0
-        version: 4.39.0(zod@4.4.3)
+        specifier: 4.40.0
+        version: 4.40.0(zod@4.4.3)
       '@slack/web-api':
-        specifier: ^7.15.2
-        version: 7.17.0
+        specifier: ^7.18.0
+        version: 7.19.0
       '@types/bun':
         specifier: ^1.3.13
         version: 1.3.14
@@ -334,16 +334,28 @@ packages:
     resolution: {integrity: sha512-zc5mB5rYqbp4ts+Z3tG/YwkCypPYphriYpG95ZMRNGiEYx3cYZJZFmAFFM4YLfdz3VIQ99Fd0HFDYVNyAMV7cg==}
     engines: {node: '>=20'}
 
-  '@chat-adapter/slack@4.39.0':
-    resolution: {integrity: sha512-nDBYFEmD9MUobUH+HJbOYwKYcaeoCFJDXVvd41flh5sslpixSUG2SFcz7F3py62jJ9c0YYNEdwprIExO20IyZQ==}
+  '@chat-adapter/shared@4.40.0':
+    resolution: {integrity: sha512-uTDl9p+PVkGtAw9dgvRdkydifvYVp98R26vGHhU4V5HuS7DBTedTdb1COUOh6vfP0SrC+xSozp4O/IyfbXZSKw==}
+    engines: {node: '>=20'}
+
+  '@chat-adapter/slack@4.40.0':
+    resolution: {integrity: sha512-aEkJ8OdQPZpIICbxHO08TOPrFVnwvy9e1S1J+AIqB9S1Tf5lE5DtF9AZXWCglRVXFoNCeZ8QcdJYIglxgVIaTg==}
     engines: {node: '>=20'}
 
   '@chat-adapter/state-memory@4.39.0':
     resolution: {integrity: sha512-sTslMdRA9MG2MYUF9anD+eatZ1o3Nu64TkQCJ9GrGWfRCefM8DnIG/Op+Ej9XS6XjqOORb3eDJvy6IpvWrfT4A==}
     engines: {node: '>=20'}
 
+  '@chat-adapter/state-memory@4.40.0':
+    resolution: {integrity: sha512-NmFFkvUfnDBDS/mkzrtKHdW757EGt0eX3OQH5IPxrKqhjSsNzpqUdkJ/uDB4BP0Rbex4oW/HgwhZ+JGONVbMBQ==}
+    engines: {node: '>=20'}
+
   '@chat-adapter/state-pg@4.39.0':
     resolution: {integrity: sha512-PJWX4gPkBubHj3K7FhBbASavmbI6qpAVcQHl+7yrR07NKWcZVZ2d9154keR/+vFpyvI4S/pn1gfnoW8DrUqaWQ==}
+    engines: {node: '>=20'}
+
+  '@chat-adapter/state-pg@4.40.0':
+    resolution: {integrity: sha512-EmUAgJNLF0dpF1cm4sw4NKxVmtunYiqGoNADiasW/T/JhKiJLCH9KMhjtxG5ZgEwORGvcKGEOCnhocTY/fylcw==}
     engines: {node: '>=20'}
 
   '@chat-adapter/teams@4.39.0':
@@ -714,10 +726,6 @@ packages:
     resolution: {integrity: sha512-I8vmSjNYWsaxuWPx6dz4yeh0h7vRBWbgAMK14LEmblbZ404BtrPbXs6jDPx4cYgGf8msDGF4A9opLZBu21FViQ==}
     engines: {node: '>= 12.13.0', npm: '>= 6.12.0'}
 
-  '@slack/web-api@7.17.0':
-    resolution: {integrity: sha512-jejr34a8B4L5AS713wOAx1LAqNkW16HVMDEa6sYBvFDc/llUBl8hXaiI4BwF+Al+Sug19Vn2O7iokTVIhVvZ1Q==}
-    engines: {node: '>= 18', npm: '>= 8.6.0'}
-
   '@slack/web-api@7.19.0':
     resolution: {integrity: sha512-ItjyjEZml+LDH8CjcCLRLJHh7VZtevPKExrRN3l5KWyBliyDnGAeoO4Y+K+fFBmRpKLYVPgqWMX4THldv2HVtA==}
     engines: {node: '>= 18', npm: '>= 8.6.0'}
@@ -941,6 +949,21 @@ packages:
 
   chat@4.39.0:
     resolution: {integrity: sha512-o7D+oAbQAYFVoc9+OH8wya11609ybRThNTF3s/5C1LAABGGi6IrxoQQEN/aIe+4h5pmKYzUjXeqTcuOZcpIAZA==}
+    engines: {node: '>=20'}
+    peerDependencies:
+      ai: ^6.0.182 || ^7.0.0
+      workflow: ^5.0.0-beta.35
+      zod: ^3.0.0 || ^4.0.0
+    peerDependenciesMeta:
+      ai:
+        optional: true
+      workflow:
+        optional: true
+      zod:
+        optional: true
+
+  chat@4.40.0:
+    resolution: {integrity: sha512-slu3VDxItlelEZ8A5vqzlmtT2WErqj2YCGuhhcNx+Ev0+wHeBUqUDUA7hXkca+BfFtW1ZX7ECcySCTG2q2gefg==}
     engines: {node: '>=20'}
     peerDependencies:
       ai: ^6.0.182 || ^7.0.0
@@ -2006,12 +2029,21 @@ snapshots:
       - workflow
       - zod
 
-  '@chat-adapter/slack@4.39.0(patch_hash=a90fdb144f1e7fd58a7ca92d8059c40841932d7d50ad2d74e16c606052f08e78)(zod@4.4.3)':
+  '@chat-adapter/shared@4.40.0(zod@4.4.3)':
     dependencies:
-      '@chat-adapter/shared': 4.39.0(zod@4.4.3)
+      chat: 4.40.0(zod@4.4.3)
+    transitivePeerDependencies:
+      - ai
+      - supports-color
+      - workflow
+      - zod
+
+  '@chat-adapter/slack@4.40.0(patch_hash=0e3cd8d89b08aafaa2fbc463e7e121e4eaef6729795f87791cdd611b00b06d9e)(zod@4.4.3)':
+    dependencies:
+      '@chat-adapter/shared': 4.40.0(zod@4.4.3)
       '@slack/socket-mode': 2.0.7
       '@slack/web-api': 7.19.0
-      chat: 4.39.0(zod@4.4.3)
+      chat: 4.40.0(zod@4.4.3)
     transitivePeerDependencies:
       - ai
       - bufferutil
@@ -2030,9 +2062,29 @@ snapshots:
       - workflow
       - zod
 
+  '@chat-adapter/state-memory@4.40.0(zod@4.4.3)':
+    dependencies:
+      chat: 4.40.0(zod@4.4.3)
+    transitivePeerDependencies:
+      - ai
+      - supports-color
+      - workflow
+      - zod
+
   '@chat-adapter/state-pg@4.39.0(patch_hash=66f3872b9ef25b0565c887d66b91b870d786f2aa4ff96150fe4bb83657894fa9)(zod@4.4.3)':
     dependencies:
       chat: 4.39.0(zod@4.4.3)
+      pg: 8.21.0
+    transitivePeerDependencies:
+      - ai
+      - pg-native
+      - supports-color
+      - workflow
+      - zod
+
+  '@chat-adapter/state-pg@4.40.0(zod@4.4.3)':
+    dependencies:
+      chat: 4.40.0(zod@4.4.3)
       pg: 8.21.0
     transitivePeerDependencies:
       - ai
@@ -2489,31 +2541,13 @@ snapshots:
 
   '@slack/types@2.21.1': {}
 
-  '@slack/web-api@7.17.0':
-    dependencies:
-      '@slack/logger': 4.0.1
-      '@slack/types': 2.21.1
-      '@types/node': 25.9.3
-      '@types/retry': 0.12.0
-      axios: 1.18.0
-      eventemitter3: 5.0.4
-      form-data: 4.0.6
-      is-electron: 2.2.2
-      is-stream: 2.0.1
-      p-queue: 6.6.2
-      p-retry: 4.6.2
-      retry: 0.13.1
-    transitivePeerDependencies:
-      - debug
-      - supports-color
-
   '@slack/web-api@7.19.0':
     dependencies:
       '@slack/logger': 4.0.1
       '@slack/types': 2.21.1
       '@types/node': 25.9.3
       '@types/retry': 0.12.0
-      axios: 1.18.0
+      axios: 1.20.0
       eventemitter3: 5.0.4
       form-data: 4.0.6
       is-electron: 2.2.2
@@ -2771,6 +2805,20 @@ snapshots:
   character-entities@2.0.2: {}
 
   chat@4.39.0(zod@4.4.3):
+    dependencies:
+      '@workflow/serde': 4.1.0-beta.2
+      mdast-util-to-string: 4.0.0
+      remark-gfm: 4.0.1
+      remark-parse: 11.0.0
+      remark-stringify: 11.0.0
+      remend: 1.3.0
+      unified: 11.0.5
+    optionalDependencies:
+      zod: 4.4.3
+    transitivePeerDependencies:
+      - supports-color
+
+  chat@4.40.0(zod@4.4.3):
     dependencies:
       '@workflow/serde': 4.1.0-beta.2
       mdast-util-to-string: 4.0.0
