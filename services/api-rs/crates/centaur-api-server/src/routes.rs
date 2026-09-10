@@ -283,6 +283,10 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         )
         .route("/api/workflows/events", post(emit_workflow_event))
         .route(
+            "/api/workflows/actions/invoke",
+            post(invoke_workflow_button),
+        )
+        .route(
             "/api/slack/meeting-automation/runs",
             post(create_slack_meeting_automation_run),
         )
@@ -579,6 +583,9 @@ fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
             capability(Capability::WorkflowsWrite)
         }
         (&Method::POST, "/api/workflows/events") => capability(Capability::WorkflowsEvents),
+        (&Method::POST, "/api/workflows/actions/invoke") => {
+            capability(Capability::WorkflowsActions)
+        }
         (&Method::POST, "/api/meeting-scheduling/runs") => capability(Capability::WorkflowsWrite),
         (&Method::POST, "/api/slack/meeting-automation/runs")
         | (&Method::POST, "/api/slack/meeting-scheduling/runs") => {
@@ -2866,6 +2873,19 @@ async fn ingest_google_docs_sync_batch(
             "checkpoint": request.checkpoint.is_some(),
         }
     })))
+}
+
+async fn invoke_workflow_button(
+    State(state): State<AppState>,
+    Json(request): Json<centaur_workflows::slack_buttons::Invocation>,
+) -> Result<Json<Value>, ApiError> {
+    let feedback =
+        centaur_workflows::slack_button_feedback::ButtonFeedback::from_invocation(&request);
+    let request = state.auth.verify_workflow_button(request)?;
+    let run = workflow_runtime(&state)?
+        .create_button_run(request, feedback)
+        .await?;
+    Ok(Json(serde_json::to_value(run)?))
 }
 
 async fn create_workflow_run(

@@ -2647,6 +2647,15 @@ def get_user_cache(client: SlackClient | None = None) -> dict[str, str]:
     return slack_client._get_user_cache()
 
 
+def resolve_channel_id(channel: str) -> str:
+    """Resolve a destination ID using the same channel cache as send_message.
+
+    Keep this distinct from ``resolve_channel`` below, whose structured result
+    is part of the Foundation cadence tool contract.
+    """
+    return _client()._resolve_channel(channel)
+
+
 def list_bot_channels(*args, **kwargs):
     return _client().list_bot_channels(*args, **kwargs)
 
