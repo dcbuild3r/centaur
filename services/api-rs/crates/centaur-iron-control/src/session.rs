@@ -115,36 +115,20 @@ impl SessionRegistrar {
             metadata.slack_team_id,
             metadata.conversation_name,
         );
-        let revoke_channel_tool_roles = !self.channel_tool_role_foreign_ids.is_empty()
-            && thread_key.starts_with("slack:")
-            && !wf_tools_allowed;
-        let assigned_roles = if revoke_channel_tool_roles {
-            Some(self.client.list_principal_roles(&record.id).await?)
-        } else {
-            None
-        };
-        if wf_tools_allowed || revoke_channel_tool_roles {
+        // Channel policy supplies initial defaults only. Once created, a
+        // principal's roles belong to the operator: preserve both explicit
+        // grants and revocations across subsequent session registrations.
+        if !exists && wf_tools_allowed {
             for role_foreign_id in &self.channel_tool_role_foreign_ids {
                 let role = match self.client.get_role(role_foreign_id).await {
                     Ok(role) => role,
                     Err(error) if is_status(&error, 404) => continue,
                     Err(error) => return Err(error),
                 };
-                if wf_tools_allowed {
-                    match self.client.assign_role(&record.id, &role.id).await {
-                        Ok(()) => {}
-                        Err(error) if is_status(&error, 409) || is_status(&error, 422) => {}
-                        Err(error) => return Err(error),
-                    }
-                } else if assigned_roles
-                    .as_ref()
-                    .is_some_and(|roles| roles.iter().any(|assigned| assigned.id == role.id))
-                {
-                    match self.client.unassign_role(&record.id, &role.id).await {
-                        Ok(()) => {}
-                        Err(error) if is_status(&error, 404) => {}
-                        Err(error) => return Err(error),
-                    }
+                match self.client.assign_role(&record.id, &role.id).await {
+                    Ok(()) => {}
+                    Err(error) if is_status(&error, 409) || is_status(&error, 422) => {}
+                    Err(error) => return Err(error),
                 }
             }
         }
@@ -576,6 +560,67 @@ mod tests {
             "iron-control assigns configured default roles during principal creation"
         );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn register_session_applies_channel_defaults_only_to_eligible_new_principals() {
+        for (name, expected) in [
+            ("ai-agents", true),
+            ("wf-tfh-orbie", false),
+            ("general", false),
+        ] {
+            let (base_url, requests, _bodies, server) = spawn_iron_control_stub(false).await;
+            let registrar = SessionRegistrar::new_with_channel_tool_roles(
+                IronControlClient::new(base_url, "test-key"),
+                vec!["tool-dune".to_owned()],
+            );
+            let metadata = json!({"slack_team_id": WORLD_FOUNDATION_SLACK_TEAM_ID, "slack_conversation_name": name});
+            registrar
+                .register_session("slack:T123:C123:1773364194.179929", Some(&metadata))
+                .await
+                .unwrap();
+            assert_eq!(
+                requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|request| request == "POST /api/v1/principals/prn_channel/roles"),
+                expected,
+                "{name}"
+            );
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn register_session_preserves_operator_roles_with_channel_defaults_configured() {
+        for name in ["wf-tfh-orbie", "ai-agents", "general"] {
+            let (base_url, requests, _bodies, server) = spawn_iron_control_stub(true).await;
+            let registrar = SessionRegistrar::new_with_channel_tool_roles(
+                IronControlClient::new(base_url, "test-key"),
+                vec!["tool-dune".to_owned()],
+            );
+            let metadata = json!({
+                "slack_user_id": "U123",
+                "slack_team_id": WORLD_FOUNDATION_SLACK_TEAM_ID,
+                "slack_conversation_name": name
+            });
+            for timestamp in ["1773364194.179929", "1773364200.000001"] {
+                registrar
+                    .register_session(&format!("slack:T123:C123:{timestamp}"), Some(&metadata))
+                    .await
+                    .unwrap();
+            }
+            assert!(
+                !requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|request| request.contains("/roles")),
+                "existing principal roles must remain operator-controlled for {name}"
+            );
+            server.abort();
+        }
     }
 
     #[tokio::test]
@@ -1148,6 +1193,10 @@ mod tests {
                 }
 
                 let (status_line, body) = match (method, path) {
+                    ("GET", "/api/v1/roles/lookup/tool-dune") => (
+                        "200 OK",
+                        r#"{"data":{"id":"role_dune","foreign_id":"tool-dune","name":"Tool dune"}}"#.to_owned(),
+                    ),
                     ("GET", "/api/v1/principals/lookup/slack-channel-t123-c123")
                         if principal_exists =>
                     {
