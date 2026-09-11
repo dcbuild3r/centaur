@@ -205,6 +205,31 @@
       }
     },
     "console": { "$ref": "#/definitions/consoleConfig" },
+    "laminarGateway": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": {
+          "type": "object",
+          "properties": {
+            "repository": { "type": "string" },
+            "tag": { "type": "string" },
+            "pullPolicy": { "type": "string" }
+          }
+        },
+        "path": { "type": "string" },
+        "namespace": { "type": "string" },
+        "upstream": { "type": "string" },
+        "consoleAuthPath": { "type": "string" },
+        "service": {
+          "type": "object",
+          "properties": {
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+          }
+        },
+        "resources": { "type": "object" }
+      }
+    },
     "ironControl": { "$ref": "#/definitions/consoleConfig" },
     "secrets": {
       "type": "object",

@@ -330,6 +330,13 @@ spec:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 14 }}
 {{- end }}
+{{- if .Values.laminarGateway.enabled }}
+        # The Laminar gateway calls the internal Console authorization endpoint
+        # for every request before proxying the session to the frontend.
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "laminar-gateway") | nindent 14 }}
+{{- end }}
         # Per-sandbox iron-proxy pods pulling their config in managed mode.
         - podSelector:
             matchLabels:

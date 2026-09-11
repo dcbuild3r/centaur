@@ -202,7 +202,7 @@ class ApplicationController < ActionController::Base
     return default if uri.scheme.present? || uri.host.present?
 
     path = uri.path.presence
-    return default unless path == "/" || path&.start_with?("/console")
+    return default unless path == "/" || path&.start_with?("/console") || path == "/lmnr" || path&.start_with?("/lmnr/")
 
     uri.to_s
   rescue URI::InvalidURIError

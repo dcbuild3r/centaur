@@ -6,5 +6,10 @@ agentSandbox:
 console:
   publicUrl: https://centaur-test.theworldnetwork.org
 
+laminarGateway:
+  enabled: true
+  namespace: laminar-test
+  upstream: http://laminar-frontend-service.laminar-test.svc.cluster.local:3000
+
 ingress:
   host: centaur-test.theworldnetwork.org

@@ -250,6 +250,24 @@ console:
       annotations: {}
     resources: {}
 
+# Private Laminar frontend gateway. The gateway lives in the Centaur namespace
+# so the existing shared-origin ingress can route /lmnr to it; it authenticates
+# each request against the Console's Rails session before proxying to Laminar's
+# ClusterIP frontend in the laminar namespace.
+laminarGateway:
+  enabled: false
+  image:
+    repository: nginx
+    tag: 1.27.1-alpine
+    pullPolicy: IfNotPresent
+  path: /lmnr
+  namespace: laminar
+  upstream: http://laminar-frontend-service.laminar.svc.cluster.local:3000
+  consoleAuthPath: /internal/laminar/authorize
+  service:
+    port: 3002
+  resources: {}
+
 # Values for the upstream 1Password Connect subchart
 # (https://github.com/1Password/connect-helm-charts/tree/main/charts/connect).
 # Deployment is gated on onepasswordConnect.connect.create AND on

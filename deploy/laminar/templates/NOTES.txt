@@ -1,0 +1,4 @@
+Laminar is running privately behind the Centaur Console-authenticated /lmnr gateway.
+
+The project ingest key is stored in the laminar-app-secrets Secret as
+LAMINAR_PROJECT_API_KEY.

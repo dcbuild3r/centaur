@@ -36,6 +36,16 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
     assert_nil session[:return_to]
   end
 
+  test "login preserves a Laminar gateway destination" do
+    get login_url, params: { return_to: "/lmnr" }
+    assert_response :ok
+    assert_equal "/lmnr", session[:return_to]
+
+    post login_url, params: { email: @operator.email, password: "password123456" }
+    assert_redirected_to "/lmnr"
+    assert_nil session[:return_to]
+  end
+
   test "unsafe methods do not replace the remembered login destination" do
     get console_credentials_url(kind: "oauth")
     assert_equal "/console/credentials?kind=oauth", session[:return_to]

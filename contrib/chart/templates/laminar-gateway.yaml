@@ -1,0 +1,208 @@
+{{- if .Values.laminarGateway.enabled }}
+{{- $gateway := .Values.laminarGateway }}
+{{- $gatewayName := include "centaur.componentName" (dict "root" . "component" "laminar-gateway") }}
+{{- $consoleName := include "centaur.consoleName" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $gatewayName }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "laminar-gateway") | nindent 4 }}
+data:
+  nginx.conf: |
+    events {}
+    http {
+      map $http_upgrade $connection_upgrade {
+        default upgrade;
+        '' close;
+      }
+
+      server {
+        listen {{ $gateway.service.port }};
+
+        location = /gateway-health {
+          access_log off;
+          default_type text/plain;
+          return 200 "ok\n";
+        }
+
+        # The shared ALB health check is /health for every Centaur backend.
+        # Keep this endpoint unauthenticated so enabling Laminar does not make
+        # the target group unhealthy.
+        location = /health {
+          access_log off;
+          default_type text/plain;
+          return 200 "ok\n";
+        }
+
+        location = {{ $gateway.path }} {
+          return 302 {{ $gateway.path }}/;
+        }
+
+        location {{ $gateway.path }}/ {
+          auth_request /_laminar_auth;
+          error_page 401 = @laminar_login;
+          error_page 403 = @laminar_forbidden;
+
+          proxy_http_version 1.1;
+          proxy_set_header Host $http_host;
+          proxy_set_header X-Forwarded-Host $http_host;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header X-Forwarded-Prefix {{ $gateway.path }};
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection $connection_upgrade;
+          proxy_set_header Cookie $http_cookie;
+          proxy_pass {{ $gateway.upstream }};
+          proxy_redirect off;
+          proxy_buffering off;
+        }
+
+        location = /_laminar_auth {
+          internal;
+          proxy_pass http://{{ $consoleName }}:{{ .Values.console.service.httpPort }}{{ $gateway.consoleAuthPath }};
+          proxy_pass_request_body off;
+          proxy_set_header Content-Length "";
+          proxy_set_header Host $host;
+          proxy_set_header Cookie $http_cookie;
+          proxy_set_header X-Original-URI $request_uri;
+          proxy_set_header X-Forwarded-Host $host;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        location @laminar_login {
+          return 302 /login?return_to={{ $gateway.path }};
+        }
+
+        location @laminar_forbidden {
+          default_type text/plain;
+          return 403 "Laminar access is restricted to active Console administrators.\n";
+        }
+      }
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $gatewayName }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "laminar-gateway") | nindent 4 }}
+spec:
+  selector:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "laminar-gateway") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $gateway.service.port }}
+      targetPort: {{ $gateway.service.port }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $gatewayName }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "laminar-gateway") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "laminar-gateway") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "laminar-gateway") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 101
+      containers:
+        - name: gateway
+          image: {{ printf "%s:%s" $gateway.image.repository $gateway.image.tag | quote }}
+          imagePullPolicy: {{ $gateway.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ $gateway.service.port }}
+          readinessProbe:
+            httpGet:
+              path: /gateway-health
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /gateway-health
+              port: http
+          resources:
+{{ toYaml $gateway.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            readOnlyRootFilesystem: true
+            runAsUser: 101
+            runAsGroup: 101
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-run
+              mountPath: /var/run
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: {{ $gatewayName }}
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-run
+          emptyDir: {}
+{{- if .Values.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $gatewayName }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "laminar-gateway") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "laminar-gateway") | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+{{- range default .Values.networkPolicy.ingressControllerNamespaces .Values.networkPolicy.ingressSourceNamespaces }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . | quote }}
+{{- end }}
+  egress:
+    - to:
+        - podSelector:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 10 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.console.service.httpPort }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $gateway.namespace | quote }}
+      ports:
+        - protocol: TCP
+          port: 3000
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{- end }}
+{{- end }}

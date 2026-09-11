@@ -1,0 +1,95 @@
+fullnameOverride: laminar
+
+images:
+  postgres:
+    repository: postgres
+    tag: "16"
+    pullPolicy: IfNotPresent
+  clickhouse:
+    repository: clickhouse/clickhouse-server
+    tag: "26.5"
+    pullPolicy: IfNotPresent
+  quickwit:
+    repository: quickwit/quickwit
+    tag: v0.8.2
+    pullPolicy: IfNotPresent
+  appServer:
+    repository: ghcr.io/lmnr-ai/app-server
+    tag: latest
+    pullPolicy: Always
+  frontend:
+    repository: ghcr.io/lmnr-ai/frontend-ee-basepath
+    tag: latest
+    pullPolicy: Always
+
+imagePullSecrets: []
+
+postgres:
+  database: laminar
+  username: laminar
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClassName: ""
+  resources: {}
+
+clickhouse:
+  persistence:
+    enabled: true
+    size: 50Gi
+    storageClassName: ""
+  resources: {}
+
+quickwit:
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClassName: ""
+  resources: {}
+
+appServer:
+  replicas: 1
+  resources: {}
+
+frontend:
+  replicas: 1
+  resources: {}
+
+# This Secret is created and retained by the deployment workflow. It contains
+# the database credentials, Laminar shared secrets, Google OAuth credentials,
+# canonical external URL, and the project ingest key. Keeping it outside
+# this chart avoids rendering secret material into Git or Helm values.
+auth:
+  existingSecretName: laminar-app-secrets
+  keys:
+    databaseUrl: DATABASE_URL
+    postgresPassword: POSTGRES_PASSWORD
+    sharedSecretToken: SHARED_SECRET_TOKEN
+    aeadSecretKey: AEAD_SECRET_KEY
+    clickhouseUser: CLICKHOUSE_USER
+    clickhousePassword: CLICKHOUSE_PASSWORD
+    clickhouseRoUser: CLICKHOUSE_RO_USER
+    clickhouseRoPassword: CLICKHOUSE_RO_PASSWORD
+    betterAuthSecret: BETTER_AUTH_SECRET
+    betterAuthUrl: LAMINAR_BETTER_AUTH_URL
+    nextPublicUrl: LAMINAR_NEXT_PUBLIC_URL
+    googleClientId: AUTH_GOOGLE_ID
+    googleClientSecret: AUTH_GOOGLE_SECRET
+    bootstrapEmail: LAMINAR_BOOTSTRAP_EMAIL
+    projectApiKey: LAMINAR_PROJECT_API_KEY
+
+bootstrap:
+  enabled: true
+  operatorUserId: 9d3c0b6d-0e6c-4f9d-a7af-bd9bc4dd8e01
+  workspaceId: 75eb0ddc-35e4-4aa7-9c67-52d897a3d9e5
+  projectId: 5b9b5a8d-d0f8-44c8-a3e4-5f89c4cc1f06
+  projectName: centaur-test
+  apiKeyId: 7c1326b3-1c9d-4c41-bb86-7f19c9d0a2d4
+  resources: {}
+
+networkPolicy:
+  enabled: true
+  namespace: laminar
+  centaurNamespaces:
+    - centaur
+    - centaur-test

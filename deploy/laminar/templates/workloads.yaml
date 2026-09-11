@@ -1,0 +1,547 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "laminar.componentName" (dict "root" . "component" "postgres") }}
+  labels:
+{{ include "laminar.componentLabels" (dict "root" . "component" "postgres") | nindent 4 }}
+spec:
+  serviceName: {{ include "laminar.componentName" (dict "root" . "component" "postgres") }}
+  replicas: 1
+  selector:
+    matchLabels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        fsGroup: 999
+      containers:
+        - name: postgres
+          image: {{ include "laminar.image" .Values.images.postgres | quote }}
+          imagePullPolicy: {{ .Values.images.postgres.pullPolicy }}
+          env:
+            - name: POSTGRES_DB
+              value: {{ .Values.postgres.database | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.postgres.username | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "laminar.secretName" . }}
+                  key: {{ .Values.auth.keys.postgresPassword }}
+          ports:
+            - name: postgres
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "{{ .Values.postgres.username }}", "-d", "{{ .Values.postgres.database }}"]
+            periodSeconds: 5
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "{{ .Values.postgres.username }}", "-d", "{{ .Values.postgres.database }}"]
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+{{ toYaml .Values.postgres.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "laminar.componentName" (dict "root" . "component" "postgres") }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "laminar.componentName" (dict "root" . "component" "clickhouse") }}
+  labels:
+{{ include "laminar.componentLabels" (dict "root" . "component" "clickhouse") | nindent 4 }}
+spec:
+  serviceName: {{ include "laminar.componentName" (dict "root" . "component" "clickhouse") }}
+  replicas: 1
+  selector:
+    matchLabels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "clickhouse") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "clickhouse") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: clickhouse
+          image: {{ include "laminar.image" .Values.images.clickhouse | quote }}
+          imagePullPolicy: {{ .Values.images.clickhouse.pullPolicy }}
+          env:
+            - name: CLICKHOUSE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "laminar.secretName" . }}
+                  key: {{ .Values.auth.keys.clickhouseUser }}
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "laminar.secretName" . }}
+                  key: {{ .Values.auth.keys.clickhousePassword }}
+            - name: CLICKHOUSE_DB
+              value: default
+          ports:
+            - name: http
+              containerPort: 8123
+            - name: native
+              containerPort: 9000
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+{{ toYaml .Values.clickhouse.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/clickhouse
+            - name: logs
+              mountPath: /var/log/clickhouse-server
+            - name: config
+              mountPath: /etc/clickhouse-server/users.d/lmnr.xml
+              subPath: profiles.xml
+            - name: config
+              mountPath: /etc/clickhouse-server/config.d/lmnr.xml
+              subPath: server.xml
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "laminar.componentName" (dict "root" . "component" "clickhouse") }}
+        - name: logs
+          emptyDir: {}
+        - name: config
+          configMap:
+            name: {{ include "laminar.componentName" (dict "root" . "component" "clickhouse") }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "laminar.componentName" (dict "root" . "component" "quickwit") }}
+  labels:
+{{ include "laminar.componentLabels" (dict "root" . "component" "quickwit") | nindent 4 }}
+spec:
+  serviceName: {{ include "laminar.componentName" (dict "root" . "component" "quickwit") }}
+  replicas: 1
+  selector:
+    matchLabels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "quickwit") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "quickwit") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: quickwit
+          image: {{ include "laminar.image" .Values.images.quickwit | quote }}
+          imagePullPolicy: {{ .Values.images.quickwit.pullPolicy }}
+          command: ["quickwit", "run"]
+          env:
+            - name: QW_DATA_DIR
+              value: /quickwit/qwdata
+          ports:
+            - name: http
+              containerPort: 7280
+            - name: ingest
+              containerPort: 7281
+          readinessProbe:
+            httpGet:
+              path: /health/livez
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health/livez
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+{{ toYaml .Values.quickwit.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /quickwit/qwdata
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "laminar.componentName" (dict "root" . "component" "quickwit") }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "laminar.componentName" (dict "root" . "component" "app-server") }}
+  labels:
+{{ include "laminar.componentLabels" (dict "root" . "component" "app-server") | nindent 4 }}
+spec:
+  replicas: {{ .Values.appServer.replicas }}
+  selector:
+    matchLabels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "app-server") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "app-server") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: app-server
+          image: {{ include "laminar.image" .Values.images.appServer | quote }}
+          imagePullPolicy: {{ .Values.images.appServer.pullPolicy }}
+          env:
+            - name: PORT
+              value: "8000"
+            - name: GRPC_PORT
+              value: "8001"
+            - name: CONSUMER_PORT
+              value: "8002"
+            - name: ENVIRONMENT
+              value: LITE
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "laminar.secretName" . }}
+                  key: {{ .Values.auth.keys.databaseUrl }}
+            - name: SHARED_SECRET_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "laminar.secretName" . }}
+                  key: {{ .Values.auth.keys.sharedSecretToken }}
+            - name: AEAD_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "laminar.secretName" . }}
+                  key: {{ .Values.auth.keys.aeadSecretKey }}
+            - name: CLICKHOUSE_URL
+              value: http://{{ include "laminar.componentName" (dict "root" . "component" "clickhouse") }}:8123
+            - name: CLICKHOUSE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "laminar.secretName" . }}
+                  key: {{ .Values.auth.keys.clickhouseUser }}
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "laminar.secretName" . }}
+                  key: {{ .Values.auth.keys.clickhousePassword }}
+            - name: CLICKHOUSE_RO_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "laminar.secretName" . }}
+                  key: {{ .Values.auth.keys.clickhouseRoUser }}
+            - name: CLICKHOUSE_RO_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "laminar.secretName" . }}
+                  key: {{ .Values.auth.keys.clickhouseRoPassword }}
+            - name: QUICKWIT_SEARCH_URL
+              value: http://{{ include "laminar.componentName" (dict "root" . "component" "quickwit") }}:7280
+            - name: QUICKWIT_INGEST_URL
+              value: http://{{ include "laminar.componentName" (dict "root" . "component" "quickwit") }}:7281
+            - name: QUICKWIT_SPANS_INDEX_ID
+              value: spans_v2
+          ports:
+            - name: http
+              containerPort: 8000
+            - name: grpc
+              containerPort: 8001
+            - name: realtime
+              containerPort: 8002
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+{{ toYaml .Values.appServer.resources | nindent 12 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "laminar.componentName" (dict "root" . "component" "frontend") }}
+  labels:
+{{ include "laminar.componentLabels" (dict "root" . "component" "frontend") | nindent 4 }}
+spec:
+  replicas: {{ .Values.frontend.replicas }}
+  selector:
+    matchLabels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "frontend") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "frontend") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: frontend
+          image: {{ include "laminar.image" .Values.images.frontend | quote }}
+          imagePullPolicy: {{ .Values.images.frontend.pullPolicy }}
+          env:
+            - name: ENVIRONMENT
+              value: LITE
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "laminar.secretName" . }}
+                  key: {{ .Values.auth.keys.databaseUrl }}
+            - name: BACKEND_URL
+              value: http://{{ include "laminar.componentName" (dict "root" . "component" "app-server") }}:8000
+            - name: BACKEND_RT_URL
+              value: http://{{ include "laminar.componentName" (dict "root" . "component" "app-server") }}:8002
+            - name: SHARED_SECRET_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "laminar.secretName" . }}
+                  key: {{ .Values.auth.keys.sharedSecretToken }}
+            - name: AEAD_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "laminar.secretName" . }}
+                  key: {{ .Values.auth.keys.aeadSecretKey }}
+            - name: BETTER_AUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "laminar.secretName" . }}
+                  key: {{ .Values.auth.keys.betterAuthSecret }}
+            - name: NEXTAUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "laminar.secretName" . }}
+                  key: {{ .Values.auth.keys.betterAuthSecret }}
+            - name: BETTER_AUTH_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "laminar.secretName" . }}
+                  key: {{ .Values.auth.keys.betterAuthUrl }}
+            - name: NEXT_PUBLIC_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "laminar.secretName" . }}
+                  key: {{ .Values.auth.keys.nextPublicUrl }}
+            - name: AUTH_GOOGLE_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "laminar.secretName" . }}
+                  key: {{ .Values.auth.keys.googleClientId }}
+            - name: AUTH_GOOGLE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "laminar.secretName" . }}
+                  key: {{ .Values.auth.keys.googleClientSecret }}
+            - name: CLICKHOUSE_URL
+              value: http://{{ include "laminar.componentName" (dict "root" . "component" "clickhouse") }}:8123
+            - name: CLICKHOUSE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "laminar.secretName" . }}
+                  key: {{ .Values.auth.keys.clickhouseUser }}
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "laminar.secretName" . }}
+                  key: {{ .Values.auth.keys.clickhousePassword }}
+            - name: CLICKHOUSE_RO_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "laminar.secretName" . }}
+                  key: {{ .Values.auth.keys.clickhouseRoUser }}
+            - name: CLICKHOUSE_RO_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "laminar.secretName" . }}
+                  key: {{ .Values.auth.keys.clickhouseRoPassword }}
+            - name: QUICKWIT_SEARCH_URL
+              value: http://{{ include "laminar.componentName" (dict "root" . "component" "quickwit") }}:7280
+            - name: LAMINAR_TELEMETRY_DISABLED
+              value: "true"
+            - name: FORCE_RUN_MIGRATIONS
+              value: "true"
+          ports:
+            - name: http
+              containerPort: 3000
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+{{ toYaml .Values.frontend.resources | nindent 12 }}
+{{- if .Values.bootstrap.enabled }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "laminar.componentName" (dict "root" . "component" "bootstrap") }}
+  labels:
+{{ include "laminar.componentLabels" (dict "root" . "component" "bootstrap") | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "bootstrap") | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: bootstrap
+          image: {{ include "laminar.image" .Values.images.postgres | quote }}
+          imagePullPolicy: {{ .Values.images.postgres.pullPolicy }}
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "laminar.secretName" . }}
+                  key: {{ .Values.auth.keys.databaseUrl }}
+            - name: BOOTSTRAP_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "laminar.secretName" . }}
+                  key: {{ .Values.auth.keys.bootstrapEmail }}
+            - name: LAMINAR_PROJECT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "laminar.secretName" . }}
+                  key: {{ .Values.auth.keys.projectApiKey }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              until psql "$DATABASE_URL" -tAc 'SELECT 1' >/dev/null 2>&1; do
+                echo "waiting for Laminar Postgres..."
+                sleep 2
+              done
+
+              sha3() {
+                printf '%s' "$1" | openssl dgst -sha3-256 -hex | awk '{print $NF}'
+              }
+              shorthand() {
+                printf '%s...%s' "$(printf '%s' "$1" | cut -c1-4)" "$(printf '%s' "$1" | cut -c61-64)"
+              }
+              sql_quote() {
+                printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"
+              }
+
+              email_sql="$(sql_quote "$BOOTSTRAP_EMAIL")"
+              project_hash="$(sha3 "$LAMINAR_PROJECT_API_KEY")"
+              project_shorthand="$(shorthand "$LAMINAR_PROJECT_API_KEY")"
+
+              psql "$DATABASE_URL" <<SQL
+              BEGIN;
+              DO \$bootstrap\$
+              DECLARE
+                operator_id uuid;
+              BEGIN
+                INSERT INTO users (id, created_at, name, email, updated_at, email_verified)
+                VALUES ('{{ .Values.bootstrap.operatorUserId }}', now(), 'Centaur Operator', ${email_sql}, now(), true)
+                ON CONFLICT (email) DO UPDATE SET email_verified = true, updated_at = now()
+                RETURNING id INTO operator_id;
+
+                INSERT INTO workspaces (id, created_at, name, tier_id, additional_seats, reset_time, settings)
+                VALUES ('{{ .Values.bootstrap.workspaceId }}', now(), 'Centaur', 1, 0, now(), '{}'::jsonb)
+                ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, tier_id = EXCLUDED.tier_id;
+
+                INSERT INTO projects (id, created_at, name, workspace_id, settings, has_traces)
+                VALUES ('{{ .Values.bootstrap.projectId }}', now(), '{{ .Values.bootstrap.projectName }}', '{{ .Values.bootstrap.workspaceId }}', '{}'::jsonb, false)
+                ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, workspace_id = EXCLUDED.workspace_id;
+
+                INSERT INTO members_of_workspaces (workspace_id, user_id, member_role)
+                VALUES ('{{ .Values.bootstrap.workspaceId }}', operator_id, 'owner')
+                ON CONFLICT (workspace_id, user_id) DO UPDATE SET member_role = 'owner';
+
+                INSERT INTO project_api_keys (id, value, created_at, name, project_id, shorthand, hash, is_ingest_only, user_id)
+                VALUES ('{{ .Values.bootstrap.apiKeyId }}', '', now(), '{{ .Values.bootstrap.projectName }}-ingest', '{{ .Values.bootstrap.projectId }}', '${project_shorthand}', '${project_hash}', true, operator_id)
+                ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, project_id = EXCLUDED.project_id, shorthand = EXCLUDED.shorthand, hash = EXCLUDED.hash, is_ingest_only = true, user_id = operator_id;
+              END \$bootstrap\$;
+              COMMIT;
+              SQL
+{{- end }}

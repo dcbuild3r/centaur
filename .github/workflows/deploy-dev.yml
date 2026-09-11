@@ -7,6 +7,7 @@ on:
       - .github/workflows/deploy-dev.yml
       - centaur_sdk/**
       - contrib/chart/**
+      - deploy/laminar/**
       - packages/**
       - services/**
       - tools/**
@@ -31,6 +32,9 @@ env:
   EKS_CLUSTER_NAME: eu-central-1-dev
   HELM_RELEASE: centaur
   HELM_NAMESPACE: centaur
+  LAMINAR_RELEASE: laminar-dev
+  LAMINAR_NAMESPACE: laminar-dev
+  LAMINAR_PROJECT_NAME: centaur
   AWS_ROLE_ARN: arn:aws:iam::471112601787:role/oidc/github-deploy
 
 jobs:
@@ -302,11 +306,114 @@ jobs:
                 --type merge \
                 --patch-file /dev/stdin
 
+      - name: Prepare Laminar namespace and credentials
+        env:
+          LAMINAR_SECRET_NAME: laminar-app-secrets
+          LAMINAR_PUBLIC_URL: https://centaur-dev.theworldnetwork.org
+          LAMINAR_BOOTSTRAP_EMAIL: ${{ secrets.IRON_CONTROL_INITIAL_USER_EMAIL }}
+        run: |
+          set -euo pipefail
+
+          kubectl create namespace "$LAMINAR_NAMESPACE" --dry-run=client -o yaml \
+            | kubectl apply --filename -
+
+          required_keys=(
+            DATABASE_URL
+            POSTGRES_PASSWORD
+            SHARED_SECRET_TOKEN
+            AEAD_SECRET_KEY
+            CLICKHOUSE_USER
+            CLICKHOUSE_PASSWORD
+            CLICKHOUSE_RO_USER
+            CLICKHOUSE_RO_PASSWORD
+            BETTER_AUTH_SECRET
+            LAMINAR_BETTER_AUTH_URL
+            LAMINAR_NEXT_PUBLIC_URL
+            AUTH_GOOGLE_ID
+            AUTH_GOOGLE_SECRET
+            LAMINAR_BOOTSTRAP_EMAIL
+            LAMINAR_PROJECT_API_KEY
+          )
+
+          if kubectl --namespace "$LAMINAR_NAMESPACE" get secret "$LAMINAR_SECRET_NAME" >/dev/null 2>&1; then
+            secret_json="$(kubectl --namespace "$LAMINAR_NAMESPACE" get secret "$LAMINAR_SECRET_NAME" --output json)"
+            for key in "${required_keys[@]}"; do
+              jq -e --arg key "$key" '(.data[$key] // "") | length > 0' <<<"$secret_json" >/dev/null \
+                || { echo "Existing $LAMINAR_NAMESPACE/$LAMINAR_SECRET_NAME is missing required key $key" >&2; exit 1; }
+            done
+            echo "Using existing $LAMINAR_NAMESPACE/$LAMINAR_SECRET_NAME"
+          else
+            secret_value() {
+              openssl rand -hex 32
+            }
+
+            database_password="$(secret_value)"
+            shared_secret_token="$(secret_value)"
+            aead_secret_key="$(secret_value)"
+            clickhouse_password="$(secret_value)"
+            better_auth_secret="$(secret_value)"
+            project_api_key="$(secret_value)"
+            google_client_id="$(kubectl --namespace "$HELM_NAMESPACE" get secret centaur-infra-env --output jsonpath='{.data.IRON_CONTROL_GOOGLE_CLIENT_ID}' | base64 --decode)"
+            google_client_secret="$(kubectl --namespace "$HELM_NAMESPACE" get secret centaur-infra-env --output jsonpath='{.data.IRON_CONTROL_GOOGLE_CLIENT_SECRET}' | base64 --decode)"
+
+            test -n "$LAMINAR_BOOTSTRAP_EMAIL"
+            test -n "$google_client_id"
+            test -n "$google_client_secret"
+
+            kubectl --namespace "$LAMINAR_NAMESPACE" create secret generic "$LAMINAR_SECRET_NAME" \
+              --from-literal=DATABASE_URL="postgres://laminar:${database_password}@${LAMINAR_RELEASE}-postgres.${LAMINAR_NAMESPACE}.svc.cluster.local:5432/laminar" \
+              --from-literal=POSTGRES_PASSWORD="$database_password" \
+              --from-literal=SHARED_SECRET_TOKEN="$shared_secret_token" \
+              --from-literal=AEAD_SECRET_KEY="$aead_secret_key" \
+              --from-literal=CLICKHOUSE_USER=laminar \
+              --from-literal=CLICKHOUSE_PASSWORD="$clickhouse_password" \
+              --from-literal=CLICKHOUSE_RO_USER=laminar \
+              --from-literal=CLICKHOUSE_RO_PASSWORD="$clickhouse_password" \
+              --from-literal=BETTER_AUTH_SECRET="$better_auth_secret" \
+              --from-literal=LAMINAR_BETTER_AUTH_URL="$LAMINAR_PUBLIC_URL" \
+              --from-literal=LAMINAR_NEXT_PUBLIC_URL="$LAMINAR_PUBLIC_URL/lmnr" \
+              --from-literal=AUTH_GOOGLE_ID="$google_client_id" \
+              --from-literal=AUTH_GOOGLE_SECRET="$google_client_secret" \
+              --from-literal=LAMINAR_BOOTSTRAP_EMAIL="$LAMINAR_BOOTSTRAP_EMAIL" \
+              --from-literal=LAMINAR_PROJECT_API_KEY="$project_api_key"
+            echo "Created $LAMINAR_NAMESPACE/$LAMINAR_SECRET_NAME with stable Dev bootstrap credentials"
+          fi
+
+      - name: Configure Centaur Laminar OTLP export
+        run: |
+          set -euo pipefail
+          project_api_key="$(kubectl --namespace "$LAMINAR_NAMESPACE" get secret laminar-app-secrets \
+            --output jsonpath='{.data.LAMINAR_PROJECT_API_KEY}' | base64 --decode)"
+          test -n "$project_api_key"
+          jq --null-input \
+            --arg endpoint "http://${LAMINAR_RELEASE}-app-server.${LAMINAR_NAMESPACE}.svc.cluster.local:8000/v1/traces" \
+            --arg headers "authorization=Bearer $project_api_key" \
+            '{
+              stringData: {
+                OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: $endpoint,
+                OTEL_EXPORTER_OTLP_HEADERS: $headers,
+                OTEL_TRACES_EXPORTER: "otlp"
+              }
+            }' \
+            | kubectl --namespace "$HELM_NAMESPACE" patch secret centaur-infra-env \
+                --type merge \
+                --patch-file /dev/stdin
+
       - name: Add Helm repositories
         run: helm repo add 1password https://1password.github.io/connect-helm-charts
 
       - name: Build chart dependencies
         run: helm dependency build contrib/chart
+
+      - name: Deploy Laminar
+        run: |
+          helm upgrade --install "$LAMINAR_RELEASE" deploy/laminar \
+            --namespace "$LAMINAR_NAMESPACE" \
+            --create-namespace \
+            --set-string "fullnameOverride=$LAMINAR_RELEASE" \
+            --set-string "bootstrap.projectName=$LAMINAR_PROJECT_NAME" \
+            --wait \
+            --timeout 20m
 
       - name: Configure 1Password bootstrap secret
         env:
@@ -384,6 +491,7 @@ jobs:
             --set "githubbot.enabled=true" \
             --set "githubbot.image.repository=$ECR_REGISTRY/common-app" \
             --set "githubbot.image.tag=centaur-githubbot-$GITHUB_SHA" \
+            --set "laminarGateway.enabled=true" \
             --wait \
             --timeout 30m
 
@@ -676,6 +784,20 @@ jobs:
       - name: Collect deployment diagnostics
         if: failure()
         run: |
+          kubectl --namespace "$LAMINAR_NAMESPACE" get jobs,pods,pvc -o wide || true
+          kubectl --namespace "$LAMINAR_NAMESPACE" describe pods || true
+          kubectl --namespace "$LAMINAR_NAMESPACE" logs \
+            --selector app.kubernetes.io/component=app-server \
+            --all-containers=true \
+            --prefix=true \
+            --tail=200 \
+            || true
+          kubectl --namespace "$LAMINAR_NAMESPACE" logs \
+            --selector app.kubernetes.io/component=frontend \
+            --all-containers=true \
+            --prefix=true \
+            --tail=200 \
+            || true
           kubectl --namespace "$HELM_NAMESPACE" get jobs,pods -o wide
           kubectl --namespace "$HELM_NAMESPACE" describe pods \
             --selector app.kubernetes.io/component=repo-cache \

@@ -1,0 +1,243 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "laminar.fullname" . }}-default-deny
+  labels:
+{{ include "laminar.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "laminar.fullname" . }}-dns
+  labels:
+{{ include "laminar.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "laminar.fullname" . }}-postgres
+  labels:
+{{ include "laminar.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "frontend") | nindent 14 }}
+        - podSelector:
+            matchLabels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "app-server") | nindent 14 }}
+        - podSelector:
+            matchLabels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "bootstrap") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "laminar.fullname" . }}-clickhouse
+  labels:
+{{ include "laminar.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "clickhouse") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "frontend") | nindent 14 }}
+        - podSelector:
+            matchLabels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "app-server") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 8123
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "laminar.fullname" . }}-quickwit
+  labels:
+{{ include "laminar.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "quickwit") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "frontend") | nindent 14 }}
+        - podSelector:
+            matchLabels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "app-server") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 7280
+        - protocol: TCP
+          port: 7281
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "laminar.fullname" . }}-frontend
+  labels:
+{{ include "laminar.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "frontend") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+{{- range .Values.networkPolicy.centaurNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . | quote }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: laminar-gateway
+{{- end }}
+      ports:
+        - protocol: TCP
+          port: 3000
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "app-server") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 8000
+        - protocol: TCP
+          port: 8002
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "clickhouse") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 8123
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "quickwit") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 7280
+    # OAuth callbacks exchange codes with Google and startup fetches model costs.
+    - ports:
+        - protocol: TCP
+          port: 443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "laminar.fullname" . }}-app-server
+  labels:
+{{ include "laminar.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "app-server") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "frontend") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 8000
+        - protocol: TCP
+          port: 8002
+{{- range .Values.networkPolicy.centaurNamespaces }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . | quote }}
+          podSelector:
+            matchLabels:
+              centaur.ai/observability-enabled: "true"
+      ports:
+        - protocol: TCP
+          port: 8000
+{{- end }}
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "clickhouse") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 8123
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "quickwit") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 7280
+        - protocol: TCP
+          port: 7281
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "laminar.fullname" . }}-bootstrap
+  labels:
+{{ include "laminar.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "bootstrap") | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 5432
+{{- end }}

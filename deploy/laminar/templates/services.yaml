@@ -1,0 +1,82 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "laminar.componentName" (dict "root" . "component" "postgres") }}
+  labels:
+{{ include "laminar.componentLabels" (dict "root" . "component" "postgres") | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 4 }}
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "laminar.componentName" (dict "root" . "component" "clickhouse") }}
+  labels:
+{{ include "laminar.componentLabels" (dict "root" . "component" "clickhouse") | nindent 4 }}
+spec:
+  selector:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "clickhouse") | nindent 4 }}
+  ports:
+    - name: http
+      port: 8123
+      targetPort: http
+    - name: native
+      port: 9000
+      targetPort: native
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "laminar.componentName" (dict "root" . "component" "quickwit") }}
+  labels:
+{{ include "laminar.componentLabels" (dict "root" . "component" "quickwit") | nindent 4 }}
+spec:
+  selector:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "quickwit") | nindent 4 }}
+  ports:
+    - name: http
+      port: 7280
+      targetPort: http
+    - name: ingest
+      port: 7281
+      targetPort: ingest
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "laminar.componentName" (dict "root" . "component" "app-server") }}
+  labels:
+{{ include "laminar.componentLabels" (dict "root" . "component" "app-server") | nindent 4 }}
+spec:
+  selector:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "app-server") | nindent 4 }}
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+    - name: grpc
+      port: 8001
+      targetPort: grpc
+    - name: realtime
+      port: 8002
+      targetPort: realtime
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: laminar-frontend-service
+  labels:
+{{ include "laminar.componentLabels" (dict "root" . "component" "frontend-service") | nindent 4 }}
+spec:
+  selector:
+{{ include "laminar.componentSelectorLabels" (dict "root" . "component" "frontend") | nindent 4 }}
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http

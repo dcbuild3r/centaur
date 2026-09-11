@@ -170,6 +170,10 @@ Rails.application.routes.draw do
     resource :descope, only: %i[create destroy]
   end
 
+  namespace :internal do
+    get "laminar/authorize", to: "laminar#authorize"
+  end
+
   namespace :api do
     namespace :v1 do
       # Each secret type is addressable by opaque oid or globally unique foreign_id.

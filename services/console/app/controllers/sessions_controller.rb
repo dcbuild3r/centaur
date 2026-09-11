@@ -15,6 +15,7 @@ class SessionsController < ApplicationController
   skip_before_action :require_active_account
 
   def new
+    session[:return_to] = safe_console_return_path if params[:return_to].present? || params[:next].present?
     redirect_to safe_console_return_path if current_user&.active?
   end
 
