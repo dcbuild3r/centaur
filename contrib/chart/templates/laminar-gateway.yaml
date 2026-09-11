@@ -2,6 +2,7 @@
 {{- $gateway := .Values.laminarGateway }}
 {{- $gatewayName := include "centaur.componentName" (dict "root" . "component" "laminar-gateway") }}
 {{- $consoleName := include "centaur.consoleName" . }}
+{{- $console := include "centaur.consoleValues" . | fromYaml }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -37,7 +38,11 @@ data:
         }
 
         location = {{ $gateway.path }} {
+{{- if $console.publicUrl }}
+          return 302 {{ trimSuffix "/" $console.publicUrl }}{{ $gateway.path }}/;
+{{- else }}
           return 302 {{ $gateway.path }}/;
+{{- end }}
         }
 
         location {{ $gateway.path }}/ {
@@ -74,7 +79,11 @@ data:
         }
 
         location @laminar_login {
+{{- if $console.publicUrl }}
+          return 302 {{ trimSuffix "/" $console.publicUrl }}/login?return_to={{ $gateway.path }};
+{{- else }}
           return 302 /login?return_to={{ $gateway.path }};
+{{- end }}
         }
 
         location @laminar_forbidden {
