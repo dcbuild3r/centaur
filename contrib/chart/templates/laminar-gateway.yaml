@@ -19,6 +19,7 @@ data:
 
       server {
         listen {{ $gateway.service.port }};
+        absolute_redirect off;
 
         location = /gateway-health {
           access_log off;

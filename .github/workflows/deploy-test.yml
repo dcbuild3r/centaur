@@ -689,17 +689,29 @@ jobs:
             --source-refs '{"NOTION_API_KEY":"op://Centaur/Centaur.run - NOTION_API_KEY/password"}' \
             principals grant slack-user-u03tn0duqp --tool notion
 
-          kubectl --namespace "$HELM_NAMESPACE" exec \
+          if kubectl --namespace "$HELM_NAMESPACE" exec \
             deployment/centaur-test-centaur-api-rs -- \
             /usr/local/bin/centaur-perms \
             --tools-dir /app/tools \
-            principals revoke slack-channel-d0b9rvcgube --tool notion
+            principals show slack-channel-d0b9rvcgube >/dev/null 2>&1; then
+            kubectl --namespace "$HELM_NAMESPACE" exec \
+              deployment/centaur-test-centaur-api-rs -- \
+              /usr/local/bin/centaur-perms \
+              --tools-dir /app/tools \
+              principals revoke slack-channel-d0b9rvcgube --tool notion
+          fi
 
-          kubectl --namespace "$HELM_NAMESPACE" exec \
+          if kubectl --namespace "$HELM_NAMESPACE" exec \
             deployment/centaur-test-centaur-api-rs -- \
             /usr/local/bin/centaur-perms \
             --tools-dir /app/tools \
-            principals revoke slack-channel-tl1hm8uuu-d0b9rvcgube --tool notion
+            principals show slack-channel-tl1hm8uuu-d0b9rvcgube >/dev/null 2>&1; then
+            kubectl --namespace "$HELM_NAMESPACE" exec \
+              deployment/centaur-test-centaur-api-rs -- \
+              /usr/local/bin/centaur-perms \
+              --tools-dir /app/tools \
+              principals revoke slack-channel-tl1hm8uuu-d0b9rvcgube --tool notion
+          fi
 
           # Also repair the persisted duplicate principal used by older WF DM
           # sessions. This is idempotent and does not broaden channel access.
