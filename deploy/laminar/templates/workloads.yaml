@@ -84,7 +84,7 @@ spec:
       imagePullSecrets:
 {{ toYaml . | nindent 8 }}
       {{- end }}
-      containers:
+      initContainers:
         - name: init-data-permissions
           image: {{ include "laminar.image" .Values.images.clickhouse | quote }}
           imagePullPolicy: {{ .Values.images.clickhouse.pullPolicy }}
@@ -101,6 +101,7 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/clickhouse
+      containers:
         - name: clickhouse
           image: {{ include "laminar.image" .Values.images.clickhouse | quote }}
           imagePullPolicy: {{ .Values.images.clickhouse.pullPolicy }}
@@ -358,6 +359,30 @@ spec:
       imagePullSecrets:
 {{ toYaml . | nindent 8 }}
       {{- end }}
+      initContainers:
+        - name: wait-for-postgres
+          image: {{ include "laminar.image" .Values.images.postgres | quote }}
+          imagePullPolicy: {{ .Values.images.postgres.pullPolicy }}
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "laminar.secretName" . }}
+                  key: {{ .Values.auth.keys.databaseUrl }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              until pg_isready --dbname="$DATABASE_URL"; do
+                echo "waiting for Laminar Postgres..."
+                sleep 2
+              done
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            runAsUser: 999
+            runAsGroup: 999
+            runAsNonRoot: true
       containers:
         - name: frontend
           image: {{ include "laminar.image" .Values.images.frontend | quote }}
