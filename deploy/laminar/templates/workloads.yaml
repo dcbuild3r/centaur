@@ -31,6 +31,8 @@ spec:
               value: {{ .Values.postgres.database | quote }}
             - name: POSTGRES_USER
               value: {{ .Values.postgres.username | quote }}
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -83,6 +85,22 @@ spec:
 {{ toYaml . | nindent 8 }}
       {{- end }}
       containers:
+        - name: init-data-permissions
+          image: {{ include "laminar.image" .Values.images.clickhouse | quote }}
+          imagePullPolicy: {{ .Values.images.clickhouse.pullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - chown -R 101:101 /var/lib/clickhouse
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              add: [CHOWN, DAC_OVERRIDE, FOWNER]
+              drop: [ALL]
+            runAsUser: 0
+            runAsGroup: 0
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/clickhouse
         - name: clickhouse
           image: {{ include "laminar.image" .Values.images.clickhouse | quote }}
           imagePullPolicy: {{ .Values.images.clickhouse.pullPolicy }}
@@ -121,6 +139,9 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: [ALL]
+            runAsUser: 101
+            runAsGroup: 101
+            runAsNonRoot: true
             seccompProfile:
               type: RuntimeDefault
           resources:

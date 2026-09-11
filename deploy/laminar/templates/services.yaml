@@ -6,6 +6,7 @@ metadata:
 {{ include "laminar.componentLabels" (dict "root" . "component" "postgres") | nindent 4 }}
 spec:
   clusterIP: None
+  publishNotReadyAddresses: true
   selector:
 {{ include "laminar.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 4 }}
   ports:

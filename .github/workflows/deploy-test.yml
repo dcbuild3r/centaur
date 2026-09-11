@@ -399,6 +399,38 @@ jobs:
       - name: Build chart dependencies
         run: helm dependency build contrib/chart
 
+      - name: Recover interrupted Laminar Helm operation
+        run: |
+          set -euo pipefail
+          release_status="$(
+            helm status "$LAMINAR_RELEASE" \
+              --namespace "$LAMINAR_NAMESPACE" \
+              --output json \
+              2>/dev/null \
+              | jq --raw-output '.info.status // "not-installed"'
+          )" || release_status="not-installed"
+          if [[ "$release_status" == pending-* ]]; then
+            deployed_revision="$(
+              helm history "$LAMINAR_RELEASE" \
+                --namespace "$LAMINAR_NAMESPACE" \
+                --output json \
+                | jq --raw-output \
+                    '[.[] | select(.status == "deployed") | .revision | tonumber] | max // empty'
+            )"
+            if [[ -n "$deployed_revision" ]]; then
+              helm rollback "$LAMINAR_RELEASE" "$deployed_revision" \
+                --namespace "$LAMINAR_NAMESPACE" \
+                --wait \
+                --timeout 5m
+            else
+              helm uninstall "$LAMINAR_RELEASE" \
+                --namespace "$LAMINAR_NAMESPACE" \
+                --keep-history \
+                --wait \
+                --timeout 5m
+            fi
+          fi
+
       - name: Deploy Laminar
         run: |
           helm upgrade --install "$LAMINAR_RELEASE" deploy/laminar \
