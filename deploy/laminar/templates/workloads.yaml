@@ -383,6 +383,38 @@ spec:
             runAsUser: 999
             runAsGroup: 999
             runAsNonRoot: true
+        - name: wait-for-clickhouse
+          image: {{ include "laminar.image" .Values.images.clickhouse | quote }}
+          imagePullPolicy: {{ .Values.images.clickhouse.pullPolicy }}
+          env:
+            - name: CLICKHOUSE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "laminar.secretName" . }}
+                  key: {{ .Values.auth.keys.clickhouseUser }}
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "laminar.secretName" . }}
+                  key: {{ .Values.auth.keys.clickhousePassword }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              until clickhouse-client \
+                --host {{ include "laminar.componentName" (dict "root" . "component" "clickhouse") }} \
+                --user "$CLICKHOUSE_USER" \
+                --password "$CLICKHOUSE_PASSWORD" \
+                --query 'SELECT 1' >/dev/null; do
+                echo "waiting for Laminar ClickHouse..."
+                sleep 2
+              done
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            runAsUser: 101
+            runAsGroup: 101
+            runAsNonRoot: true
       containers:
         - name: frontend
           image: {{ include "laminar.image" .Values.images.frontend | quote }}
