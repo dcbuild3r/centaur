@@ -30,21 +30,21 @@ postgres:
   persistence:
     enabled: true
     size: 20Gi
-    storageClassName: ""
+    storageClassName: ebs-auto
   resources: {}
 
 clickhouse:
   persistence:
     enabled: true
     size: 50Gi
-    storageClassName: ""
+    storageClassName: ebs-auto
   resources: {}
 
 quickwit:
   persistence:
     enabled: true
     size: 20Gi
-    storageClassName: ""
+    storageClassName: ebs-auto
   resources: {}
 
 appServer:

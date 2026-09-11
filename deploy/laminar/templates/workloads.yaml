@@ -442,6 +442,8 @@ spec:
             capabilities:
               drop: [ALL]
             readOnlyRootFilesystem: false
+            runAsUser: 1001
+            runAsGroup: 1001
             runAsNonRoot: true
             seccompProfile:
               type: RuntimeDefault
