@@ -480,8 +480,11 @@ spec:
             httpGet:
               path: /
               port: http
-            initialDelaySeconds: 30
+            # The first boot applies the PostgreSQL and ClickHouse schemas and
+            # seeds model costs before Next.js serves requests.
+            initialDelaySeconds: 600
             periodSeconds: 20
+            failureThreshold: 6
             timeoutSeconds: 5
           securityContext:
             allowPrivilegeEscalation: false
