@@ -504,13 +504,13 @@ spec:
               containerPort: 3000
           readinessProbe:
             httpGet:
-              path: /
+              path: /lmnr
               port: http
             periodSeconds: 10
             timeoutSeconds: 5
           livenessProbe:
             httpGet:
-              path: /
+              path: /lmnr
               port: http
             # The first boot applies the PostgreSQL and ClickHouse schemas and
             # seeds model costs before Next.js serves requests.
