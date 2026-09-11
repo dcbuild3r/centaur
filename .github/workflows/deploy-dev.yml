@@ -489,8 +489,8 @@ jobs:
             --tools-dir /app/tools \
             principals grant workflow-meeting-automation --tool meeting_scheduler
 
-          # Revoke raw meeting roles from every principal before restoring the
-          # explicitly approved workflow and operator-DM scheduler grants below.
+          # Revoke raw meeting roles from every unapproved principal while
+          # preserving the operator-DM scheduler route across deployments.
           # Enumerating persisted state keeps unknown or future session
           # principals from retaining a path around the authenticated broker.
           principal_rows="$(kubectl --namespace "$HELM_NAMESPACE" exec \
@@ -513,7 +513,16 @@ jobs:
                 --tools-dir /app/tools \
                 principals revoke "$principal_oid" --tool meeting_ops
             fi
-            if grep -Fq 'tool-meeting-scheduler (' <<<"$candidate_state"; then
+            scheduler_preserved=false
+            case "$foreign_id:$principal_oid" in
+              slack-user-tl1hm8uuu-u03tnh0duqp:* \
+                | slack-user-u03tnh0duqp:* \
+                | *:prn_3hpCsrtk)
+                scheduler_preserved=true
+                ;;
+            esac
+            if [[ "$scheduler_preserved" != "true" ]] \
+              && grep -Fq 'tool-meeting-scheduler (' <<<"$candidate_state"; then
               kubectl --namespace "$HELM_NAMESPACE" exec \
                 deployment/centaur-centaur-api-rs -- \
                 /usr/local/bin/centaur-perms \
