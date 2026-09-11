@@ -1447,14 +1447,13 @@ fn build_iron_proxy_pod(
         ),
         spec: Some(PodSpec {
             automount_service_account_token: Some(false),
-            // OnFailure so a crashed/OOM-killed proxy container is restarted
-            // in place (same pod IP, Service keeps routing) instead of leaving
-            // the pod Failed and the sandbox with no egress for the rest of
-            // the session: nothing repairs a dead proxy until the next
-            // execute. A 512Mi limit + Never turned proxy OOM kills into 40+
-            // mid-turn "stream disconnected" failures (2026-08-27/28,
-            // prd-centaur-na).
-            restart_policy: Some("OnFailure".to_owned()),
+            // Always restart the proxy in place (same pod IP, Service keeps
+            // routing). In addition to crashes and OOM kills, kubelet
+            // liveness restarts terminate iron-proxy with SIGTERM; the proxy
+            // shuts down cleanly with exit code 0. OnFailure therefore leaves
+            // the pod Succeeded and strands the sandbox without egress until
+            // another execution notices and repairs it.
+            restart_policy: Some("Always".to_owned()),
             containers: vec![iron_proxy_container(iron_proxy, resolved, sync)],
             volumes: Some(iron_proxy_volumes(iron_proxy)),
             // Co-locate the per-sandbox proxy with its sandbox: it scales 1:1
@@ -2232,6 +2231,11 @@ fn health_probe(period_seconds: Option<i32>, failure_threshold: Option<i32>) -> 
         }),
         period_seconds,
         failure_threshold,
+        // The Kubernetes default is one second. Per-sandbox proxies share
+        // small nodes with their sandboxes, so brief CPU/network stalls can
+        // otherwise trigger a false liveness failure and interrupt an active
+        // model stream.
+        timeout_seconds: Some(5),
         ..Default::default()
     }
 }
@@ -2515,6 +2519,38 @@ mod tests {
         let pod = build_iron_proxy_pod(&id, &iron_proxy, &resolved(), &sync, no_scheduling());
 
         assert!(pod.spec.as_ref().unwrap().containers[0].resources.is_none());
+    }
+
+    #[test]
+    fn iron_proxy_pod_restarts_after_clean_liveness_termination() {
+        let id = SandboxId::new("asbx-test");
+        let iron_proxy = IronProxyConfig::new("proxy:test", "ca-cert", "ca-key");
+        let sync = ProxySyncEnv {
+            proxy_id: "iprx_test".to_owned(),
+            control_url: "http://console:3000".to_owned(),
+            token: "proxy-token".to_owned(),
+            config_hash: None,
+        };
+
+        let pod = build_iron_proxy_pod(&id, &iron_proxy, &resolved(), &sync, no_scheduling());
+        let spec = pod.spec.as_ref().unwrap();
+        let container = &spec.containers[0];
+
+        assert_eq!(spec.restart_policy.as_deref(), Some("Always"));
+        assert_eq!(
+            container
+                .liveness_probe
+                .as_ref()
+                .and_then(|probe| probe.timeout_seconds),
+            Some(5)
+        );
+        assert_eq!(
+            container
+                .readiness_probe
+                .as_ref()
+                .and_then(|probe| probe.timeout_seconds),
+            Some(5)
+        );
     }
 
     #[test]
