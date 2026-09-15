@@ -6,6 +6,7 @@ import {
   serializeMessage,
   type SlackMeetingSchedulingRunRequest
 } from './session-api'
+import { extractMessageOverrides } from './overrides'
 import type { JsonObject, SlackbotV2Options } from './types'
 
 export type PendingMeetingBooking = {
@@ -22,10 +23,42 @@ export type PendingMeetingBooking = {
 }
 
 const BOOKING_TTL_MS = 30 * 60 * 1000
-const EMAIL = /\b[A-Z0-9._%+-]+@world\.org\b/gi
+const EMAIL = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi
+
+function cleanMeetingRequest(text: string): string {
+  const withoutMention = text
+    .replace(/^\s*(?:<@[A-Z0-9]+(?:\|[^>]*)?>|@orbie)\s*/i, '')
+    .trim()
+  return extractMessageOverrides(withoutMention).cleanedText.trim()
+}
+
+export function isMeetingSchedulingIntent(text: string): boolean {
+  const clean = cleanMeetingRequest(text)
+  return /^(?:please\s+)?(?:schedule|book|create)\b/i.test(clean)
+    && /\bmeeting\b/i.test(clean)
+}
+
+export function meetingIntakeChecklist(requesterEmail: string, text = ''): string {
+  const visibility = cleanMeetingRequest(text).match(/\b(private|public)\b/i)?.[1]?.toLowerCase()
+  return [
+    `Requester resolved: ${requesterEmail.trim().toLowerCase()}`,
+    '',
+    'Please fill in the missing meeting details:',
+    '• Title:',
+    '• Attendees: Slack handles or mentions for World Foundation members; exact emails for external guests:',
+    '• Date and time, or date range:',
+    '• Time zone:',
+    '• Duration:',
+    visibility ? `• Visibility: ${visibility} (selected)` : '• Visibility: public or private?',
+    '• Auto-record: yes or no? Default: yes.',
+    '• Optional location or description:',
+    '',
+    'Nothing will be booked until you confirm the completed details.'
+  ].join('\n')
+}
 
 export function isMeetingConfirmation(text: string): boolean {
-  const clean = text.replace(/\s*Sent using @ChatGPT\s*$/i, '').trim()
+  const clean = cleanMeetingRequest(text).replace(/\s*Sent using @ChatGPT\s*$/i, '').trim()
   return /^(?:confirm|yes,?\s*(?:book|schedule)\s+it|book\s+it|schedule\s+it)[.!]?$/i.test(clean)
 }
 
@@ -35,7 +68,7 @@ export function parseFixedTimeMeetingRequest(
   now = new Date(),
   organizerCalendarKey = process.env.MEETING_MANUAL_ORGANIZER_CALENDAR_KEY ?? ''
 ): PendingMeetingBooking | null {
-  const clean = text.replace(/^\s*(?:<@[A-Z0-9]+(?:\|[^>]*)?>|@orbie)\s*/i, '').trim()
+  const clean = cleanMeetingRequest(text)
   if (!/^(?:schedule|book|create)\b/i.test(clean) || !/\bmeeting\b/i.test(clean)) return null
   const visibilityMatch = clean.match(/\b(private|public)\b/i)
   if (!visibilityMatch) return null
@@ -70,7 +103,7 @@ export function parseFixedTimeMeetingRequest(
   organizerCalendarKey = organizerCalendarKey.trim()
   if (!organizerCalendarKey) return null
   const attendeeEmails = Array.from(new Set([requesterEmail, ...emails]))
-  if (!attendeeEmails.every(email => /^[^@\s]+@world\.org$/i.test(email))) return null
+  if (!attendeeEmails.every(email => /^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$/i.test(email))) return null
   const visibility = visibilityMatch[1]!.toLowerCase() as 'private' | 'public'
   return {
     attendeeEmails,

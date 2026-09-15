@@ -90,7 +90,9 @@ import {
 } from './meeting-automation'
 import {
   dispatchConfirmedMeetingBooking,
+  isMeetingSchedulingIntent,
   isMeetingConfirmation,
+  meetingIntakeChecklist,
   meetingBookingPreview,
   parseFixedTimeMeetingRequest,
   type PendingMeetingBooking
@@ -798,7 +800,12 @@ async function handleMeetingSchedulingMessage(
   }
 
   const booking = parseFixedTimeMeetingRequest(message.text, requester.slackEmail)
-  if (!booking) return false
+  if (!booking) {
+    if (!isMeetingSchedulingIntent(message.text)) return false
+    await thread.post(meetingIntakeChecklist(requester.slackEmail, message.text))
+    traceLog(options, 'slackbotv2_meeting_booking_intake_requested', trace)
+    return true
+  }
   await state.set(
     pendingKey,
     booking,

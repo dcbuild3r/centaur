@@ -1,11 +1,25 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  isMeetingSchedulingIntent,
   isMeetingConfirmation,
+  meetingIntakeChecklist,
   meetingBookingPreview,
   parseFixedTimeMeetingRequest
 } from '../src/meeting-scheduling'
 
 describe('fixed-time meeting scheduling ingress', () => {
+  test('routes an incomplete booking request to a privacy-complete checklist', () => {
+    expect(isMeetingSchedulingIntent('Book a meeting')).toBeTrue()
+    expect(isMeetingSchedulingIntent('<@U0BAGKJJ57S|Orbie> --codex Book a meeting')).toBeTrue()
+    expect(isMeetingSchedulingIntent('summarize the meeting notes')).toBeFalse()
+
+    const checklist = meetingIntakeChecklist('dc.builder@world.org')
+    expect(checklist).toContain('Requester resolved: dc.builder@world.org')
+    expect(checklist).toContain('Visibility: public or private?')
+    expect(checklist).toContain('Auto-record: yes or no? Default: yes.')
+    expect(checklist).not.toContain('Your exact attendee email')
+  })
+
   test('parses the reported Orbie DM into an exact confirmation proposal', () => {
     const booking = parseFixedTimeMeetingRequest(
       'Schedule a public 10-minute meeting called "Orbie Zoom integration smoke test" for me today at 1:15 PM Prague time. Use my verified Google Calendar, create the Zoom room, and enable automatic cloud recording.',
@@ -39,6 +53,20 @@ describe('fixed-time meeting scheduling ingress', () => {
 
     expect(booking?.visibility).toBe('private')
     expect(meetingBookingPreview(booking!)).toContain('Visibility: Private')
+  })
+
+  test('accepts an exact external attendee email', () => {
+    const booking = parseFixedTimeMeetingRequest(
+      'Schedule a private 15-minute meeting called "Partner sync" for me and guest@example.com tomorrow at 3 PM Prague time.',
+      'dc.builder@world.org',
+      new Date('2099-08-23T10:00:00Z'),
+      'orbie'
+    )
+
+    expect(booking?.attendeeEmails).toEqual([
+      'dc.builder@world.org',
+      'guest@example.com'
+    ])
   })
 
   test('requires an explicit supported date, time, duration, title, and timezone', () => {

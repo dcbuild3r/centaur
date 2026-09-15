@@ -280,6 +280,7 @@ class MeetingOpsClient(Protocol):
         title: str,
         start: str,
         summary: str,
+        detailed_summary: str,
         transcript: str,
         meeting_id: str,
         meeting_url: str,
@@ -690,6 +691,7 @@ class MeetingOpsToolClient:
         title: str,
         start: str,
         summary: str,
+        detailed_summary: str,
         transcript: str,
         meeting_id: str,
         meeting_url: str,
@@ -716,22 +718,16 @@ class MeetingOpsToolClient:
             return {"page_id": existing_page_id, "marker": marker, "created": False}
         children = [
             _notion_paragraph(marker),
-            _notion_heading("Meeting Summary", 1),
-            _notion_heading("AI Summary", 2),
+            _notion_heading("Notes", 1),
+            _notion_heading("Summary", 2),
             *_notion_paragraph_chunks(summary or "Zoom summary was not available."),
-            _notion_heading("Summary Source", 2),
-            _notion_paragraph(summary_source or "zoom"),
-            _notion_heading("Key Decisions", 2),
-            _notion_paragraph(
-                "Review the AI summary and transcript for confirmed decisions."
-            ),
+            _notion_heading("Detailed Summary", 2),
+            *_notion_paragraph_chunks(detailed_summary or summary),
             _notion_heading("Action Items", 2),
             *_notion_paragraph_chunks(
                 action_items or "No action items were identified by Zoom."
             ),
-            _notion_heading("Open Questions", 2),
-            _notion_paragraph("Review required."),
-            _notion_heading("Annotated Transcript", 2),
+            _notion_heading("Transcript", 2),
             *_notion_paragraph_chunks(transcript or "Transcript was not available."),
         ]
         result = await self._ctx.call_tool(
@@ -775,6 +771,7 @@ class MeetingOpsToolClient:
         title: str,
         start: str,
         summary: str,
+        detailed_summary: str,
         transcript: str,
         meeting_id: str,
         meeting_url: str,
@@ -804,16 +801,16 @@ class MeetingOpsToolClient:
             }
         children = [
             _notion_paragraph(marker),
-            _notion_heading("Meeting Summary", 1),
-            _notion_heading("AI Summary", 2),
+            _notion_heading("Notes", 1),
+            _notion_heading("Summary", 2),
             *_notion_paragraph_chunks(summary or "Zoom summary was not available."),
-            _notion_heading("Summary Source", 2),
-            _notion_paragraph(summary_source or "zoom"),
+            _notion_heading("Detailed Summary", 2),
+            *_notion_paragraph_chunks(detailed_summary or summary),
             _notion_heading("Action Items", 2),
             *_notion_paragraph_chunks(
                 action_items or "No action items were identified by Zoom."
             ),
-            _notion_heading("Annotated Transcript", 2),
+            _notion_heading("Transcript", 2),
             *_notion_paragraph_chunks(transcript or "Transcript was not available."),
             _notion_heading("Meeting Details", 2),
             _notion_paragraph(f"Zoom meeting ID: {meeting_id}"),
@@ -1341,19 +1338,85 @@ def _slack_ids_for_emails(
     return list(dict.fromkeys(resolved)), unresolved
 
 
+def _normalize_transcript_speakers(
+    transcript: str,
+    attendee_emails: list[str],
+    slack_users: list[dict[str, Any]],
+) -> str:
+    """Avoid presenting the recorder account as the human speaker.
+
+    Zoom attributes audio to the participant whose microphone captured it. If
+    the Orbie-owned participant captured room audio, that label is not reliable.
+    A single verified human attendee can be named safely; with multiple humans,
+    preserve uncertainty instead of inventing diarization.
+    """
+
+    humans = list(
+        dict.fromkeys(
+            str(email).strip().lower()
+            for email in attendee_emails
+            if str(email).strip() and "orbie" not in str(email).strip().lower()
+        )
+    )
+    label = "Unattributed speaker"
+    if len(humans) == 1:
+        email = humans[0]
+        user = next(
+            (
+                item
+                for item in slack_users
+                if str(item.get("email") or "").strip().lower() == email
+                and not item.get("deleted")
+                and not item.get("is_deleted")
+                and not item.get("is_bot")
+            ),
+            {},
+        )
+        label = next(
+            (
+                str(user.get(field) or "").strip()
+                for field in ("display_name", "real_name", "name")
+                if str(user.get(field) or "").strip()
+            ),
+            email,
+        )
+    normalized = re.sub(
+        r"(?im)^(\s*)(?:<v\s+)?Orbie Automation(?:>)?\s*:\s*",
+        rf"\1{label}: ",
+        transcript,
+    )
+    return re.sub(
+        r"(?im)^(\s*)<v\s+Orbie Automation>\s*",
+        rf"\1{label}: ",
+        normalized,
+    )
+
+
+def _action_item_bullets(action_items: str) -> str:
+    items = []
+    for line in action_items.splitlines():
+        item = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line).strip()
+        if item:
+            items.append(f"• {item}")
+    return "\n".join(items) or "• No action items were identified."
+
+
 def _post_meeting_message(
-    title: str, summary: str, transcript: str, notion_url: str = ""
+    title: str,
+    summary: str,
+    detailed_summary: str,
+    action_items: str,
+    notion_url: str = "",
 ) -> str:
     parts = [
         f"📝 *{title} — meeting follow-up*",
-        summary or "Zoom summary was not available.",
+        "*What this meeting was about*\n"
+        + (summary or "A meeting summary was not available."),
+        "*Detailed summary*\n" + (detailed_summary or summary),
+        "*Action items*\n" + _action_item_bullets(action_items),
     ]
     if notion_url:
-        parts.append(f"Canonical notes and transcript: <{notion_url}|Notion>")
-    elif transcript:
-        excerpt = transcript[:2400]
-        suffix = "\n…" if len(transcript) > len(excerpt) else ""
-        parts.append(f"*Transcript*\n```{excerpt}{suffix}```")
+        parts.append(f"Notes and transcript in Notion: <{notion_url}|Open notes>")
     return "\n\n".join(parts)[:3900]
 
 
@@ -1374,7 +1437,7 @@ def _summary_agent_prompt(transcript: str) -> str:
     return f"""Summarize this meeting transcript.
 
 Return only one strict JSON object with exactly these keys:
-{{"summary":"concise factual summary","action_items":["action item"]}}
+{{"overview":"one-sentence description of what the meeting was about","detailed_summary":"detailed factual summary","action_items":["action item"]}}
 
 Do not use Markdown fences. Do not invent facts. If no action items are clear,
 return an empty action_items array.
@@ -1385,7 +1448,7 @@ Transcript:
 ---"""
 
 
-def _agent_summary(result: Any) -> tuple[str, str] | None:
+def _agent_summary(result: Any) -> tuple[str, str, str] | None:
     """Parse a strict JSON agent response while tolerating transport wrappers."""
 
     value = _tool_output(result)
@@ -1414,7 +1477,15 @@ def _agent_summary(result: Any) -> tuple[str, str] | None:
     for candidate in candidates:
         if not isinstance(candidate, dict):
             continue
-        summary = str(candidate.get("summary") or "").strip()
+        overview = str(
+            candidate.get("overview") or candidate.get("summary") or ""
+        ).strip()
+        detailed_summary = str(
+            candidate.get("detailed_summary")
+            or candidate.get("summary")
+            or candidate.get("overview")
+            or ""
+        ).strip()
         raw_items = candidate.get("action_items")
         if isinstance(raw_items, list):
             items = [str(item).strip() for item in raw_items if str(item).strip()]
@@ -1423,16 +1494,24 @@ def _agent_summary(result: Any) -> tuple[str, str] | None:
             action_items = raw_items.strip()
         else:
             action_items = ""
-        if summary:
-            return summary, action_items
+        if overview and detailed_summary:
+            return overview, detailed_summary, action_items
     return None
 
 
-def _transcript_fallback(transcript: str) -> tuple[str, str]:
-    excerpt = _bounded_transcript(transcript)
+def _summary_overview(summary: str) -> str:
+    first_paragraph = summary.strip().split("\n\n", 1)[0].strip()
+    match = re.match(r"^(.+?[.!?])(?:\s|$)", first_paragraph)
+    return (match.group(1) if match else first_paragraph)[:500]
+
+
+def _summary_fallback() -> tuple[str, str, str]:
+    """Keep raw transcript content out of participant-facing Slack messages."""
+
     return (
-        "Transcript-derived fallback (Zoom summary unavailable):\n" + excerpt,
-        "No action items could be safely extracted; review the transcript.",
+        "The meeting recording was processed, but a summary was not available.",
+        "A detailed summary could not be generated. The meeting transcript is available in the linked Notion notes.",
+        "",
     )
 
 
@@ -1698,7 +1777,14 @@ async def _process_post_meeting_candidate(
             "transcript_status": transcript_status or "pending",
         }
 
+    attendee_emails = list(
+        candidate.get("attendee_emails") or candidate.get("attendeeEmails") or []
+    )
+    transcript = _normalize_transcript_speakers(
+        transcript, attendee_emails, slack_users
+    )
     summary = str(artifacts.get("summary_text") or "").strip()
+    detailed_summary = summary
     action_items = str(artifacts.get("action_items") or "").strip()
     summary_source = "zoom"
     if not summary:
@@ -1739,10 +1825,12 @@ async def _process_post_meeting_candidate(
             )
             parsed = None
         if parsed:
-            summary, action_items = parsed
+            summary, detailed_summary, action_items = parsed
         else:
             summary_source = "transcript_fallback"
-            summary, action_items = _transcript_fallback(transcript)
+            summary, detailed_summary, action_items = _summary_fallback()
+    else:
+        summary = _summary_overview(summary)
 
     await _mark_post_meeting_processing(
         ctx,
@@ -1769,20 +1857,20 @@ async def _process_post_meeting_candidate(
         candidate.get("zoom_join_url") or candidate.get("zoomJoinUrl") or ""
     ).strip()
     notion_page_id = str((cadence or {}).get("_page_id") or "")
-    attendee_ids, unresolved = _slack_ids_for_emails(
-        list(candidate.get("attendee_emails") or candidate.get("attendeeEmails") or []),
-        slack_users,
-    )
+    attendee_ids, unresolved = _slack_ids_for_emails(attendee_emails, slack_users)
     candidate_metadata = candidate.get("metadata")
     candidate_metadata = (
         candidate_metadata if isinstance(candidate_metadata, dict) else {}
     )
-    visibility = str(
-        candidate.get("visibility")
-        or candidate_metadata.get("visibility")
-        or (cadence or {}).get("visibility")
-        or "public"
-    ).strip().lower()
+    visibility = (
+        str(
+            candidate.get("visibility")
+            or candidate_metadata.get("visibility")
+            or (cadence or {}).get("visibility")
+        )
+        .strip()
+        .lower()
+    )
     if visibility not in {"public", "private"}:
         raise ValueError("meeting visibility must be public or private")
     private_databases: dict[str, str] = {}
@@ -1793,6 +1881,7 @@ async def _process_post_meeting_candidate(
             "title": title,
             "start": start,
             "summary": summary,
+            "detailed_summary": detailed_summary,
             "transcript": transcript,
             "meeting_id": meeting_id,
             "meeting_url": meeting_url,
@@ -1800,7 +1889,10 @@ async def _process_post_meeting_candidate(
             "summary_source": summary_source,
         }
         if visibility == "private":
-            if unresolved or not attendee_ids:
+            unresolved_world_members = [
+                email for email in unresolved if email.endswith("@world.org")
+            ]
+            if unresolved_world_members or not attendee_ids:
                 raise ValueError("private meeting participants could not be resolved")
             private_databases = _private_notion_database_mapping(
                 "MEETING_PRIVATE_NOTION_DATABASES_JSON"
@@ -1816,7 +1908,9 @@ async def _process_post_meeting_candidate(
                 "MEETING_PRIVATE_NOTION_USER_IDS_JSON"
             )
             unmapped_notion_users = [
-                user_id for user_id in attendee_ids if user_id not in private_notion_users
+                user_id
+                for user_id in attendee_ids
+                if user_id not in private_notion_users
             ]
             if unmapped_notion_users:
                 raise ValueError(
@@ -1901,7 +1995,9 @@ async def _process_post_meeting_candidate(
                 ),
             )
     delivered_to: list[str] = []
-    message = _post_meeting_message(title, summary, transcript, notion_url)
+    message = _post_meeting_message(
+        title, summary, detailed_summary, action_items, notion_url
+    )
     await _mark_post_meeting_processing(
         ctx,
         client,
@@ -1960,10 +2056,7 @@ async def _process_post_meeting_candidate(
         or (cadence or {}).get("notifyChannel")
         or ""
     ).strip()
-    if (
-        notify_channel
-        and visibility == "public"
-    ):
+    if notify_channel and visibility == "public":
         try:
             await _mark_post_meeting_processing(
                 ctx,
@@ -2322,7 +2415,7 @@ def _resolve_booking_attendees(
     value: Any,
     slack_users: list[dict[str, Any]],
 ) -> list[str]:
-    """Resolve Auto-book participants to one active World Slack identity."""
+    """Verify World attendees in Slack and accept exact external emails."""
 
     if isinstance(value, (list, tuple)):
         raw = [str(item).strip().lower() for item in value if str(item).strip()]
@@ -2347,7 +2440,7 @@ def _resolve_booking_attendees(
             and not user.get("is_deleted")
             and not user.get("is_bot")
         ]
-        if len(matches) != 1:
+        if email.endswith("@world.org") and len(matches) != 1:
             raise ValueError(
                 f"Auto-book participant {email} must resolve to exactly one active World user"
             )
@@ -2840,9 +2933,10 @@ def _scheduling_args(inp: Input) -> tuple[str, dict[str, Any], str]:
             "time_zone",
             "attendee_emails",
             "confirmation_token",
+            "visibility",
         )
         args.setdefault("request_id", args["occurrence_key"])
-        visibility = str(args.get("visibility") or "public").strip().lower()
+        visibility = str(args["visibility"]).strip().lower()
         if visibility not in {"public", "private"}:
             raise ValueError("book_meeting visibility must be public or private")
         args["visibility"] = visibility

@@ -517,6 +517,7 @@ def test_manual_booking_keeps_orbie_calendar_and_zoom_ownership(monkeypatch):
                     "time_zone": "UTC",
                     "attendee_emails": ["person@world.org"],
                     "confirmation_token": "confirmed",
+                    "visibility": "public",
                 },
             ),
             FakeContext(),
@@ -590,6 +591,7 @@ def test_manual_booking_cannot_bypass_requester_ownership_with_cadence_id(monkey
                         "attendee_emails": ["person@world.org"],
                         "cadence_id": "managed-cadence",
                         "confirmation_token": "confirmed",
+                        "visibility": "public",
                     },
                 ),
                 FakeContext(),
@@ -1674,6 +1676,121 @@ def test_zoom_webhook_route_requires_zoom_signature_and_terminal_event_filter():
     }
 
 
+def test_manual_booking_requires_explicit_visibility():
+    with pytest.raises(ValueError, match="book_meeting requires visibility"):
+        meeting_automation._scheduling_args(
+            meeting_automation.Input(
+                scheduling_operation="book_meeting",
+                scheduling_args={
+                    "occurrence_key": "manual:test",
+                    "title": "Test",
+                    "start": "2099-01-01T10:00:00Z",
+                    "duration_minutes": 15,
+                    "time_zone": "UTC",
+                    "attendee_emails": ["dc.builder@world.org"],
+                    "confirmation_token": "slot-v1:test",
+                },
+            )
+        )
+
+
+def test_booking_attendees_verify_world_members_and_accept_external_email():
+    slack_users = [
+        {
+            "id": "U123",
+            "email": "dc.builder@world.org",
+            "team_id": meeting_automation.WORLD_SLACK_TEAM_ID,
+            "is_bot": False,
+        }
+    ]
+
+    assert meeting_automation._resolve_booking_attendees(
+        ["dc.builder@world.org", "guest@example.com"], slack_users
+    ) == ["dc.builder@world.org", "guest@example.com"]
+    with pytest.raises(ValueError, match="exactly one active World user"):
+        meeting_automation._resolve_booking_attendees(
+            ["missing@world.org"], slack_users
+        )
+
+
+def test_post_meeting_message_is_summary_only_with_itemized_actions_and_notion_link():
+    message = meeting_automation._post_meeting_message(
+        "Private test",
+        "A short planning meeting.",
+        "The team reviewed the launch plan and agreed on the next milestone.",
+        "Ship the fix Friday\nConfirm the owner",
+        "https://www.notion.so/private",
+    )
+
+    assert "What this meeting was about" in message
+    assert "Detailed summary" in message
+    assert "• Ship the fix Friday" in message
+    assert "• Confirm the owner" in message
+    assert "Notes and transcript in Notion" in message
+    assert "Canonical" not in message
+    assert "WEBVTT" not in message
+
+
+def test_recording_account_label_is_corrected_only_when_attribution_is_safe():
+    transcript = "WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nOrbie Automation: Hello."
+    single_user = [
+        {
+            "id": "U123",
+            "email": "dc.builder@world.org",
+            "display_name": "DC",
+            "team_id": "TL1HM8UUU",
+            "is_bot": False,
+        }
+    ]
+    assert "DC: Hello." in meeting_automation._normalize_transcript_speakers(
+        transcript, ["dc.builder@world.org"], single_user
+    )
+
+    multi_user = [
+        *single_user,
+        {
+            "id": "U456",
+            "email": "other@world.org",
+            "display_name": "Other",
+            "team_id": "TL1HM8UUU",
+            "is_bot": False,
+        },
+    ]
+    normalized = meeting_automation._normalize_transcript_speakers(
+        transcript,
+        ["dc.builder@world.org", "other@world.org"],
+        multi_user,
+    )
+    assert "Orbie Automation:" not in normalized
+    assert "Unattributed speaker: Hello." in normalized
+
+
+def test_post_meeting_delivery_fails_closed_without_visibility(monkeypatch):
+    client = ScheduledFakeClient(_published_row())
+    candidate = _post_candidate()
+    candidate.pop("visibility")
+    client.artifact_result = {
+        "transcript_status": "ready",
+        "transcript": "WEBVTT\nSpeaker: Hello.",
+        "summary_text": "A test meeting.",
+    }
+    monkeypatch.setattr(meeting_automation, "_client", lambda _ctx: client)
+
+    with pytest.raises(ValueError, match="visibility must be public or private"):
+        asyncio.run(
+            meeting_automation._process_post_meeting_candidate(
+                FakeContext(),
+                client,
+                candidate,
+                slack_users=client.slack_user_data,
+                cadence=None,
+                step_prefix="test:missing-visibility",
+            )
+        )
+    assert client.post_publications == []
+    assert client.private_post_publications == []
+
+
 def _post_candidate(meeting_id="123", occurrence_key="weekly-sync:2026-08-10"):
     return {
         "occurrence_key": occurrence_key,
@@ -1682,6 +1799,7 @@ def _post_candidate(meeting_id="123", occurrence_key="weekly-sync:2026-08-10"):
         "actual_start": "2026-08-10T08:00:00+00:00",
         "zoom_meeting_id": meeting_id,
         "attendee_emails": ["mandy.payne@world.org"],
+        "visibility": "public",
     }
 
 
@@ -1691,6 +1809,7 @@ def test_private_post_meeting_uses_restricted_canonical_parent_and_metadata_only
     client = ScheduledFakeClient(_published_row())
     candidate = {
         **_post_candidate(),
+        "visibility": "private",
         "metadata": {"visibility": "private"},
     }
     monkeypatch.setenv(
@@ -1746,6 +1865,7 @@ def test_single_participant_private_meeting_uses_personal_database_as_canonical(
     client = ScheduledFakeClient(_published_row())
     candidate = {
         **_post_candidate(),
+        "visibility": "private",
         "metadata": {"visibility": "private"},
     }
     monkeypatch.setenv(
@@ -1796,6 +1916,7 @@ def test_private_notion_publication_uses_only_the_purpose_bound_tool():
         "title": "Private test",
         "start": "2026-09-04T10:00:00+00:00",
         "summary": "Summary",
+        "detailed_summary": "Detailed summary",
         "transcript": "Transcript",
         "meeting_id": "123",
         "meeting_url": "https://zoom.us/j/123",
@@ -1828,17 +1949,14 @@ def test_private_notion_publication_uses_only_the_purpose_bound_tool():
     canonical_create = next(
         args
         for _tool, method, args in context.calls
-        if method == "create_page"
-        and args["parent"]["database_id"] == "canonical-db"
+        if method == "create_page" and args["parent"]["database_id"] == "canonical-db"
     )
     assert canonical_create["properties"] == {
         "Meeting": {"title": [{"text": {"content": "Private test"}}]},
         "Date": {"date": {"start": "2026-09-04T10:00:00+00:00"}},
         "Status": {"status": {"name": "Not started"}},
         "Participants": {"people": [{"id": "notion-user-id"}]},
-        "Occurrence Key": {
-            "rich_text": [{"text": {"content": "private:test"}}]
-        },
+        "Occurrence Key": {"rich_text": [{"text": {"content": "private:test"}}]},
         "Visibility": {"select": {"name": "private"}},
     }
 
@@ -1847,6 +1965,7 @@ def test_private_post_meeting_fails_closed_for_unregistered_participant(monkeypa
     client = ScheduledFakeClient(_published_row())
     candidate = {
         **_post_candidate(),
+        "visibility": "private",
         "metadata": {"visibility": "private"},
     }
     monkeypatch.setenv("MEETING_PRIVATE_NOTION_DATABASES_JSON", "{}")
@@ -2194,7 +2313,7 @@ def test_transcript_only_runs_durable_orbie_summary_and_publishes_fallback(monke
     assert processing["summary_source"] == "orbie"
 
 
-def test_agent_failure_publishes_transcript_derived_fallback(monkeypatch):
+def test_agent_failure_keeps_raw_transcript_out_of_slack_fallback(monkeypatch):
     client = ScheduledFakeClient(_published_row())
     client.post_candidates_by_zoom_id["123"] = _post_candidate("123")
     client.artifact_result = {
@@ -2222,7 +2341,12 @@ def test_agent_failure_publishes_transcript_derived_fallback(monkeypatch):
     )
 
     assert result["status"] == "delivered"
-    assert "Transcript-derived fallback" in client.post_publications[0][1]["summary"]
+    publication = client.post_publications[0][1]
+    assert publication["summary"] == (
+        "The meeting recording was processed, but a summary was not available."
+    )
+    assert "Confirmed the launch date" not in client.sent[0][2]
+    assert "WEBVTT" not in client.sent[0][2]
     assert any(
         operation == "record_post_meeting_processing"
         and args.get("summary_source") == "transcript_fallback"
