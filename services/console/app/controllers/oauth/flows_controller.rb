@@ -160,8 +160,15 @@ module Oauth
         code: code.to_s,
         redirect_uri: oauth_callback_redirect_uri(@app.slug),
         code_verifier: code_verifier.to_s,
-        require_refresh_token: provider_requires_refresh_token?
+        require_refresh_token: provider_requires_refresh_token?,
+        client_auth_method: provider_token_endpoint_auth_method
       )
+    end
+
+    def provider_token_endpoint_auth_method
+      return @provider.token_endpoint_auth_method if @provider.respond_to?(:token_endpoint_auth_method)
+
+      "client_secret_post"
     end
 
     # Upserts one credential per (app, provider account). A new record gets its
