@@ -29,7 +29,8 @@ Add only the scopes required by your implementation. A scheduler that creates
 meetings and later reads recordings commonly needs the user-level equivalents
 of:
 
-- `user:read` for Centaur's `/users/me` identity lookup;
+- `user:read:user` for Centaur's `/users/me` identity lookup (Centaur always
+  requests this required scope);
 - `meeting:write` for `POST /users/me/meetings`;
 - `recording:read` if the workflow retrieves cloud-recording metadata or
   transcripts.

@@ -32,6 +32,8 @@ module Oauth
         assert_equal "https://zoom.us/oauth/authorize", strategy.authorization_endpoint
         assert_equal "https://zoom.us/oauth/token", strategy.token_endpoint
         assert_equal [ "api.zoom.us" ], strategy.api_hosts
+        assert_equal %w[user:read:user], strategy.required_scopes
+        assert_equal "ZoomUser_ID", strategy.foreign_id_subject("ZoomUser_ID")
         assert_equal "client_secret_basic", strategy.token_endpoint_auth_method
         assert_equal %w[meeting:write recording:read], strategy.parse_granted_scopes("meeting:write recording:read")
         assert_equal [], strategy.refresh_scopes(%w[meeting:write])

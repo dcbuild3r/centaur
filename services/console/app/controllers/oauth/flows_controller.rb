@@ -185,7 +185,7 @@ module Oauth
         # overwritten: the first linked user keeps the credential.
         credential.created_by ||= current_user
         if credential.new_record?
-          credential.foreign_id = "#{@app.provider}-#{@app.slug}-#{identity[:subject].downcase}"
+          credential.foreign_id = "#{@app.provider}-#{@app.slug}-#{foreign_id_subject(identity[:subject])}"
           credential.name = "#{@provider.display_name} – #{identity_display_name(identity)}"
           credential.token_endpoint = @provider.token_endpoint
           credential.external_user_key = SecureRandom.urlsafe_base64(16)
@@ -245,6 +245,12 @@ module Oauth
       return labels if identity[:team_id].blank?
 
       labels.merge("slack_team_id" => identity[:team_id])
+    end
+
+    def foreign_id_subject(subject)
+      return @provider.foreign_id_subject(subject) if @provider.respond_to?(:foreign_id_subject)
+
+      subject.to_s.downcase
     end
 
     def identity_display_name(identity)

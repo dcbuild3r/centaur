@@ -74,7 +74,7 @@ acme_zoom:
   provider: zoom
   client_id: acme-zoom-client-id
   allowed_scopes:
-    - user:read
+    - user:read:user
     - meeting:write
     - recording:read
   enabled: true

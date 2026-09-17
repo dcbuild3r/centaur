@@ -11,6 +11,7 @@ module Oauth
       TOKEN_ENDPOINT = "https://zoom.us/oauth/token"
       SELF_ENDPOINT = "https://api.zoom.us/v2/users/me"
       IDENTITY_SCOPES = [].freeze
+      REQUIRED_SCOPES = %w[user:read:user].freeze
       API_HOSTS = %w[api.zoom.us].freeze
 
       def key = KEY
@@ -18,6 +19,7 @@ module Oauth
       def authorization_endpoint = AUTHORIZATION_ENDPOINT
       def token_endpoint = TOKEN_ENDPOINT
       def identity_scopes = IDENTITY_SCOPES
+      def required_scopes = REQUIRED_SCOPES
       def api_hosts = API_HOSTS
       def authorization_scope_param = "scope"
       def scope_separator = " "
@@ -27,6 +29,7 @@ module Oauth
 
       def parse_granted_scopes(scope) = scope.to_s.split
       def refresh_scopes(_scopes) = []
+      def foreign_id_subject(subject) = subject.to_s
 
       def identity_from(result, client_id:, http_client: HttpClient.new)
         response = identity_response(provider: display_name) do

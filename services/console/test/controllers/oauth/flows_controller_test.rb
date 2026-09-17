@@ -139,7 +139,7 @@ module Oauth
       }.merge(overrides).to_json
     end
 
-    def zoom_token_body(scope: "user:read meeting:write recording:read", **overrides)
+    def zoom_token_body(scope: "user:read:user meeting:write recording:read", **overrides)
       {
         access_token: "zoom-access-token",
         refresh_token: "zoom-refresh-token",
@@ -264,8 +264,8 @@ module Oauth
       assert_includes scopes, "write"
     end
 
-    test "start redirects to Zoom with space separated scopes" do
-      get oauth_start_url(slug: "zoom")
+    test "start redirects to Zoom with its required identity scope" do
+      get oauth_start_url(slug: "zoom"), params: { scopes: "meeting:write" }
       assert_response :redirect
       uri = URI.parse(response.location)
       assert_equal "zoom.us", uri.host
@@ -275,7 +275,7 @@ module Oauth
       assert_equal "http://www.example.com/oauth/zoom/callback", q["redirect_uri"]
       assert_equal "code", q["response_type"]
       assert_equal "S256", q["code_challenge_method"]
-      assert_equal %w[user:read meeting:write recording:read], q["scope"].split
+      assert_equal %w[meeting:write user:read:user], q["scope"].split
     end
 
     test "start redirects signed-out users to login" do
@@ -550,7 +550,7 @@ module Oauth
       end
       stub_identity(
         body: {
-          id: "zoom-user-id",
+          id: "ZoomUser_ID",
           email: "scheduler@example.com",
           display_name: "Scheduler"
         }.to_json
@@ -567,12 +567,12 @@ module Oauth
       assert_equal "zoom connected as scheduler@example.com.", flash[:notice]
 
       app = oauth_apps(:acme_zoom)
-      cred = BrokerCredential.find_by!(oauth_app: app, provider_subject: "zoom-user-id")
-      assert_equal "zoom-zoom-zoom-user-id", cred.foreign_id
+      cred = BrokerCredential.find_by!(oauth_app: app, provider_subject: "ZoomUser_ID")
+      assert_equal "zoom-zoom-ZoomUser_ID", cred.foreign_id
       assert_equal "Zoom – Scheduler", cred.name
       assert_equal Oauth::Providers::Zoom::TOKEN_ENDPOINT, cred.token_endpoint
       assert_equal "scheduler@example.com", cred.provider_email
-      assert_equal %w[user:read meeting:write recording:read], cred.scopes
+      assert_equal %w[user:read:user meeting:write recording:read], cred.scopes
       assert_equal "zoom-access-token", cred.access_token
       assert_equal "zoom-refresh-token", cred.refresh_token
       assert cred.next_attempt_at.present?
